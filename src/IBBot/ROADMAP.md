@@ -20,7 +20,7 @@ src/
 
     adapter/
       __init__.py
-      app.py
+      ib_gateway.py
       ibkr_client.py
       ibkr_wrapper.py
       event_bus.py
@@ -29,18 +29,17 @@ src/
       __init__.py
       order_service.py
       portfolio_service.py
-      marketdata_service.py # not necessary for now
 
     models/
       __init__.py
       order.py
-      portfolio.py
-      marketdata.py # not necessary for now
+      contract.py
+      order_models.py
+      portfolio_models.py
 
     api/
       __init__.py
       routes_orders.py
       routes_portfolio.py
-      routes_marketdata.py # not necessary for now
       server.py
 ```

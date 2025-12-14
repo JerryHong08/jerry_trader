@@ -1,189 +1,137 @@
 import time
+from typing import Dict, List
 
 import pandas as pd
 from ibapi.client import EClient
+from ibapi.order_cancel import OrderCancel
 
-from utils import DEFAULT_MARKET_DATA_ID, TRADE_BAR_PROPERTIES, Tick
+from utils.logger import setup_logger
+
+logger = setup_logger(__name__, log_to_file=True)
 
 
-# Imports a base class from the IB API and impletments a custom class we'll use to build our traing app:
 class IBClient(EClient):
     def __init__(self, wrapper):
         EClient.__init__(self, wrapper)
         self.market_data = {}
 
-    def cancel_all_orders(self):
-        self.reqGlobalCancel()
-
-    def cancel_order_by_id(self, order_id):
-        self.cancelOrder(orderId=order_id, manualCancelOrderTime="")
-
-    def update_order(self, contract, order, order_id):
-        self.cancel_order_by_id(order_id)
-        return self.send_order(contract, order)
-
-    def send_order(self, contract, order):
+    def place_order(self, contract, order):
+        """
+        Place an order with IBKR
+        Returns: order_id
+        """
         order_id = self.wrapper.nextValidOrderId
         self.placeOrder(orderId=order_id, contract=contract, order=order)
         self.reqIds(-1)
         return order_id
 
-    # --------- Chapter12 Sending orders based on portfolio targets ---------
+    def cancel_order(self, order_id):
+        """Cancel an order by order_id"""
 
-    # Add the method that computes the quantity and places an order for a fixed amount of money:
-    def order_value(self, contract, order_type, value, **kwargs):
-        quantity = self._calculate_order_value_quantity(contract, value)
-        order = order_type(quantity=quantity, **kwargs)
-        return self.send_order(contract, order)
+        # Create OrderCancel object with default values
+        order_cancel = OrderCancel()
+        order_cancel.manualOrderCancelTime = ""
 
-    # Add the method to order the specified asset according to the percent of the current portfolio value:
-    def order_percent(self, contract, order_type, percent, **kwargs):
-        quantity = self._calculate_order_percent_quantity(contract, percent)
-        order = order_type(quantity=quantity, **kwargs)
-        return self.send_order(contract, order)
+        self.cancelOrder(orderId=order_id, orderCancel=order_cancel)
+        return True
 
-    def _calculate_order_percent_quantity(self, contract, percent):
-        net_liquidation_value = self.get_account_values(key="NetLiquidation")[0]
-        value = net_liquidation_value * percent
-        return self._calculate_order_value_quantity(contract, value)
+    def cancel_all_orders(self):
+        """Cancel all open orders"""
+        self.reqGlobalCancel()
+        return True
 
-    # update orders. If the positions doesn't exist, the code sends a new order. If the position
-    # exists, the code sends an order for the difference between the target value and the current position value.
-    def order_target_value(self, contract, order_type, target, **kwargs):
-        target_quantity = self._calculate_order_value_quantity(contract, target)
-        quantity = self._calculate_order_target_quantity(contract, target_quantity)
-        order = order_type(
-            action="SELL" if quantity < 0 else "BUY", quantity=abs(quantity), **kwargs
-        )
-        return self.send_order(contract, order)
+    def get_open_orders(self):
+        """
+        Get all open orders (ACTIVE ORDERS ONLY)
 
-    # Add the method to place an order to adjust a position to the target number of contracts:
-    def order_target_quantity(self, contract, order_type, target, **kwargs):
-        quantity = self._calculate_order_target_quantity(contract, target)
-        order = order_type(
-            action="SELL" if quantity < 0 else "BUY", quantity=abs(quantity), **kwargs
-        )
-        return self.send_order(contract, order)
+        ⚠️  LIMITATION: IB Gateway only returns ACTIVE orders (PreSubmitted, Submitted, PendingCancel).
+        Filled, cancelled, or rejected orders are NOT included.
 
-    # Add the helper method that loops through the positions and computes the target number of contracts to order:
-    def _calculate_order_target_quantity(self, contract, target):
-        positions = self.get_positions()
-        if contract.symbol in positions.keys():
-            current_position = positions[contract.symbol]["position"]
-            target -= current_position
-        return int(target)
+        For complete order history, you need to:
+        1. Persist orders to your own database as they occur
+        2. Use IB's Flex Queries API for historical data
+        3. Use reqExecutions() for recent fills (last 24 hours)
 
-    # the helper method
-    def _calculate_order_value_quantity(self, contract, value):
-        last_price = self.get_market_data(
-            request_id=DEFAULT_MARKET_DATA_ID, contract=contract, tick_type=4
-        )
-        multiplier = contract.multiplier if contract.multiplier != "" else 1
-        return int(value / (last_price * multiplier))
+        Returns: Dict[order_id, order_data]
+        """
+        self.reqOpenOrders()
+        time.sleep(1)
+        # Filter orders with status that indicates they are still open
+        open_statuses = ["PreSubmitted", "Submitted", "PendingSubmit", "PendingCancel"]
+        return {
+            oid: data
+            for oid, data in self.wrapper.orders.items()
+            if data.get("status") in open_statuses
+        }
 
-    # same as the order_target_quantity but based on percent
-    def order_target_percent(self, contract, order_type, target, **kwargs):
-        quantity = self._calculate_order_target_percent_quantity(contract, target)
-        order = order_type(
-            action="SELL" if quantity < 0 else "BUY", quantity=abs(quantity), **kwargs
-        )
-        return self.send_order(contract, order)
+    def get_all_orders(self):
+        """
+        Get all orders tracked in current session
 
-    def _calculate_order_target_percent_quantity(self, contract, target):
-        target_quantity = self._calculate_order_percent_quantity(contract, target)
-        return self._calculate_order_target_quantity(contract, target_quantity)
+        ⚠️  NOTE: This returns orders from the current session only.
+        IB Gateway does not provide historical order data via API.
 
-    # --------------------------------------------------------------
+        Returns: Dict[order_id, order_data]
+        """
+        return self.wrapper.orders.copy()
 
-    # historical data
-    def get_historical_data(self, request_id, contract, duration, bar_size):
-        self.reqHistoricalData(
-            reqId=request_id,
-            contract=contract,
-            endDateTime="",
-            durationStr=duration,
-            barSizeSetting=bar_size,
-            whatToShow="MIDPOINT",
-            useRTH=1,
-            formatDate=1,
-            keepUpToDate=False,
-            chartOptions=[],
-        )
-        time.sleep(5)
-        bar_sizes = ["day", "D", "week", "W", "month"]
-        if any(x in bar_size for x in bar_sizes):
-            fmt = "%Y%m%d"
-        else:
-            fmt = "%Y%m%d %H:%M:%S %Z"
+    def get_recent_executions(self, request_id=9999):
+        """
+        Get execution history from the last 24 hours
 
-        data = self.historical_data[request_id]
-        df = pd.DataFrame(data, columns=TRADE_BAR_PROPERTIES)
-        df.set_index(pd.to_datetime(df.time, format=fmt), inplace=True)
-        df.drop("time", axis=1, inplace=True)
-        df["symbol"] = contract.symbol
-        df.request_id = request_id
-        return df
+        This retrieves FILLS (executions), not order details.
+        Use this to see what orders were executed recently.
 
-    def get_historical_data_for_many(
-        self, request_id, contracts, duration, bar_size, col_to_use="close"
-    ):
-        dfs = []
-        for contract in contracts:
-            data = self.get_historical_data(request_id, contract, duration, bar_size)
-            dfs.append(data)
-            request_id += 1
-        return (
-            pd.concat(dfs)
-            .reset_index()
-            .pivot(index="time", columns="symbol", values=col_to_use)
-        )
+        ⚠️  LIMITATION: Only covers last 24 hours
 
-    def get_market_data(self, request_id, contract, tick_type=4):
-        self.reqMktData(
-            reqId=request_id,
-            contract=contract,
-            genericTickList="",
-            snapshot=True,
-            regulatorySnapshot=False,
-            mktDataOptions=[],
-        )
-        time.sleep(5)
-        self.cancelMktData(reqId=request_id)
-        return self.market_data[request_id].get(tick_type)
+        Args:
+            request_id: Unique request identifier
 
-    def tickPrice(self, request_id, tick_type, price, attrib):
-        if request_id not in self.market_data.keys():
-            self.market_data[request_id] = {}
-            self.market_data[request_id][tick_type] = float(price)
+        Returns: Dict[execution_id, execution_data]
 
-    def get_streaming_data(self, request_id, contract):
-        self.reqTickByTickData(
-            reqId=request_id,
-            contract=contract,
-            tickType="BidAsk",
-            numberOfTicks=0,
-            ignoreSize=True,
-        )
-        time.sleep(10)
-        while True:
-            if self.stream_event.is_set():
-                yield Tick(*self.streaming_data[request_id])
-                self.stream_event.clear()
+        Example execution data:
+        {
+            'execId': 'xxx',
+            'time': '20231211  13:45:23',
+            'symbol': 'AAPL',
+            'shares': 100,
+            'price': 183.50,
+            'side': 'BOT',  # BOT=buy, SLD=sell
+            'orderId': 3,
+        }
+        """
+        from ibapi.execution import ExecutionFilter
 
-    def stop_streaming_data(self, request_id):
-        self.cancelTickByTickData(reqId=request_id)
+        # Empty filter = get all executions
+        exec_filter = ExecutionFilter()
 
-    def get_account_values(self, key=None):
-        self.reqAccountUpdates(True, self.account)
+        self.reqExecutions(request_id, exec_filter)
         time.sleep(2)
-        if key:
-            return self.account_values[key]
-        return self.account_values
+
+        # Executions are stored in wrapper
+        return getattr(self.wrapper, "executions", {})
 
     def get_positions(self):
+        """
+        Get current positions
+        Returns: Dict[symbol, position_data]
+        """
         self.reqAccountUpdates(True, self.account)
         time.sleep(2)
-        return self.positions
+        self.reqAccountUpdates(False, self.account)
+        return self.wrapper.positions.copy()
+
+    def get_account_summary(self):
+        """
+        Get account summary information
+        Returns: Dict with account values
+        """
+        self.reqAccountUpdates(True, self.account)
+        time.sleep(2)
+        self.reqAccountUpdates(False, self.account)
+        return self.wrapper.account_values.copy()
+
+    # ========== Legacy Methods (kept for backward compatibility) ==========
 
     def get_pnl(self, request_id):
         self.reqPnL(request_id, self.account, "")
@@ -205,9 +153,3 @@ class IBClient(EClient):
             returns.loc[snapshot["date"]] = snapshot["pnl"]
             if len(returns) > 1:
                 self.portfolio_returns = returns.pct_change().dropna()
-
-    def resolve_contract(self, contract, request_id=DEFAULT_MARKET_DATA_ID):
-        self.reqContractDetails(reqId=request_id, contract=contract)
-        time.sleep(2)
-        self.contractDetailsEnd(reqId=request_id)
-        return self.resolved_contract

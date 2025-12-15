@@ -1,11 +1,24 @@
+"""Order construction helpers.
+
+Keep "data models" (OrderRequest / OrderState) in `IBBot.models.order_models`.
+This module focuses on converting an OrderRequest into an IBKR-native
+`ibapi.order.Order`.
+"""
+
+from __future__ import annotations
+
 from ibapi.order import Order
+
+from IBBot.models.order_models import OrderRequest
 
 BUY = "BUY"
 SELL = "SELL"
 
 
-def market(action, quantity, OutsideRth=False, tif="DAY"):
-    """Create a market order"""
+def market(
+    action: str, quantity: int, OutsideRth: bool = False, tif: str = "DAY"
+) -> Order:
+    """Create an IBKR market order."""
     order = Order()
     order.action = action
     order.orderType = "MKT"
@@ -15,8 +28,14 @@ def market(action, quantity, OutsideRth=False, tif="DAY"):
     return order
 
 
-def limit(action, quantity, limit_price, OutsideRth=False, tif="DAY"):
-    """Create a limit order"""
+def limit(
+    action: str,
+    quantity: int,
+    limit_price: float,
+    OutsideRth: bool = False,
+    tif: str = "DAY",
+) -> Order:
+    """Create an IBKR limit order."""
     order = Order()
     order.action = action
     order.orderType = "LMT"
@@ -27,8 +46,14 @@ def limit(action, quantity, limit_price, OutsideRth=False, tif="DAY"):
     return order
 
 
-def stop(action, quantity, stop_price, OutsideRth=False, tif="DAY"):
-    """Create a stop order"""
+def stop(
+    action: str,
+    quantity: int,
+    stop_price: float,
+    OutsideRth: bool = False,
+    tif: str = "DAY",
+) -> Order:
+    """Create an IBKR stop order."""
     order = Order()
     order.action = action
     order.orderType = "STP"
@@ -39,8 +64,15 @@ def stop(action, quantity, stop_price, OutsideRth=False, tif="DAY"):
     return order
 
 
-def stop_limit(action, quantity, stop_price, limit_price, OutsideRth=False, tif="DAY"):
-    """Create a stop-limit order"""
+def stop_limit(
+    action: str,
+    quantity: int,
+    stop_price: float,
+    limit_price: float,
+    OutsideRth: bool = False,
+    tif: str = "DAY",
+) -> Order:
+    """Create an IBKR stop-limit order."""
     order = Order()
     order.action = action
     order.orderType = "STP LMT"
@@ -50,3 +82,33 @@ def stop_limit(action, quantity, stop_price, limit_price, OutsideRth=False, tif=
     order.outsideRth = OutsideRth
     order.tif = tif
     return order
+
+
+def from_request(req: OrderRequest) -> Order:
+    """Convert an OrderRequest into an IBKR Order."""
+    # Ensure common validations (action/qty/limit_price etc.) are always applied
+    req.validate()
+    if req.order_type == "MKT":
+        return market(req.action, req.quantity, req.OutsideRth, req.tif)
+    if req.order_type == "LMT":
+        if req.limit_price is None:
+            raise ValueError("Limit price required for limit orders")
+        return limit(req.action, req.quantity, req.limit_price, req.OutsideRth, req.tif)
+    if req.order_type == "STP":
+        raise ValueError("Unsupported order type: STP (not yet wired to OrderRequest)")
+    if req.order_type in {"STP LMT", "STP_LMT"}:
+        raise ValueError(
+            "Unsupported order type: STP LMT (not yet wired to OrderRequest)"
+        )
+    raise ValueError(f"Unsupported order type: {req.order_type}")
+
+
+__all__ = [
+    "BUY",
+    "SELL",
+    "market",
+    "limit",
+    "stop",
+    "stop_limit",
+    "from_request",
+]

@@ -40,6 +40,21 @@ class IBClient(EClient):
         self.reqGlobalCancel()
         return True
 
+    def request_completed_orders(self, api_only: bool = True) -> bool:
+        """Request completed orders from IBKR (best-effort).
+
+        IB will respond via wrapper callbacks:
+        - completedOrder(...)
+        - completedOrdersEnd()
+        """
+        try:
+            # EClient method: reqCompletedOrders(apiOnly)
+            self.reqCompletedOrders(api_only)
+            return True
+        except Exception as e:
+            logger.error(f"✗ Failed to request completed orders: {e}")
+            return False
+
     def get_open_orders(self):
         """
         Get all open orders (ACTIVE ORDERS ONLY)

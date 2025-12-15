@@ -1,0 +1,40 @@
+# Alembic migrations for jerryib_trade
+
+Quick start:
+
+1) Set DATABASE_URL
+   export DATABASE_URL='postgresql+psycopg://user:pass@localhost:5432/jerryib_trade'
+
+2) Upgrade to latest
+    poetry run alembic upgrade head
+
+3) Verify with psql
+
+    Note: psql does NOT understand the SQLAlchemy '+psycopg' suffix.
+    You can quickly transform the URL:
+
+       export PSQL_URL="${DATABASE_URL/+psycopg/}"
+       psql "$PSQL_URL" -c '\\dt'
+
+Common commands:
+
+- Show current revision:
+   poetry run alembic current
+
+- Show history:
+   poetry run alembic history --verbose
+
+- Create a new revision (autogenerate from ORM metadata):
+   poetry run alembic revision -m "your message" --autogenerate
+
+- Downgrade one step (use with care):
+   poetry run alembic downgrade -1
+
+Notes:
+
+- The application can still run without DB enabled.
+- For existing databases created via Base.metadata.create_all(), run the bootstrap migration to add missing columns/constraints.
+
+Tips:
+
+- Alembic will use DATABASE_URL if set; otherwise it falls back to alembic.ini.

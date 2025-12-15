@@ -87,7 +87,7 @@ class PortfolioService:
         Returns:
             AccountSummary: 账户摘要信息
         """
-        logger.info(f"get_account - {self.account}")
+        # logger.debug(f"get_account - {self.account}")
         return self.account
 
     def has_position(self, symbol: str) -> bool:
@@ -111,7 +111,11 @@ class PortfolioService:
         """
         total = 0.0
         for position in self.positions.values():
-            total += float(position.quantity) * float(position.average_cost)
+            # Prefer IB-provided market_value when available; fall back to qty * avg_cost.
+            mv = float(getattr(position, "market_value", 0.0) or 0.0)
+            if mv == 0.0:
+                mv = float(position.quantity) * float(position.average_cost)
+            total += mv
         return total
 
     # ===== 事件回调 =====
@@ -129,11 +133,19 @@ class PortfolioService:
         symbol = event.symbol
         quantity = event.position
         average_cost = event.average_cost
+        market_price = getattr(event, "market_price", 0.0)
+        market_value = getattr(event, "market_value", 0.0)
+        unrealized_pnl = getattr(event, "unrealized_pnl", 0.0)
+        realized_pnl = getattr(event, "realized_pnl", 0.0)
 
         # 确保转换为 float
         try:
             quantity = float(quantity)
             average_cost = float(average_cost)
+            market_price = float(market_price)
+            market_value = float(market_value)
+            unrealized_pnl = float(unrealized_pnl)
+            realized_pnl = float(realized_pnl)
         except (ValueError, TypeError):
             return
 
@@ -143,6 +155,10 @@ class PortfolioService:
                 symbol=symbol,
                 quantity=quantity,
                 average_cost=average_cost,
+                market_price=market_price,
+                market_value=market_value,
+                unrealized_pnl=unrealized_pnl,
+                realized_pnl=realized_pnl,
             )
             logger.info(
                 f"_on_position - 📊 Position updated: {symbol} - {quantity} @ ${average_cost:.2f}"
@@ -163,7 +179,7 @@ class PortfolioService:
                 - value: 字段值（字符串格式）
                 - currency: 货币
         """
-        logger.debug(f"received event: {event}")
+        # logger.debug(f"received event: {event}")
         tag = event.tag
         value = event.value  # 保持字符串格式
 

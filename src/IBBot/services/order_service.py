@@ -1,4 +1,3 @@
-1
 """
 Order Service - 订单管理服务
 处理订单的生命周期：下单 -> 追踪 -> 更新 -> 完成
@@ -7,14 +6,11 @@ Order Service - 订单管理服务
 import logging
 from typing import Dict, List
 
-from ibapi.contract import Contract
-from ibapi.order import Order
-
 from IBBot.adapter.event_bus import get_event_bus
 from IBBot.adapter.ib_gateway import IBGateway
-from IBBot.models.contract import stock
+from IBBot.models.contract import from_request as contract_from_request
 from IBBot.models.event_models import OrderStatusEvent
-from IBBot.models.order import limit, market
+from IBBot.models.order import from_request as order_from_request
 from IBBot.models.order_models import OrderRequest, OrderState
 from utils.logger import setup_logger
 
@@ -40,7 +36,6 @@ class OrderService:
         """
         self.ib = ib
         self.orders: Dict[int, OrderState] = {}
-        self.current_order_id = 1
         self._syncing_startup_orders = True  # flag for if it' the first logging time.
         self.event_bus = get_event_bus()
 
@@ -64,39 +59,26 @@ class OrderService:
             req = OrderRequest(symbol="AAPL", action="BUY", quantity=100)
             order_id = order_service.place_order(req)
         """
-        # 验证订单参数
-        req.validate()
-
-        # 转换为 IBKR Contract
-        contract = self._create_contract(req)
-
-        # 转换为 IBKR Order
-        order = self._create_order(req)
+        # 转换为 IBKR Contract / Order（集中在 models 层）
+        contract = contract_from_request(req)
+        order = order_from_request(req)
 
         # 获取订单 ID
         order_id = self.ib.next_order_id
 
         # 创建订单状态记录
-        order_state = OrderState(
-            order_id=order_id,
-            status="PreSubmitted",
-            filled=0,
-            remaining=req.quantity,
-            avg_fill_price=0.0,
-            request=req,
-        )
-        self.orders[order_id] = order_state
+        self.orders[order_id] = OrderState.initial(order_id, req)
 
         # 发送订单到 IB
-        self.ib.place_order(contract, order)
+        self.ib.place_order(contract, order, reason=req.reason)
 
         logger.info(
-            f"place_order - ✅ Order placed: {order_id} - {req.action} {req.quantity} {req.symbol}"
+            f"place_order - ✅ Order placed: {order_id} - {req.action} {req.quantity} {req.symbol}, reason: {req.reason}"
         )
 
         return order_id
 
-    def cancel_order(self, order_id: int):
+    def cancel_order(self, order_id: int, reason: str | None = None):
         """
         取消订单
 
@@ -109,8 +91,17 @@ class OrderService:
         if order_id not in self.orders:
             raise ValueError(f"Order {order_id} not found")
 
-        self.ib.cancel_order(order_id)
-        logger.info(f"✅ Order cancelled: {order_id}")
+        state = self.orders[order_id]
+        if (state.status or "").lower() == "pendingcancel":
+            raise ValueError(f"Order {order_id} is already cancelling")
+        if not state.is_active:
+            raise ValueError(
+                f"Order {order_id} is not cancellable (current status: {state.status})"
+            )
+
+        cancel_reason = (reason or "").strip() or "User cancelled"
+        self.ib.cancel_order(order_id, reason=cancel_reason)
+        logger.info(f"✅ Order cancelled: {order_id} (reason={cancel_reason})")
 
     def list_orders(self) -> List[OrderState]:
         """
@@ -145,45 +136,6 @@ class OrderService:
         """
         return [order for order in self.orders.values() if order.is_active]
 
-    # ===== helper method =====
-
-    def _create_contract(self, req: OrderRequest) -> Contract:
-        """
-        将 OrderRequest 转换为 IBKR Contract
-
-        Args:
-            req: 订单请求
-
-        Returns:
-            Contract: IBKR 合约对象
-        """
-        if req.sec_type == "STK":
-            return stock(req.symbol, "SMART", "USD")
-        else:
-            # 未来可以扩展支持期权、期货等
-            raise ValueError(f"Unsupported security type: {req.sec_type}")
-
-    def _create_order(self, req: OrderRequest) -> Order:
-        """
-        将 OrderRequest 转换为 IBKR Order
-
-        Args:
-            req: 订单请求
-
-        Returns:
-            Order: IBKR 订单对象
-        """
-        if req.order_type == "MKT":
-            return market(req.action, req.quantity, req.OutsideRth, req.tif)
-        elif req.order_type == "LMT":
-            if req.limit_price is None:
-                raise ValueError("Limit price required for limit orders")
-            return limit(
-                req.action, req.quantity, req.limit_price, req.OutsideRth, req.tif
-            )
-        else:
-            raise ValueError(f"Unsupported order type: {req.order_type}")
-
     # ===== 事件回调 =====
     def _on_order_update(self, event: OrderStatusEvent):
         """
@@ -203,6 +155,23 @@ class OrderService:
 
         # 更新订单状态
         state = self.orders[order_id]
+
+        # Best-effort: enrich stored request details from callbacks (useful for startup-synced orders)
+        is_placeholder = state.request.symbol in ("UNKNOWN", "")
+        if event.symbol and is_placeholder:
+            state.request.symbol = event.symbol
+        if event.action and is_placeholder:
+            state.request.action = event.action
+        if event.quantity is not None and is_placeholder:
+            state.request.quantity = int(event.quantity)
+        if event.order_type and is_placeholder:
+            state.request.order_type = event.order_type
+        if event.limit_price is not None and is_placeholder:
+            state.request.limit_price = event.limit_price
+        if event.tif and is_placeholder:
+            state.request.tif = event.tif
+        if event.outsideRth is not None and is_placeholder:
+            state.request.OutsideRth = bool(event.outsideRth)
 
         old_status = state.status
         new_status = event.status
@@ -257,19 +226,22 @@ class OrderService:
         try:
             symbol = event.symbol or "UNKNOWN"
             action = event.action or "BUY"
-            # 注意：OrderStatusEvent 没有 quantity 和 order_type 信息
-            # 这些只能从 openOrder 事件中获取
-            # 对于启动同步，我们需要接受不完整的信息
-            # 确保类型正确（防止 Decimal 或字符串）
-            quantity = int(event.filled) + int(event.remaining)
+            quantity = (
+                int(event.quantity)
+                if event.quantity is not None
+                else int(event.filled) + int(event.remaining)
+            )
 
-            # 创建 OrderRequest（部分信息可能缺失）
+            # 创建 OrderRequest（尽量用 callback 补齐字段；缺失则降级到合理默认）
             req = OrderRequest(
                 symbol=symbol,
                 action=action,
                 quantity=quantity,
-                order_type="MKT",  # 默认值，实际可能不准确
-                limit_price=None,
+                order_type=event.order_type or "MKT",
+                limit_price=event.limit_price,
+                tif=event.tif or "DAY",
+                OutsideRth=True if event.outsideRth is None else bool(event.outsideRth),
+                sec_type=event.sec_type or "STK",
             )
 
             # 创建 OrderState

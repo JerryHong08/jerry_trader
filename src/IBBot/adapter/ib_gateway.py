@@ -76,7 +76,7 @@ class IBGateway:
 
     # ====== Order APIs ======
 
-    def place_order(self, contract, order):
+    def place_order(self, contract, order, reason: str | None = None):
         """
         下单
 
@@ -99,6 +99,8 @@ class IBGateway:
                 order_type=order.orderType,
                 limit_price=float(order.lmtPrice) if order.lmtPrice else None,
                 outsideRth=order.outsideRth,
+                account=getattr(order, "account", None),
+                reason=(reason or "").strip() or None,
             )
         )
 
@@ -141,6 +143,38 @@ class IBGateway:
             Dict[order_id, order_data]
         """
         return self.client.get_all_orders()
+
+    def request_open_orders(self):
+        """Request IBKR to send open orders via openOrder/orderStatus callbacks."""
+        if not self.is_connected:
+            return
+        try:
+            # Reset wrapper counters + mark a sync window before requesting
+            self.wrapper.begin_open_orders_sync()
+            self.client.reqOpenOrders()
+            logger.info("📡 Requested open orders (reqOpenOrders)")
+        except Exception as e:
+            logger.error(f"✗ Failed to request open orders: {e}")
+            self.event_bus.publish_event(ErrorEvent(error_message=str(e)))
+
+    def request_completed_orders(self, api_only: bool = True):
+        """Request completed orders via reqCompletedOrders.
+
+        Notes:
+        - This is best-effort and subject to IBKR API limitations.
+        - Results arrive via wrapper callbacks (completedOrder/completedOrdersEnd).
+        """
+        if not self.is_connected:
+            return
+        # Reset wrapper counters + mark a sync window before requesting
+        self.wrapper.begin_completed_orders_sync()
+        ok = self.client.request_completed_orders(api_only=api_only)
+        if ok:
+            logger.info("📡 Requested completed orders (reqCompletedOrders)")
+        else:
+            self.event_bus.publish_event(
+                ErrorEvent(error_message="Failed to request completed orders")
+            )
 
     # ====== Portfolio APIs ======
 

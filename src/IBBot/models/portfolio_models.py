@@ -21,14 +21,25 @@ class Position:
     symbol: str
     quantity: Union[float, Decimal, int]
     average_cost: Union[float, Decimal]
+    market_price: Union[float, Decimal] = 0.0
+    market_value: Union[float, Decimal] = 0.0
+    unrealized_pnl: Union[float, Decimal] = 0.0
+    realized_pnl: Union[float, Decimal] = 0.0
 
     def to_dict(self):
         """转换为字典格式"""
+        # Prefer explicit values if provided; fall back to simplified calculations.
+        mv = float(self.market_value) if self.market_value is not None else 0.0
+        if mv == 0.0:
+            mv = float(self.quantity) * float(self.average_cost)
         return {
             "symbol": self.symbol,
             "quantity": float(self.quantity),
             "average_cost": float(self.average_cost),
-            "market_value": float(self.quantity) * float(self.average_cost),
+            "market_price": float(self.market_price),
+            "market_value": mv,
+            "unrealized_pnl": float(self.unrealized_pnl),
+            "realized_pnl": float(self.realized_pnl),
         }
 
     @property

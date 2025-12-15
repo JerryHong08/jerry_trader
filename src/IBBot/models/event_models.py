@@ -5,6 +5,14 @@
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
+
+NY_TZ = ZoneInfo("America/New_York")
+
+
+def now_et() -> datetime:
+    return datetime.now(NY_TZ)
+
 
 # ============================================================
 # 基础事件类
@@ -39,7 +47,7 @@ class OrderSubmittedEvent(BaseEvent):
 
     def __post_init__(self):
         if self.timestamp is None:
-            self.timestamp = datetime.now()
+            self.timestamp = now_et()
 
 
 @dataclass
@@ -53,11 +61,13 @@ class OrderPlacedEvent(BaseEvent):
     outsideRth: bool
     order_type: str = "MKT"
     limit_price: Optional[float] = None
+    account: Optional[str] = None
+    reason: Optional[str] = None
     timestamp: datetime = None
 
     def __post_init__(self):
         if self.timestamp is None:
-            self.timestamp = datetime.now()
+            self.timestamp = now_et()
 
 
 @dataclass
@@ -72,11 +82,32 @@ class OrderStatusEvent(BaseEvent):
     commission: Optional[float] = None
     symbol: Optional[str] = None
     action: Optional[str] = None
+
+    account: Optional[str] = None
+
+    # Optional order-detail fields (best-effort; may be absent depending on callback)
+    quantity: Optional[int] = None
+    order_type: Optional[str] = None
+    limit_price: Optional[float] = None
+    stop_price: Optional[float] = None
+    tif: Optional[str] = None
+    outsideRth: Optional[bool] = None
+
+    # Optional contract-detail fields
+    sec_type: Optional[str] = None
+    exchange: Optional[str] = None
+    currency: Optional[str] = None
+
+    # Optional IBKR identifiers / extra fields
+    perm_id: Optional[int] = None
+    parent_id: Optional[int] = None
+    client_id: Optional[int] = None
+    last_fill_price: Optional[float] = None
     timestamp: datetime = None
 
     def __post_init__(self):
         if self.timestamp is None:
-            self.timestamp = datetime.now()
+            self.timestamp = now_et()
 
 
 @dataclass
@@ -85,13 +116,14 @@ class OrderCancelledEvent(BaseEvent):
 
     order_id: Optional[int] = None
     symbol: Optional[str] = None
+    account: Optional[str] = None
     reason: Optional[str] = None
     all: bool = False  # True if cancelling all orders
     timestamp: datetime = None
 
     def __post_init__(self):
         if self.timestamp is None:
-            self.timestamp = datetime.now()
+            self.timestamp = now_et()
 
 
 # ============================================================
@@ -111,11 +143,12 @@ class ExecutionReceivedEvent(BaseEvent):
     price: float
     exchange: str
     time: str
+    account: Optional[str] = None
     timestamp: datetime = None
 
     def __post_init__(self):
         if self.timestamp is None:
-            self.timestamp = datetime.now()
+            self.timestamp = now_et()
 
 
 # ============================================================
@@ -134,11 +167,12 @@ class PositionUpdatedEvent(BaseEvent):
     market_value: float
     unrealized_pnl: float
     realized_pnl: float
+    account: Optional[str] = None
     timestamp: datetime = None
 
     def __post_init__(self):
         if self.timestamp is None:
-            self.timestamp = datetime.now()
+            self.timestamp = now_et()
 
 
 @dataclass
@@ -147,12 +181,13 @@ class AccountUpdatedEvent(BaseEvent):
 
     tag: str  # NetLiquidation/TotalCashValue/等
     value: Any
-    currency: str
+    currency: Optional[str]
+    account: Optional[str] = None
     timestamp: datetime = None
 
     def __post_init__(self):
         if self.timestamp is None:
-            self.timestamp = datetime.now()
+            self.timestamp = now_et()
 
 
 # ============================================================
@@ -171,7 +206,7 @@ class ConnectionEvent(BaseEvent):
 
     def __post_init__(self):
         if self.timestamp is None:
-            self.timestamp = datetime.now()
+            self.timestamp = now_et()
 
 
 @dataclass
@@ -185,4 +220,28 @@ class ErrorEvent(BaseEvent):
 
     def __post_init__(self):
         if self.timestamp is None:
-            self.timestamp = datetime.now()
+            self.timestamp = now_et()
+
+
+@dataclass
+class CompletedOrdersSyncEndEvent(BaseEvent):
+    """Signals that IBKR completed orders sync has finished (reqCompletedOrders)."""
+
+    count: int = 0
+    timestamp: datetime = None
+
+    def __post_init__(self):
+        if self.timestamp is None:
+            self.timestamp = now_et()
+
+
+@dataclass
+class OpenOrdersSyncEndEvent(BaseEvent):
+    """Signals that IBKR open orders sync has finished (reqOpenOrders/openOrderEnd)."""
+
+    count: int = 0
+    timestamp: datetime = None
+
+    def __post_init__(self):
+        if self.timestamp is None:
+            self.timestamp = now_et()

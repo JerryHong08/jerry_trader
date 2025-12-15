@@ -8,18 +8,22 @@ Provides a publish-subscribe pattern for decoupling components
 - 直接使用事件类型订阅，无需额外的 Enum
 """
 
+import asyncio
+import inspect
 import logging
 import threading
 from datetime import datetime
-from typing import Callable, Dict, List, Type
+from typing import Awaitable, Callable, Dict, List, Optional, Type
 
 # 导入所有事件类型
 from IBBot.models.event_models import (
     AccountUpdatedEvent,
     BaseEvent,
+    CompletedOrdersSyncEndEvent,
     ConnectionEvent,
     ErrorEvent,
     ExecutionReceivedEvent,
+    OpenOrdersSyncEndEvent,
     OrderCancelledEvent,
     OrderPlacedEvent,
     OrderStatusEvent,
@@ -43,11 +47,24 @@ class EventBus:
 
     def __init__(self):
         """Initialize the event bus"""
-        self.subscribers: Dict[Type[BaseEvent], List[Callable]] = {}
+        self._sync_subscribers: Dict[Type[BaseEvent], List[Callable]] = {}
+        self._async_subscribers: Dict[
+            Type[BaseEvent], List[Callable[[BaseEvent], Awaitable[None]]]
+        ] = {}
         self.lock = threading.RLock()
         self.event_history: List[BaseEvent] = []
         self.max_history = 1000  # Keep last 1000 events
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         logger.info("🚌 EventBus initialized")
+
+    def set_loop(self, loop: asyncio.AbstractEventLoop):
+        """Bind an asyncio event loop for scheduling async subscribers.
+
+        This is important when events are published from non-async threads
+        (e.g., IB API callback thread) but async subscribers (e.g. WebSocket
+        broadcast) need to run on the FastAPI event loop.
+        """
+        self._loop = loop
 
     def publish_event(self, event: BaseEvent):
         """
@@ -73,18 +90,83 @@ class EventBus:
                 self.event_history.pop(0)
 
             # Get subscribers for this event type
-            subscribers = self.subscribers.get(event_type, []).copy()
+            sync_subs = self._sync_subscribers.get(event_type, []).copy()
+            async_subs = self._async_subscribers.get(event_type, []).copy()
 
-        # Call subscribers (outside lock to prevent deadlocks)
-        for callback in subscribers:
+        # Call sync subscribers (outside lock to prevent deadlocks)
+        for callback in sync_subs:
             try:
                 callback(event)
             except Exception as e:
                 logger.error(
-                    f"publish_event - ❌ Error in event callback for {event_type.__name__}: {e}"
+                    f"publish_event - ❌ Error in sync callback for {event_type.__name__}: {e}"
                 )
 
-        logger.debug(f"publish_event - 📤 Published {event_type.__name__}")
+        # Schedule async subscribers on bound loop
+        if async_subs:
+            loop = self._loop
+            if loop is None or not loop.is_running():
+                logger.warning(
+                    f"publish_event - ⚠️  Async subscribers exist for {event_type.__name__} but no running asyncio loop is bound; skipping async callbacks"
+                )
+            else:
+                for callback in async_subs:
+
+                    def _schedule(cb=callback):
+                        task = loop.create_task(cb(event))
+
+                        def _done(t: asyncio.Task):
+                            exc = t.exception()
+                            if exc:
+                                logger.error(
+                                    f"publish_event - ❌ Error in async callback for {event_type.__name__}: {exc}"
+                                )
+
+                        task.add_done_callback(_done)
+
+                    loop.call_soon_threadsafe(_schedule)
+
+        if (
+            event_type.__name__ != "AccountUpdatedEvent"
+        ):  # it will fload into tons of msg in a sec, don't display.
+            logger.debug(f"publish_event - 📤 Published {event_type.__name__}")
+
+    async def publish_event_async(self, event: BaseEvent):
+        """Async publish that awaits async subscribers.
+
+        Sync subscribers are executed via `asyncio.to_thread` to avoid blocking
+        the event loop.
+        """
+        event_type = type(event)
+
+        with self.lock:
+            self.event_history.append(event)
+            if len(self.event_history) > self.max_history:
+                self.event_history.pop(0)
+
+            sync_subs = self._sync_subscribers.get(event_type, []).copy()
+            async_subs = self._async_subscribers.get(event_type, []).copy()
+
+        async def _run_async(cb):
+            try:
+                await cb(event)
+            except Exception as e:
+                logger.error(
+                    f"publish_event_async - ❌ Error in async callback for {event_type.__name__}: {e}"
+                )
+
+        def _run_sync(cb):
+            try:
+                cb(event)
+            except Exception as e:
+                logger.error(
+                    f"publish_event_async - ❌ Error in sync callback for {event_type.__name__}: {e}"
+                )
+
+        await asyncio.gather(
+            *(asyncio.to_thread(_run_sync, cb) for cb in sync_subs),
+            *(_run_async(cb) for cb in async_subs),
+        )
 
     def subscribe(self, event_type: Type[BaseEvent], callback: Callable):
         """
@@ -101,14 +183,22 @@ class EventBus:
             event_bus.subscribe(OrderStatusEvent, on_order_status)
         """
         with self.lock:
-            if event_type not in self.subscribers:
-                self.subscribers[event_type] = []
-
-            if callback not in self.subscribers[event_type]:
-                self.subscribers[event_type].append(callback)
-                logger.debug(
-                    f"subscribe - 📝 Subscribed to {event_type.__name__}: {callback.__name__}"
-                )
+            if inspect.iscoroutinefunction(callback):
+                if event_type not in self._async_subscribers:
+                    self._async_subscribers[event_type] = []
+                if callback not in self._async_subscribers[event_type]:
+                    self._async_subscribers[event_type].append(callback)
+                    logger.debug(
+                        f"subscribe - 📝 Subscribed (async) to {event_type.__name__}: {callback.__name__}"
+                    )
+            else:
+                if event_type not in self._sync_subscribers:
+                    self._sync_subscribers[event_type] = []
+                if callback not in self._sync_subscribers[event_type]:
+                    self._sync_subscribers[event_type].append(callback)
+                    logger.debug(
+                        f"subscribe - 📝 Subscribed (sync) to {event_type.__name__}: {callback.__name__}"
+                    )
 
     def unsubscribe(self, event_type: Type[BaseEvent], callback: Callable):
         """
@@ -119,12 +209,23 @@ class EventBus:
             callback: 回调函数
         """
         with self.lock:
-            if event_type in self.subscribers:
-                if callback in self.subscribers[event_type]:
-                    self.subscribers[event_type].remove(callback)
-                    logger.debug(
-                        f"unsubscribe - ❌ Unsubscribed from {event_type.__name__}: {callback.__name__}"
-                    )
+            if (
+                event_type in self._sync_subscribers
+                and callback in self._sync_subscribers[event_type]
+            ):
+                self._sync_subscribers[event_type].remove(callback)
+                logger.debug(
+                    f"unsubscribe - ❌ Unsubscribed (sync) from {event_type.__name__}: {callback.__name__}"
+                )
+
+            if (
+                event_type in self._async_subscribers
+                and callback in self._async_subscribers[event_type]
+            ):
+                self._async_subscribers[event_type].remove(callback)
+                logger.debug(
+                    f"unsubscribe - ❌ Unsubscribed (async) from {event_type.__name__}: {callback.__name__}"
+                )
 
     def get_history(
         self, event_type: Type[BaseEvent] = None, limit: int = 100
@@ -164,9 +265,13 @@ class EventBus:
         """
         with self.lock:
             if event_type:
-                return len(self.subscribers.get(event_type, []))
+                return len(self._sync_subscribers.get(event_type, [])) + len(
+                    self._async_subscribers.get(event_type, [])
+                )
             else:
-                return sum(len(subs) for subs in self.subscribers.values())
+                return sum(len(subs) for subs in self._sync_subscribers.values()) + sum(
+                    len(subs) for subs in self._async_subscribers.values()
+                )
 
     def clear_subscribers(self, event_type: Type[BaseEvent] = None):
         """
@@ -177,9 +282,11 @@ class EventBus:
         """
         with self.lock:
             if event_type:
-                self.subscribers[event_type] = []
+                self._sync_subscribers[event_type] = []
+                self._async_subscribers[event_type] = []
             else:
-                self.subscribers.clear()
+                self._sync_subscribers.clear()
+                self._async_subscribers.clear()
 
 
 # Global event bus instance

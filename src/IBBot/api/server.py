@@ -4,12 +4,16 @@ FastAPI Server - 主服务器入口
 """
 
 import asyncio
+import math
 import os
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Set
 
 import uvicorn
+from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -21,19 +25,60 @@ from IBBot.api.routes_portfolio import init_portfolio_service
 from IBBot.api.routes_portfolio import router as portfolio_router
 from IBBot.models.event_models import (
     AccountUpdatedEvent,
+    CompletedOrdersSyncEndEvent,
+    OpenOrdersSyncEndEvent,
     OrderStatusEvent,
     PositionUpdatedEvent,
 )
+from IBBot.services.database_service import DatabaseService
 from IBBot.services.order_service import OrderService
 from IBBot.services.portfolio_service import PortfolioService
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__, log_to_file=True)
 
+
+def _ws_json_sanitize(value):
+    """Convert values into JSON-serializable primitives for WebSocket payloads.
+
+    FastAPI's send_json ultimately relies on stdlib json.dumps, which cannot
+    serialize Decimal and will also choke on NaN/Infinity.
+    """
+
+    if value is None:
+        return None
+
+    if isinstance(value, (str, int, bool)):
+        return value
+
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+
+    if isinstance(value, Decimal):
+        # Preserve precision as string.
+        return str(value)
+
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+
+    if isinstance(value, dict):
+        return {str(k): _ws_json_sanitize(v) for k, v in value.items()}
+
+    if isinstance(value, (list, tuple, set)):
+        return [_ws_json_sanitize(v) for v in value]
+
+    return str(value)
+
+
+# Load local .env if present (keeps `poetry run uvicorn ... --reload` consistent with shell env).
+# Do not override already-exported environment variables.
+load_dotenv(override=False)
+
 # ===== global =====
 ib_gateway: IBGateway = None
 order_service: OrderService = None
 portfolio_service: PortfolioService = None
+database_service: DatabaseService | None = None
 websocket_clients: Set[WebSocket] = set()
 
 
@@ -42,12 +87,16 @@ async def lifespan(app: FastAPI):
     """
     lifespan for app start and disconnect
     """
-    global ib_gateway, order_service, portfolio_service
+    global ib_gateway, order_service, portfolio_service, database_service
 
     logger.info("🚀 Starting IBKR Bot API Server")
 
     # 1. Create IB Gateway instance (but don't connect yet)
     ib_gateway = IBGateway()
+
+    # Bind asyncio loop to EventBus early (needed for thread-safe async subscribers)
+    event_bus = get_event_bus()
+    event_bus.set_loop(asyncio.get_running_loop())
 
     # 2. Initialize services FIRST (so they can subscribe to events)
     logger.info("🔧 Initializing services...")
@@ -58,6 +107,20 @@ async def lifespan(app: FastAPI):
     init_order_service(order_service)
     init_portfolio_service(portfolio_service)
     logger.info("✅ Services initialized and subscribed to events")
+
+    # 2.5 Optional: database persistence (best-effort)
+    database_url = os.getenv("DATABASE_URL")
+    if database_url:
+        try:
+            database_service = DatabaseService(database_url)
+            database_service.create_tables()
+            database_service.subscribe()
+            logger.info("lifespan - ✅ Database persistence enabled")
+        except Exception as e:
+            database_service = None
+            logger.error(f"lifespan - ⚠️  Failed to enable DB persistence: {e}")
+    else:
+        logger.info("lifespan - ❌  DATABASE_URL not set; DB persistence disabled")
 
     # 3. NOW connect to IB Gateway (services are ready to receive events)
     host = os.getenv("IB_GATEWAY_HOST", "127.0.0.1")
@@ -86,30 +149,77 @@ async def lifespan(app: FastAPI):
             f"lifespan - ✅ Portfolio loaded: {len(portfolio_service.get_positions())} positions"
         )
 
+        # Request open/completed orders and wait for their corresponding end events.
+        # Subscribe BEFORE sending requests to avoid missing fast callbacks.
+        open_done = asyncio.Event()
+        completed_done = asyncio.Event()
+
+        async def _on_open_orders_sync_end(_: OpenOrdersSyncEndEvent):
+            open_done.set()
+
+        async def _on_completed_orders_sync_end(_: CompletedOrdersSyncEndEvent):
+            completed_done.set()
+
+        event_bus.subscribe(OpenOrdersSyncEndEvent, _on_open_orders_sync_end)
+        event_bus.subscribe(CompletedOrdersSyncEndEvent, _on_completed_orders_sync_end)
+        try:
+            logger.info("lifespan - 🔄 Requesting open orders for startup sync...")
+            ib_gateway.request_open_orders()
+
+            logger.info("lifespan - 🔄 Requesting completed orders for startup sync...")
+            ib_gateway.request_completed_orders(api_only=True)
+
+            await asyncio.wait_for(
+                asyncio.gather(open_done.wait(), completed_done.wait()), timeout=5
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "lifespan - ⚠️  Timed out waiting for openOrderEnd/completedOrdersEnd; continuing startup"
+            )
+        finally:
+            event_bus.unsubscribe(OpenOrdersSyncEndEvent, _on_open_orders_sync_end)
+            event_bus.unsubscribe(
+                CompletedOrdersSyncEndEvent, _on_completed_orders_sync_end
+            )
+
         # 完成启动时的订单同步
         order_service.finish_startup_sync()
 
-    # 6. 订阅事件并广播到 WebSocket 客户端
-    def broadcast_to_websockets(event_data):
-        """广播事件到所有 WebSocket 客户端"""
+    # 6. 订阅事件并广播到 WebSocket 客户端（async-safe）
+
+    async def broadcast_to_websockets(event_name: str, event_data):
+        """广播事件到所有 WebSocket 客户端（在 FastAPI loop 内执行）"""
         message = {
             "type": "event",
+            "event_name": event_name,
             "data": event_data,
         }
-        for client in websocket_clients.copy():
-            try:
-                asyncio.create_task(client.send_json(message))
-            except:
+
+        clients = list(websocket_clients)
+        if not clients:
+            return
+
+        results = await asyncio.gather(
+            *(client.send_json(message) for client in clients),
+            return_exceptions=True,
+        )
+        for client, result in zip(clients, results):
+            if isinstance(result, Exception):
                 websocket_clients.discard(client)
+                try:
+                    await client.close()
+                except Exception:
+                    pass
+                logger.warning(
+                    f"broadcast_to_websockets - ⚠️ Dropped WS client after send failure: {result}"
+                )
 
-    # 直接订阅 EventBus，手动转换事件为字典
-    def event_to_dict_wrapper(event):
+    async def event_to_dict_wrapper(event):
         # 转换 BaseEvent 为字典，移除 timestamp
-        event_dict = asdict(event)
+        event_dict = _ws_json_sanitize(asdict(event))
         event_dict.pop("timestamp", None)
-        broadcast_to_websockets(event_dict)
+        await broadcast_to_websockets(type(event).__name__, event_dict)
 
-    event_bus = get_event_bus()
     event_bus.subscribe(OrderStatusEvent, event_to_dict_wrapper)
     event_bus.subscribe(PositionUpdatedEvent, event_to_dict_wrapper)
     event_bus.subscribe(AccountUpdatedEvent, event_to_dict_wrapper)
@@ -121,6 +231,11 @@ async def lifespan(app: FastAPI):
 
     # shut down and clean up, disconnect from the ibkr.
     logger.info("\nlifespan - 🛑 Shutting down...")
+    if database_service:
+        try:
+            database_service.unsubscribe()
+        except Exception:
+            pass
     if ib_gateway:
         ib_gateway.disconnect()
     logger.info("lifespan - ✅ Cleanup complete")
@@ -187,9 +302,8 @@ async def websocket_endpoint(websocket: WebSocket):
     WebSocket 端点 - 实时推送订单和持仓更新
 
     客户端会接收到以下类型的消息：
-    - order_status: 订单状态更新
-    - position: 持仓更新
-    - account_summary: 账户信息更新
+    - connection: 连接确认
+    - event: 事件推送（包含 event_name + data）
     """
     await websocket.accept()
     websocket_clients.add(websocket)

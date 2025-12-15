@@ -2,9 +2,10 @@
 Orders Routes - 订单相关的 API 路由
 """
 
-from typing import List
+from dataclasses import dataclass
+from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, HTTPException
 
 from IBBot.models.order_models import OrderRequest
 
@@ -60,7 +61,11 @@ def place_order(req: OrderRequest):
 
 
 @router.post("/cancel/{order_id}")
-def cancel_order(order_id: int):
+def cancel_order(
+    order_id: int,
+    payload: Optional["CancelOrderRequest"] = Body(default=None),
+    reason: Optional[str] = None,
+):
     """
     取消订单
 
@@ -74,7 +79,9 @@ def cancel_order(order_id: int):
         POST /orders/cancel/123
     """
     try:
-        order_service.cancel_order(order_id)
+        body_reason = payload.reason if payload is not None else None
+        final_reason = (body_reason or reason or "").strip() or None
+        order_service.cancel_order(order_id, reason=final_reason)
         return {
             "status": "ok",
             "order_id": order_id,
@@ -82,6 +89,11 @@ def cancel_order(order_id: int):
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@dataclass
+class CancelOrderRequest:
+    reason: Optional[str] = None
 
 
 @router.get("/list")

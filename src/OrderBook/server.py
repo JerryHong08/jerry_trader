@@ -1,197 +1,40 @@
 import asyncio
 import json
 import os
+from datetime import datetime
+from typing import Dict, List, Optional
+from zoneinfo import ZoneInfo
 
+import redis
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from ..DataSupply.polygon_manager import PolygonWebSocketManager
-from ..DataSupply.replayer_manager import ReplayerWebSocketManager
-from ..DataSupply.thetadata_manager import ThetaDataManager
-from ..utils.logger import setup_logger
+from DataSupply.unified_tick_manager import UnifiedTickManager
+from utils.logger import setup_logger
 
 logger = setup_logger(__name__, log_to_file=True)
 
 load_dotenv()
 app = FastAPI()
 
-
 # ============================================================================
-# Unified Subscription Adapter
+# Unified Manager - Single point of configuration
 # ============================================================================
-class SubscriptionAdapter:
-    """
-    Adapter to translate unified subscription format to manager-specific format.
+manager = UnifiedTickManager()  # Reads DATA_MANAGER from env or defaults to polygon
 
-    Unified Format (from frontend):
-    {
-        "provider": "polygon" | "theta" | "replayer" (optional, uses MANAGER_TYPE if not provided),
-        "subscriptions": [
-            {
-                "symbol": "AAPL",
-                "events": ["QUOTE", "TRADE"],
-                "sec_type": "STOCK" (optional, for ThetaData),
-                "contract": {} (optional, for options)
-            }
-        ]
-    }
-    """
+logger.info(f"🚀 Using {manager.provider.upper()} data manager")
 
-    @staticmethod
-    def to_polygon(subscriptions: list) -> tuple:
-        """
-        Convert to Polygon format.
-        Returns: (symbols, events)
-        """
-        symbols = []
-        events = set()
+r = redis.Redis(host="localhost", port=6379, db=0)
 
-        for sub in subscriptions:
-            symbol = sub.get("symbol", "").upper()
-            sub_events = sub.get("events", ["QUOTE"])
+stream_message_ids: Dict[str, str] = {}  # ticker -> message_id
 
-            if symbol:
-                symbols.append(symbol)
-
-            # Map unified event names to Polygon codes
-            for ev in sub_events:
-                ev = ev.upper()
-                if ev in ("QUOTE", "Q"):
-                    events.add("Q")
-                elif ev in ("TRADE", "T"):
-                    events.add("T")
-
-        return symbols, list(events)
-
-    @staticmethod
-    def to_theta(subscriptions: list) -> list:
-        """
-        Convert to ThetaData format.
-        Returns: List of subscription dicts
-        """
-        theta_subs = []
-
-        for sub in subscriptions:
-            symbol = sub.get("symbol", "").upper()
-            events = sub.get("events", ["QUOTE"])
-            sec_type = sub.get("sec_type", "STOCK").upper()
-            contract = sub.get("contract", {})
-
-            # Build contract dict
-            if not contract:
-                contract = {"root": symbol}
-            elif "root" not in contract:
-                contract["root"] = symbol
-
-            # Map unified event names to ThetaData codes
-            req_types = []
-            for ev in events:
-                ev = ev.upper()
-                if ev in ("QUOTE", "Q"):
-                    req_types.append("QUOTE")
-                elif ev in ("TRADE", "T"):
-                    req_types.append("TRADE")
-
-            theta_subs.append(
-                {"sec_type": sec_type, "req_types": req_types, "contract": contract}
-            )
-
-        return theta_subs
-
-    @staticmethod
-    def to_replayer(subscriptions: list) -> tuple:
-        """
-        Convert to Replayer format (same as Polygon).
-        Returns: (symbols, events)
-        """
-        symbols = []
-        events = set()
-
-        for sub in subscriptions:
-            symbol = sub.get("symbol", "").upper()
-            sub_events = sub.get("events", ["Q"])
-
-            if symbol:
-                symbols.append(symbol)
-
-            for ev in sub_events:
-                ev = ev.upper()
-                if ev in ("QUOTE", "Q"):
-                    events.add("Q")
-                elif ev in ("TRADE", "T"):
-                    events.add("T")
-
-        return symbols, list(events)
-
-    @staticmethod
-    def generate_stream_keys(subscriptions: list, manager_type: str) -> set:
-        """
-        Generate stream keys for tracking based on manager type.
-        """
-        stream_keys = set()
-
-        for sub in subscriptions:
-            symbol = sub.get("symbol", "").upper()
-            events = sub.get("events", ["QUOTE"])
-            sec_type = sub.get("sec_type", "STOCK").upper()
-            contract = sub.get("contract", {})
-
-            for ev in events:
-                ev = ev.upper()
-                # Normalize event name
-                if ev == "QUOTE":
-                    ev = "Q"
-                elif ev == "TRADE":
-                    ev = "T"
-
-                if manager_type == "polygon":
-                    stream_keys.add(f"{ev}.{symbol}")
-
-                elif manager_type == "theta":
-                    # Generate ThetaData stream key
-                    if sec_type in ("STOCK", "INDEX"):
-                        identifier = symbol
-                    elif sec_type == "OPTION":
-                        root = contract.get("root", symbol)
-                        exp = contract.get("expiration", "")
-                        strike = contract.get("strike", "")
-                        right = contract.get("right", "")
-                        identifier = f"{root}_{exp}_{strike}_{right}"
-                    else:
-                        identifier = symbol
-
-                    # Map to ThetaData event names
-                    theta_ev = "QUOTE" if ev == "Q" else "TRADE"
-                    stream_keys.add(f"{sec_type}.{theta_ev}.{identifier}")
-
-                elif manager_type == "replayer":
-                    # Replayer uses same format as Polygon
-                    stream_keys.add(f"{ev}.{symbol}")
-
-        return stream_keys
-
-
-adapter = SubscriptionAdapter()
-
-
-# ============================================================================
-# Manager Configuration - Choose ONE
-# ============================================================================
-MANAGER_TYPE = os.getenv("DATA_MANAGER", "polygon")  # polygon, theta, replayer
-
-if MANAGER_TYPE == "polygon":
-    manager = PolygonWebSocketManager(api_key=os.getenv("POLYGON_API_KEY"))
-elif MANAGER_TYPE == "theta":
-    manager = ThetaDataManager()
-elif MANAGER_TYPE == "replayer":
-    # Replayer connects to local Rust WebSocket server
-    replay_url = os.getenv("REPLAY_URL", "ws://127.0.0.1:8765")
-    manager = ReplayerWebSocketManager(replay_url=replay_url)
+if replay_date := os.getenv("REPLAY_DATE"):
+    logger.info(f"Replay mode activated for date: {replay_date}")
+    STREAM_NAME = f"factor_tasks_replay:{replay_date}"
 else:
-    raise ValueError(f"Unknown MANAGER_TYPE: {MANAGER_TYPE}")
-
-logger.info(f"🚀 Using {MANAGER_TYPE.upper()} data manager")
+    today = datetime.now(ZoneInfo("America/New_York")).strftime("%Y%m%d")
+    STREAM_NAME = f"factor_tasks:{today}"
 
 
 @app.on_event("startup")
@@ -252,7 +95,11 @@ async def debug_subscribe(symbol: str, events: str = "Q"):
     """subscribe a symbol. Pass events comma-separated via ?events=Q,T"""
     symbol = symbol.upper()
     evs = [e.strip().upper() for e in events.split(",") if e.strip()]
-    await manager.subscribe("debug_client", [symbol], events=evs)
+    stream_message_ids[symbol] = r.xadd(
+        STREAM_NAME, {"action": "add", "ticker": symbol}
+    )
+    print(f"Subscribing to {symbol} events={evs}")
+    # await manager.subscribe("debug_client", [symbol], events=evs)
     return {"message": f"Subscribed to {symbol} events={evs}"}
 
 
@@ -262,7 +109,11 @@ async def debug_unsubscribe(symbol: str, events: str = "Q"):
     """unsubscribe a symbol. Pass events comma-separated via ?events=Q,T"""
     symbol = symbol.upper()
     evs = [e.strip().upper() for e in events.split(",") if e.strip()]
-    await manager.unsubscribe("debug_client", symbol, events=evs)
+    print(f"Unsubscribing from {symbol} events={evs}")
+    stream_message_ids[symbol] = r.xadd(
+        STREAM_NAME, {"action": "remove", "ticker": symbol}
+    )
+    # await manager.unsubscribe("debug_client", symbol, events=evs)
     return {"message": f"Unsubscribed {symbol} events={evs}"}
 
 
@@ -434,56 +285,12 @@ async def websocket_endpoint(websocket: WebSocket):
 
                     logger.info(f"📤 Unsubscribe request: {subscriptions}")
 
-                    # Unsubscribe from manager
-                    if MANAGER_TYPE == "polygon":
-                        for sub in subscriptions:
-                            sym = sub.get("symbol", "").upper()
-                            evs = sub.get("events", ["Q"])
-                            evs = [
-                                (
-                                    e.upper()
-                                    if e.upper() in ("Q", "T")
-                                    else ("Q" if e.upper() == "QUOTE" else "T")
-                                )
-                                for e in evs
-                            ]
-                            await manager.unsubscribe(websocket, sym, events=evs)
-
-                    elif MANAGER_TYPE == "theta":
-                        for sub in subscriptions:
-                            sec_type = sub.get("sec_type", "STOCK").upper()
-                            evs = sub.get("events", ["QUOTE"])
-                            req_types = [
-                                "QUOTE" if e.upper() in ("Q", "QUOTE") else "TRADE"
-                                for e in evs
-                            ]
-                            contract = sub.get(
-                                "contract", {"root": sub.get("symbol", "").upper()}
-                            )
-                            if "root" not in contract:
-                                contract["root"] = sub.get("symbol", "").upper()
-                            await manager.unsubscribe(
-                                websocket, sec_type, req_types, contract
-                            )
-
-                    elif MANAGER_TYPE == "replayer":
-                        # Replayer unsubscribe (same interface as Polygon)
-                        for sub in subscriptions:
-                            sym = sub.get("symbol", "").upper()
-                            evs = sub.get("events", ["Q"])
-                            evs = [
-                                (
-                                    e.upper()
-                                    if e.upper() in ("Q", "T")
-                                    else ("Q" if e.upper() == "QUOTE" else "T")
-                                )
-                                for e in evs
-                            ]
-                            await manager.unsubscribe(websocket, sym, events=evs)
+                    # Unsubscribe using unified interface
+                    await manager.unsubscribe(websocket, subscriptions=subscriptions)
 
                     # Cancel consumer tasks for unsubscribed streams
-                    unsubscribed_keys = adapter.generate_stream_keys(
-                        subscriptions, MANAGER_TYPE
+                    unsubscribed_keys = manager.generate_stream_keys(
+                        subscriptions=subscriptions
                     )
                     for stream_key in unsubscribed_keys:
                         if stream_key in current_streams:
@@ -517,23 +324,11 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 logger.info(f"📥 Subscribe request: {subscriptions}")
 
-                # Subscribe to manager
-                if MANAGER_TYPE == "polygon":
-                    symbols, events = adapter.to_polygon(subscriptions)
-                    if symbols:
-                        await manager.subscribe(websocket, symbols, events=events)
-
-                elif MANAGER_TYPE == "theta":
-                    theta_subs = adapter.to_theta(subscriptions)
-                    await manager.subscribe(websocket, theta_subs)
-
-                elif MANAGER_TYPE == "replayer":
-                    symbols, events = adapter.to_replayer(subscriptions)
-                    if symbols:
-                        await manager.subscribe(websocket, symbols, events=events)
+                # Subscribe using unified interface
+                await manager.subscribe(websocket, subscriptions=subscriptions)
 
                 # Generate stream keys and create consumer tasks
-                new_streams = adapter.generate_stream_keys(subscriptions, MANAGER_TYPE)
+                new_streams = manager.generate_stream_keys(subscriptions=subscriptions)
                 to_add = new_streams - current_streams
 
                 for sk in to_add:
@@ -566,80 +361,11 @@ async def consume_stream(websocket: WebSocket, stream_key: str):
         while True:
             data = await q.get()
 
-            # Normalize data format for frontend (convert ThetaData/Simulator to Polygon format)
-            normalized_data = normalize_data_for_frontend(data, MANAGER_TYPE)
+            # Normalize data format for frontend using unified manager
+            normalized_data = manager.normalize_data(data)
 
             await websocket.send_json(normalized_data)
     except asyncio.CancelledError:
         logger.debug(f"🛑 Consumer cancelled for {stream_key}")
     except Exception as e:
         logger.error(f"❌ Error in consumer for {stream_key}: {e}")
-
-
-def normalize_data_for_frontend(data: dict, manager_type: str) -> dict:
-    """
-    Normalize data from different managers to a unified frontend format (Polygon-like).
-
-    Frontend expects:
-    - Quote: { event_type: "Q", symbol, bid, ask, bid_size, ask_size, timestamp }
-    - Trade: { event_type: "T", symbol, price, size, timestamp }
-
-    All timestamps must be in milliseconds (13 digits).
-    """
-
-    def to_milliseconds(ts):
-        """Convert any timestamp format to milliseconds."""
-        if ts is None:
-            return None
-        # Nanoseconds (19 digits) - from Rust replayer
-        if ts > 1e15:
-            return int(ts // 1e6)
-        # Already milliseconds (13 digits)
-        elif ts > 1e12:
-            return int(ts)
-        # Seconds (10 digits)
-        else:
-            return int(ts * 1000)
-
-    event_type = data.get("event_type", "").upper()
-
-    # Polygon format - just normalize timestamp
-    if manager_type == "polygon":
-        normalized = data.copy()
-        if "timestamp" in normalized:
-            normalized["timestamp"] = to_milliseconds(normalized["timestamp"])
-        return normalized
-
-    # Replayer format (from Rust server) - same as Polygon but with nanosecond timestamps
-    if manager_type == "replayer":
-        normalized = data.copy()
-        if "timestamp" in normalized:
-            normalized["timestamp"] = to_milliseconds(normalized["timestamp"])
-        return normalized
-
-    # Convert ThetaData format
-    if manager_type == "theta":
-        symbol = data.get("symbol", "")
-        timestamp = data.get("timestamp")
-
-        if event_type == "QUOTE":
-            return {
-                "event_type": "Q",
-                "symbol": symbol,
-                "bid": data.get("bid"),
-                "ask": data.get("ask"),
-                "bid_size": data.get("bid_size"),
-                "ask_size": data.get("ask_size"),
-                "timestamp": timestamp,
-            }
-        elif event_type == "TRADE":
-            return {
-                "event_type": "T",
-                "symbol": symbol,
-                "price": data.get("price"),
-                "size": data.get("size"),
-                "timestamp": timestamp,
-            }
-
-    # Fallback: return as-is
-    return data

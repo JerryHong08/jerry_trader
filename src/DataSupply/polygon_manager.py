@@ -5,7 +5,7 @@ import logging
 
 import websockets
 
-from ..utils.logger import setup_logger
+from utils.logger import setup_logger
 
 logger = setup_logger(__name__, log_to_file=True)
 
@@ -31,6 +31,16 @@ class PolygonWebSocketManager:
             await self.ws.send(json.dumps({"action": "auth", "params": self.api_key}))
 
             print("✅ Authenticated to Polygon")
+            if self.subscribed_streams:
+                # re-subscribe to existing streams
+                for stream_key in self.subscribed_streams:
+                    await self.ws.send(
+                        json.dumps({"action": "subscribe", "params": stream_key})
+                    )
+                logger.info(
+                    f"🔄 Re-subscribed to existing streams: {self.subscribed_streams}"
+                )
+
             self.connected = True
             logger.info("🔐 Polygon WebSocket connected & authenticated")
 
@@ -198,8 +208,8 @@ class PolygonWebSocketManager:
                     "🔌 Polygon WebSocket connection closed, reconnecting..."
                 )
                 self.connected = False
-                self.ws = None
-                self.subscribed_streams.clear()
+                # self.ws = None
+                # self.subscribed_streams.clear()
                 await asyncio.sleep(5)
 
             except Exception as e:

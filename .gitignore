@@ -11,3 +11,5 @@ docs/
 discard/
 
 alembic.ini
+
+node_modules/

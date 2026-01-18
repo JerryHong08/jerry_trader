@@ -1,4 +1,4 @@
-"""Bootstrap IBBot persistence schema
+"""Bootstrap OrderManagement persistence schema
 
 This migration is intentionally defensive:
 - If tables do not exist, it creates them.

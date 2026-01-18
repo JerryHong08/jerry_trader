@@ -12,7 +12,7 @@ from datetime import datetime
 # 添加项目路径
 sys.path.insert(0, "/home/jerryhong/code-projects/jerryib_trade")
 
-from src.DataSupply.thetadata_manager import ThetaDataManager
+from src.tickDataSupply.thetadata_manager import ThetaDataManager
 
 
 async def test_basic_subscription():

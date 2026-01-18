@@ -2,7 +2,7 @@
 import asyncio
 import logging
 
-from src.DataSupply.thetadata_manager import ThetaDataManager
+from src.tickDataSupply.thetadata_manager import ThetaDataManager
 from src.utils.logger import setup_logger
 
 logger = setup_logger(__name__, log_to_file=False, level=logging.DEBUG)

@@ -6,8 +6,8 @@ import sys
 
 sys.path.insert(0, "/home/jerryhong/code-projects/jerryib_trade/src")
 
-from IBBot.adapter.event_bus import get_event_bus
-from IBBot.models.event_models import (
+from OrderManagement.adapter.event_bus import get_event_bus
+from OrderManagement.models.event_models import (
     AccountUpdatedEvent,
     OrderCancelledEvent,
     OrderPlacedEvent,

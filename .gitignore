@@ -15,3 +15,5 @@ alembic.ini
 node_modules/
 
 momo_token.py
+
+*data.csv

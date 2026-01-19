@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
-LOG_DIR = PROJECT_ROOT / "logs" / "jerryib_trader"
+LOG_DIR = PROJECT_ROOT / "logs" / "jerryib_trader" / datetime.now().strftime("%Y%m%d")
 
 
 def setup_logger(
@@ -15,7 +15,7 @@ def setup_logger(
 
     Args:
         name: Logger name (usually __name__)
-        log_dir: Directory to store log files (default: project logs/)
+        log_dir: Directory to store log files (default: project logs/YYYYMMDD/)
         level: Logging level
         log_to_file: Whether to create file handler
 

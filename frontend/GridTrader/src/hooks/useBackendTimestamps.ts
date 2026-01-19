@@ -7,6 +7,7 @@ export type DataDomain = 'market-data' | 'stock-detail' | 'orders' | 'portfolio'
 class TimestampStore {
   private timestamps: Map<DataDomain, Date> = new Map();
   private listeners: Set<() => void> = new Set();
+  private useMockUpdates: boolean = false; // Set to false when backend is connected
 
   constructor() {
     // Initialize with current time
@@ -15,34 +16,36 @@ class TimestampStore {
     this.timestamps.set('orders', new Date());
     this.timestamps.set('portfolio', new Date());
 
-    // Simulate backend updates at different intervals
-    this.startUpdates();
+    // Only use mock updates if backend is not connected
+    if (this.useMockUpdates) {
+      this.startMockUpdates();
+    }
   }
 
-  private startUpdates() {
-    // Market data updates every 5 seconds
+  private startMockUpdates() {
+    // Market data updates every 5 seconds (mock)
     setInterval(() => {
       this.updateTimestamp('market-data');
     }, 5000);
 
-    // Stock detail updates every 3 seconds
+    // Stock detail updates every 3 seconds (mock)
     setInterval(() => {
       this.updateTimestamp('stock-detail');
     }, 3000);
 
-    // Orders update every 2 seconds
+    // Orders update every 2 seconds (mock)
     setInterval(() => {
       this.updateTimestamp('orders');
     }, 2000);
 
-    // Portfolio updates every 4 seconds
+    // Portfolio updates every 4 seconds (mock)
     setInterval(() => {
       this.updateTimestamp('portfolio');
     }, 4000);
   }
 
-  updateTimestamp(domain: DataDomain) {
-    this.timestamps.set(domain, new Date());
+  updateTimestamp(domain: DataDomain, date?: Date) {
+    this.timestamps.set(domain, date || new Date());
     this.notifyListeners();
   }
 
@@ -58,16 +61,39 @@ class TimestampStore {
   private notifyListeners() {
     this.listeners.forEach(listener => listener());
   }
+
+  // Enable mock updates (useful for development without backend)
+  enableMockUpdates() {
+    if (!this.useMockUpdates) {
+      this.useMockUpdates = true;
+      this.startMockUpdates();
+    }
+  }
 }
 
-const timestampStore = new TimestampStore();
+export const timestampStore = new TimestampStore();
 
-// Format timestamp as HH:MM:SS
+// Format timestamp as HH:MM:SS in US/New_York timezone
 export function formatTimestamp(date: Date): string {
-  const hours = date.getHours().toString().padStart(2, '0');
-  const minutes = date.getMinutes().toString().padStart(2, '0');
-  const seconds = date.getSeconds().toString().padStart(2, '0');
-  return `${hours}:${minutes}:${seconds}`;
+  // Format in America/New_York timezone
+  const options: Intl.DateTimeFormatOptions = {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+    timeZone: 'America/New_York',
+  };
+  return date.toLocaleTimeString('en-US', options);
+}
+
+// Parse ISO timestamp string to Date
+export function parseTimestamp(isoString: string | null): Date | null {
+  if (!isoString) return null;
+  try {
+    return new Date(isoString);
+  } catch {
+    return null;
+  }
 }
 
 // Hook to use backend timestamp for a specific data domain

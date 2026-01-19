@@ -136,7 +136,7 @@ export interface HistoricalOrder {
   filledAt?: string;
 }
 
-export type TickerState = 'confirming' | 'on-watch' | 'dead' | 'fresh-new' | 'running-up';
+export type TickerState = 'Best' | 'Good' | 'OnWatch' | 'NotGood' | 'Bad';
 
 export interface RankItem {
   symbol: string;
@@ -146,10 +146,12 @@ export interface RankItem {
   volume: number;
   marketCap: number;
   state: TickerState;
+  stateReason?: string;  // Short description of why ticker is in current state
   float: number;
   relativeVolumeDaily: number;
   relativeVolume5min: number;
   latestNewsTime?: number; // Timestamp of latest news (milliseconds)
+  isSubscribed?: boolean;  // Whether ticker is subscribed for overview chart display
 }
 
 export interface CandlestickData {

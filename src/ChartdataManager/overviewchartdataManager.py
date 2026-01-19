@@ -1,13 +1,25 @@
 """
-Chart Data Manager for Market Mover Visualization
-Reads data from InfluxDB and formats for frontend chart rendering.
-Decoupled from SnapshotAnalyzer to separate data processing from presentation.
+Overview Chart Data Manager for GridTrader Frontend
+
+This module manages chart data for the GridTrader frontend's OverviewChartModule.
+Unlike the MMM version which uses a single color per ticker, GridTrader displays
+each ticker's line with segmented colors representing different states (regimes).
+
+Data Flow:
+    InfluxDB (market_snapshot + movers_state) -> ChartDataManager -> BFF -> Frontend
+
+Key Differences from MMM Version:
+    - Each ticker line is segmented by state transitions
+    - Each segment has its own data key (e.g., AAPL_seg0, AAPL_seg1)
+    - Segments are colored based on the state at that time period
+    - Frontend uses Recharts with multiple Line components per ticker
 """
 
+import json
 import logging
 import os
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import influxdb_client
@@ -18,28 +30,51 @@ from utils.logger import setup_logger
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
 
 
-class ChartDataManager:
+class GridTraderChartDataManager:
     """
-    Manage and format chart data for visualization.
-    Reads from InfluxDB (market_snapshot, movers_state) and Redis (subscribed tickers).
+    Manage and format chart data for GridTrader's OverviewChartModule.
+
+    The key difference from MMM version:
+    - GridTrader renders each ticker as multiple line segments
+    - Each segment corresponds to a state period
+    - Segments are colored by state (Best, Good, OnWatch, NotGood, Bad)
     """
 
-    # Color schemes for different states
-    STATE_COLORS = {
-        "new_entrant": "255, 0, 0",  # Red
-        "rising_fast": "255, 165, 0",  # Orange
-        "rising": "50, 205, 50",  # Lime green
-        "stable": "100, 149, 237",  # Cornflower blue
-        "falling": "255, 215, 0",  # Gold
-        "falling_fast": "178, 34, 34",  # Firebrick
+    # State colors matching frontend STATE_COLORS
+    STATE_COLORS: Dict[str, str] = {
+        "Best": "#10b981",  # Green
+        "Good": "#34d399",  # Emerald
+        "OnWatch": "#3b82f6",  # Blue
+        "NotGood": "#eab308",  # Yellow
+        "Bad": "#6b7280",  # Gray
+    }
+
+    # Map backend states to frontend states
+    # Since stateEngine is in development, we use simple mapping
+    STATE_MAPPING: Dict[str, str] = {
+        "new_entrant": "Best",
+        "rising_fast": "Best",
+        "rising": "Good",
+        "stable": "OnWatch",
+        "falling": "NotGood",
+        "falling_fast": "Bad",
+        # Direct mappings for when backend sends new state values
+        "Best": "Best",
+        "Good": "Good",
+        "OnWatch": "OnWatch",
+        "NotGood": "NotGood",
+        "Bad": "Bad",
     }
 
     def __init__(
-        self, replay_date: Optional[str] = None, suffix_id: Optional[str] = None
+        self,
+        replay_date: Optional[str] = None,
+        suffix_id: Optional[str] = None,
     ):
         self._chart_data_dirty = True
-        self._cached_chart_data = None
-        self._last_query_time = None
+        self._cached_chart_data: Optional[Dict] = None
+        self._cached_rank_data: Optional[List[Dict]] = None
+        self._last_query_time: Optional[datetime] = None
 
         self.run_mode = "replay" if replay_date else "live"
         self.db_date = (
@@ -70,7 +105,7 @@ class ChartDataManager:
         self._query_api = self._influx_client.query_api()
 
         logger.info(
-            f"ChartDataManager initialized: mode={self.run_mode}, db_id={self.db_id}"
+            f"GridTraderChartDataManager initialized: mode={self.run_mode}, db_id={self.db_id}"
         )
 
     @staticmethod
@@ -87,27 +122,30 @@ class ChartDataManager:
         """Mark chart data as needing refresh."""
         self._chart_data_dirty = True
 
-    def _get_intraday_time_range(self) -> tuple:
+    def _get_intraday_time_range(self) -> Tuple[str, str]:
         """
         Get the intraday time range for InfluxDB queries.
-
-        In replay mode: returns the replay date's start and end of day
-        In live mode: returns today's start to now
-
-        Returns:
-            Tuple of (range_start, range_end) as InfluxDB time strings
+        Pre-market: 4:00 AM to 9:30 AM (330 minutes)
+        Regular hours: 9:30 AM to 4:00 PM (390 minutes)
         """
+        ny_tz = ZoneInfo("America/New_York")
+
         if self.run_mode == "replay":
-            # Replay mode: use specific date
-            year = self.db_date[:4]
-            month = self.db_date[4:6]
-            day = self.db_date[6:8]
-            range_start = f"{year}-{month}-{day}T00:00:00Z"
-            range_end = f"{year}-{month}-{day}T23:59:59Z"
+            year = int(self.db_date[:4])
+            month = int(self.db_date[4:6])
+            day = int(self.db_date[6:8])
+            # Create datetime in NY timezone to get correct offset for that date
+            start_dt = datetime(year, month, day, 4, 0, 0, tzinfo=ny_tz)
+            end_dt = datetime(year, month, day, 16, 0, 0, tzinfo=ny_tz)
+            range_start = start_dt.isoformat()
+            range_end = end_dt.isoformat()
         else:
-            # Live mode: use today
-            today = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
-            range_start = f"{today}T00:00:00-05:00"
+            today = datetime.now(ny_tz).strftime("%Y-%m-%d")
+            # Use ISO format with proper timezone for start
+            start_dt = datetime.now(ny_tz).replace(
+                hour=4, minute=0, second=0, microsecond=0
+            )
+            range_start = start_dt.isoformat()
             range_end = "now()"
 
         return range_start, range_end
@@ -119,17 +157,12 @@ class ChartDataManager:
     def get_top_n_tickers(self, n: int = 20) -> List[str]:
         """
         Get top N tickers by rank from the last snapshot in Redis Stream.
-        Reads the most recent message and returns tickers with rank <= n.
         """
-        import json
-
-        # Read the last entry from stream
         entries = self.redis_client.xrevrange(self.STREAM_NAME, count=1)
 
         if not entries:
             return []
 
-        # Parse the latest message
         entry_id, fields = entries[0]
         data_json = fields.get("data")
         if not data_json:
@@ -149,51 +182,22 @@ class ChartDataManager:
         current_membership.sort(key=lambda x: x[1])
         return [ticker for ticker, rank in current_membership]
 
-    def get_ticker_latest_state(self, ticker: str) -> Optional[Dict]:
-        """Query the latest state for a ticker from InfluxDB movers_state."""
-        range_start, range_end = self._get_intraday_time_range()
-
-        query = f"""
-        from(bucket: "{self.bucket}")
-            |> range(start: {range_start}, stop: {range_end})
-            |> filter(fn: (r) => r["_measurement"] == "movers_state")
-            |> filter(fn: (r) => r["symbol"] == "{ticker}")
-            |> filter(fn: (r) => r["run_mode"] == "{self.run_mode}")
-            |> filter(fn: (r) => r["db_id"] == "{self.db_id}")
-            |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
-            |> sort(columns: ["_time"], desc: true)
-            |> limit(n: 1)
-        """
-        try:
-            tables = self._query_api.query(query, org=self.org)
-            for table in tables:
-                for record in table.records:
-                    return {
-                        "state": record.values.get("state", "unknown"),
-                        "rank": int(record.values.get("rank", 0)),
-                        "percent_change": float(
-                            record.values.get("percent_change", 0.0)
-                        ),
-                        "rank_velocity": int(record.values.get("rank_velocity", 0)),
-                        "timestamp": record.get_time(),
-                    }
-            return None
-        except Exception as e:
-            logger.error(f"Error querying state for {ticker}: {e}")
-            return None
+    def _map_state_to_frontend(self, backend_state: str) -> str:
+        """Map backend state to frontend state."""
+        return self.STATE_MAPPING.get(backend_state, "OnWatch")
 
     def get_ticker_history(
         self, ticker: str, since: Optional[datetime] = None, limit: int = 500
     ) -> List[Dict]:
         """
         Query historical snapshot data for a ticker from InfluxDB.
-        Uses intraday time range (single day focus).
+        Returns list of {timestamp, changePercent, price, volume, rank}
         """
         if since is not None:
             range_start = since.isoformat()
             range_end = (
                 "now()"
-                if not self.run_mode == "replay"
+                if self.run_mode != "replay"
                 else f"{self.db_date[:4]}-{self.db_date[4:6]}-{self.db_date[6:8]}T23:59:59Z"
             )
         else:
@@ -207,8 +211,8 @@ class ChartDataManager:
             |> filter(fn: (r) => r["run_mode"] == "{self.run_mode}")
             |> filter(fn: (r) => r["db_id"] == "{self.db_id}")
             |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
+            |> sort(columns: ["_time"])
         """
-        # |> limit(n: {limit})
 
         try:
             tables = self._query_api.query(query, org=self.org)
@@ -218,9 +222,9 @@ class ChartDataManager:
                     results.append(
                         {
                             "timestamp": record.get_time(),
-                            "percent_change": record.values.get("changePercent", 0.0),
-                            "current_price": record.values.get("price", 0.0),
-                            "accumulated_volume": record.values.get("volume", 0),
+                            "changePercent": record.values.get("changePercent", 0.0),
+                            "price": record.values.get("price", 0.0),
+                            "volume": record.values.get("volume", 0),
                             "rank": record.values.get("rank", 0),
                         }
                     )
@@ -229,19 +233,131 @@ class ChartDataManager:
             logger.error(f"Error querying history for {ticker}: {e}")
             return []
 
-    def get_mmm_version_chart_data(
-        self, force_refresh: bool = False, top_n: int = 20
-    ) -> Dict:
+    def get_ticker_state_history(self, ticker: str) -> List[Dict]:
         """
-        Get data formatted for MMM chart visualization.
-        Reads from InfluxDB and formats for frontend consumption.
+        Query state history for a ticker from InfluxDB movers_state.
+        Returns list of {timestamp, state, stateReason} sorted by timestamp.
+        """
+        range_start, range_end = self._get_intraday_time_range()
 
-        Args:
-            force_refresh: Force refresh even if cache is valid
-            top_n: Number of top tickers to display (default: 20)
+        query = f"""
+        from(bucket: "{self.bucket}")
+            |> range(start: {range_start}, stop: {range_end})
+            |> filter(fn: (r) => r["_measurement"] == "movers_state")
+            |> filter(fn: (r) => r["symbol"] == "{ticker}")
+            |> filter(fn: (r) => r["run_mode"] == "{self.run_mode}")
+            |> filter(fn: (r) => r["db_id"] == "{self.db_id}")
+            |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
+            |> sort(columns: ["_time"])
+        """
+
+        try:
+            tables = self._query_api.query(query, org=self.org)
+            results = []
+            for table in tables:
+                for record in table.records:
+                    backend_state = record.values.get("state", "stable")
+                    frontend_state = self._map_state_to_frontend(backend_state)
+                    state_reason = record.values.get("stateReason", "")
+                    results.append(
+                        {
+                            "timestamp": record.get_time(),
+                            "state": frontend_state,
+                            "stateReason": state_reason,
+                        }
+                    )
+            return results
+        except Exception as e:
+            logger.error(f"Error querying state history for {ticker}: {e}")
+            return []
+
+    def get_latest_rank_data(self) -> tuple[List[Dict], Optional[str]]:
+        """
+        Get latest rank list data from Redis stream.
+        Returns tuple of (list matching frontend RankItem interface, timestamp string).
+        """
+        entries = self.redis_client.xrevrange(self.STREAM_NAME, count=1)
+
+        if not entries:
+            return [], None
+
+        entry_id, fields = entries[0]
+        data_json = fields.get("data")
+        timestamp = fields.get(
+            "timestamp"
+        )  # This is the snapshot timestamp from backend
+
+        if not data_json:
+            return [], timestamp
+
+        try:
+            tickers_data = json.loads(data_json)
+        except json.JSONDecodeError:
+            return [], timestamp
+
+        # Transform to frontend format
+        result = []
+        for item in tickers_data:
+            # Get the latest state and stateReason from state cursor
+            symbol = item.get("symbol", "")
+            state_key = f"{symbol}_state"
+            state_reason_key = f"{symbol}_stateReason"
+            backend_state = (
+                self.redis_client.hget(self.HSET_NAME, state_key) or "stable"
+            )
+            state_reason = (
+                self.redis_client.hget(self.HSET_NAME, state_reason_key) or ""
+            )
+            frontend_state = self._map_state_to_frontend(backend_state)
+
+            result.append(
+                {
+                    "symbol": symbol,
+                    "price": item.get("price", 0.0),
+                    "change": item.get("change", 0.0),
+                    "changePercent": item.get("changePercent", 0.0),
+                    "volume": item.get("volume", 0),
+                    "marketCap": item.get("marketCap", 0),
+                    "state": frontend_state,
+                    "stateReason": state_reason,
+                    "float": item.get("float_share", 0),
+                    "relativeVolumeDaily": item.get("relativeVolumeDaily", 1.0),
+                    "relativeVolume5min": item.get("relativeVolume5min", 1.0),
+                    "latestNewsTime": item.get("latestNewsTime"),  # May be None
+                    "rank": item.get("rank", 999),
+                }
+            )
+
+        # Sort by rank
+        result.sort(key=lambda x: x.get("rank", 999))
+        return result, timestamp
+
+    def get_overview_chart_data(
+        self,
+        force_refresh: bool = False,
+        top_n: int = 20,
+        interval_minutes: int = 5,
+    ) -> Dict[str, Any]:
+        """
+        Get data formatted for GridTrader's OverviewChartModule.
 
         Returns:
-            Dict with 'datasets' and 'highlights' for Chart.js
+            {
+                "data": [...time series data points...],
+                "segmentInfo": {
+                    "AAPL": [{"key": "AAPL_seg0", "color": "#10b981", "startIdx": 0, "endIdx": 10}, ...],
+                    ...
+                },
+                "rankData": [...RankItem data...],
+                "timestamp": "..."
+            }
+
+        Each data point contains:
+            - date: time label (e.g., "9:30")
+            - timestamp: epoch milliseconds
+            - {symbol}_value: percent change value
+            - {symbol}_state: state at that time
+            - {symbol}_seg0, {symbol}_seg1, ...: segment values (null when not in segment)
         """
         # Return cached data if not dirty and not forced
         if (
@@ -251,114 +367,154 @@ class ChartDataManager:
         ):
             return self._cached_chart_data
 
-        chart_data = {"datasets": [], "highlights": []}
+        # Get top N tickers
+        tickers = self.get_top_n_tickers(n=top_n)
+        if not tickers:
+            return {"data": [], "segmentInfo": {}, "rankData": [], "timestamp": None}
 
-        # Get top N tickers by current percent_change (not all subscribed)
-        subscribed_tickers = self.get_top_n_tickers(n=top_n)
+        # Collect all data for each ticker
+        ticker_histories: Dict[str, List[Dict]] = {}
+        ticker_state_histories: Dict[str, List[Dict]] = {}
 
-        for ticker in subscribed_tickers:
-            # Get latest state
-            state = self.get_ticker_latest_state(ticker)
-            if state is None:
-                continue
+        for ticker in tickers:
+            ticker_histories[ticker] = self.get_ticker_history(ticker)
+            ticker_state_histories[ticker] = self.get_ticker_state_history(ticker)
 
-            # Get historical data
-            history = self.get_ticker_history(ticker)
-            if not history:
-                continue
+        # Build unified time series
+        all_timestamps = set()
+        for history in ticker_histories.values():
+            for point in history:
+                all_timestamps.add(point["timestamp"])
 
-            rank = state.get("rank", 999)
-            state_name = state.get("state", "stable")
-            rank_velocity = state.get("rank_velocity", 0)
-            is_highlighted = state_name in ("new_entrant", "rising_fast", "rising")
+        if not all_timestamps:
+            return {"data": [], "segmentInfo": {}, "rankData": [], "timestamp": None}
 
-            # Build data points
-            data_points = [
-                {"x": h["timestamp"].isoformat(), "y": h["percent_change"]}
-                for h in history
-            ]
+        sorted_timestamps = sorted(all_timestamps)
 
-            # Get colors based on state
-            border_color = self._get_state_color(state_name, with_alpha=True)
-            bg_color = self._get_state_color(state_name, with_alpha=False)
+        # Build data points
+        data = []
+        for ts in sorted_timestamps:
+            # Format time label
+            ts_local = ts.astimezone(ZoneInfo("America/New_York"))
+            time_label = ts_local.strftime("%H:%M")
 
-            dataset = {
-                "label": ticker,
-                "data": data_points,
-                "borderColor": border_color,
-                "backgroundColor": bg_color,
-                "borderWidth": 3 if is_highlighted else 1,
-                "pointRadius": 2,
-                "tension": 0.1,
-                "rank": rank,
-                "alpha": 1.0,
-                "highlight": is_highlighted,
-                "velocity": rank_velocity,
-                "state": state_name,
-                "metadata": {
-                    "current_price": (
-                        history[-1].get("current_price", 0.0) if history else 0.0
-                    ),
-                    "volume": (
-                        history[-1].get("accumulated_volume", 0) if history else 0
-                    ),
-                },
+            data_point: Dict[str, Any] = {
+                "date": time_label,
+                "timestamp": int(ts.timestamp() * 1000),  # Epoch milliseconds
             }
 
-            chart_data["datasets"].append(dataset)
+            # Add data for each ticker
+            for ticker in tickers:
+                history = ticker_histories.get(ticker, [])
+                state_history = ticker_state_histories.get(ticker, [])
 
-            if is_highlighted:
-                chart_data["highlights"].append(
+                # Find the value at this timestamp (or interpolate)
+                value = None
+                for point in history:
+                    if point["timestamp"] == ts:
+                        value = point["changePercent"]
+                        break
+
+                # Find the state and stateReason at this timestamp
+                current_state = "OnWatch"  # Default
+                current_state_reason = ""
+                for sh in state_history:
+                    if sh["timestamp"] <= ts:
+                        current_state = sh["state"]
+                        current_state_reason = sh.get("stateReason", "")
+                    else:
+                        break
+
+                data_point[f"{ticker}_value"] = value
+                data_point[f"{ticker}_state"] = current_state
+                data_point[f"{ticker}_stateReason"] = current_state_reason
+
+            data.append(data_point)
+
+        # Build segment info for each ticker
+        segment_info: Dict[str, List[Dict]] = {}
+
+        for ticker in tickers:
+            segments: List[Dict] = []
+            current_state: Optional[str] = None
+            segment_start = 0
+            segment_index = 0
+
+            for idx, point in enumerate(data):
+                point_state = point.get(f"{ticker}_state")
+                point_value = point.get(f"{ticker}_value")
+
+                if point_value is None:
+                    continue
+
+                if point_state != current_state:
+                    if current_state is not None:
+                        # Close previous segment
+                        segment_key = f"{ticker}_seg{segment_index}"
+                        segments.append(
+                            {
+                                "key": segment_key,
+                                "color": self.STATE_COLORS.get(
+                                    current_state, "#6b7280"
+                                ),
+                                "startIdx": segment_start,
+                                "endIdx": idx,
+                            }
+                        )
+                        segment_index += 1
+
+                    # Start new segment
+                    segment_start = idx
+                    current_state = point_state
+
+            # Close final segment
+            if current_state is not None:
+                segment_key = f"{ticker}_seg{segment_index}"
+                segments.append(
                     {
-                        "ticker": ticker,
-                        "rank": rank,
-                        "velocity": rank_velocity,
-                        "state": state_name,
+                        "key": segment_key,
+                        "color": self.STATE_COLORS.get(current_state, "#6b7280"),
+                        "startIdx": segment_start,
+                        "endIdx": len(data) - 1,
                     }
                 )
 
-        # Sort datasets by rank
-        chart_data["datasets"].sort(key=lambda d: d.get("rank", 999))
+            segment_info[ticker] = segments
+
+        # Add segment values to data points
+        for ticker, segments in segment_info.items():
+            for segment in segments:
+                for idx, point in enumerate(data):
+                    if idx >= segment["startIdx"] and idx <= segment["endIdx"]:
+                        point[segment["key"]] = point.get(f"{ticker}_value")
+                    else:
+                        point[segment["key"]] = None
+
+        # Get rank data for legend/display (returns tuple of data and timestamp)
+        rank_data, snapshot_timestamp = self.get_latest_rank_data()
+
+        # Build result - use snapshot timestamp from data, not machine time
+        result = {
+            "data": data,
+            "segmentInfo": segment_info,
+            "rankData": rank_data,
+            "timestamp": snapshot_timestamp,  # Use the actual snapshot timestamp
+        }
 
         # Cache the result
-        self._cached_chart_data = chart_data
+        self._cached_chart_data = result
         self._chart_data_dirty = False
         self._last_query_time = datetime.now(ZoneInfo("America/New_York"))
 
-        return chart_data
+        logger.debug(
+            f"Overview chart data generated: {len(tickers)} tickers, "
+            f"{len(data)} data points, timestamp={result['timestamp']}"
+        )
 
-    def _get_state_color(self, state: str, with_alpha: bool) -> str:
-        """Get color based on state."""
-        base_color = self.STATE_COLORS.get(
-            state, "100, 149, 237"
-        )  # Default cornflower blue
-        alpha = 0.3 if with_alpha else 1.0
-        return f"rgba({base_color}, {alpha})"
-
-    def _get_rank_color(
-        self, rank: int, is_highlighted: bool, is_new_entrant: bool, with_alpha: bool
-    ) -> str:
-        """Generate color for stock based on rank and status (legacy method)."""
-        if is_highlighted:
-            if is_new_entrant:
-                base_color = "255, 0, 0"  # Red for new entrants
-            else:
-                base_color = "255, 165, 0"  # Orange for fast movers
-        else:
-            if rank <= 5:
-                base_color = f"{127 + (rank - 1) * 28}, {(rank - 1) * 51}, 255"
-            elif rank <= 10:
-                base_color = f"{100 + (rank-5) * 30}, 255, {200 - (rank-5) * 30}"
-            elif rank <= 15:
-                base_color = f"200, {200 - (rank-10) * 20}, {120 - (rank-10) * 15}"
-            else:
-                base_color = f"{10 + (20-rank) * 32}, {60 + (20-rank) * 32}, 255"
-
-        alpha = 0.3 if with_alpha else 1.0
-        return f"rgba({base_color}, {alpha})"
+        return result
 
     def close(self):
         """Clean up resources."""
         if self._influx_client:
             self._influx_client.close()
-        logger.info("ChartDataManager closed")
+        logger.info("GridTraderChartDataManager closed")

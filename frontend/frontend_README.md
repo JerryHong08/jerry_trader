@@ -1,4 +1,4 @@
 # Note
 
 GridTrader is the main developing frontend project.
-OrderTrader is just a experiment.
+OrderTrader is just a experiment, ignore it for now.

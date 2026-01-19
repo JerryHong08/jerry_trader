@@ -5,6 +5,7 @@ Replay collector.py saved csv file as marketsnapshot data simulation.
 
 import glob
 import json
+import logging
 import os
 import time
 from datetime import datetime, timedelta
@@ -18,6 +19,9 @@ from DataUtils.schema import (
     spot_check_SnapshotMsg_with_pydantic,
     validate_SnapshotMsg_schema,
 )
+from utils.logger import setup_logger
+
+logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
 
 r = redis.Redis(host="localhost", port=6379, db=0)
 
@@ -40,7 +44,7 @@ def extract_timestamp_from_filename(filename: str) -> datetime:
 
 
 def read_market_snapshot_with_timing(
-    replay_date: str, speed_multiplier: float = 1.0
+    replay_date: str, speed_multiplier: float = 1.0, start_from: str | None = None
 ) -> None:
     """
     replay file in market_mover_dir for the given date with timing based on filenames.
@@ -48,6 +52,7 @@ def read_market_snapshot_with_timing(
     Args:
         replay_date: replay date YYYYMMDD
         speed_multiplier: replay speed
+        start_from: optional timestamp (HHMMSS) to resume replay from (will start from the first file after this time)
     """
     year = replay_date[:4]
     month = replay_date[4:6]
@@ -56,18 +61,18 @@ def read_market_snapshot_with_timing(
     market_mover_dir = os.path.join(cache_dir, "market_mover", year, month, date)
 
     if not os.path.exists(market_mover_dir):
-        print(f"Directory not found: {market_mover_dir}")
+        logger.warning(f"Directory not found: {market_mover_dir}")
         return
 
     all_files = glob.glob(os.path.join(market_mover_dir, "*_market_snapshot.csv"))
 
     if not all_files:
-        print(f"No market snapshot files found in {market_mover_dir}")
+        logger.warning(f"No market snapshot files found in {market_mover_dir}")
         return
 
     all_files.sort()
 
-    print(f"Found {len(all_files)} files to replay")
+    logger.info(f"Found {len(all_files)} files to replay")
 
     # extract timestamps
     file_timestamps = []
@@ -75,9 +80,39 @@ def read_market_snapshot_with_timing(
         timestamp = extract_timestamp_from_filename(file)
         file_timestamps.append((file, timestamp))
 
+    # filter files if start_from is provided
+    if start_from:
+        # parse start_from as HHMMSS
+        start_hour = int(start_from[:2])
+        start_minute = int(start_from[2:4])
+        start_second = int(start_from[4:6])
+
+        # create start_from datetime using the replay date
+        start_from_dt = datetime(
+            int(replay_date[:4]),
+            int(replay_date[4:6]),
+            int(replay_date[6:8]),
+            start_hour,
+            start_minute,
+            start_second,
+            tzinfo=ZoneInfo("America/New_York"),
+        )
+
+        # filter to only files after start_from
+        original_count = len(file_timestamps)
+        file_timestamps = [(f, ts) for f, ts in file_timestamps if ts > start_from_dt]
+
+        if not file_timestamps:
+            logger.warning(f"No files found after {start_from_dt}")
+            return
+
+        logger.info(
+            f"Resuming from {start_from_dt}, skipped {original_count - len(file_timestamps)} files"
+        )
+
     first_file_time = file_timestamps[0][1]
 
-    print(f"Starting replay from {first_file_time}")
+    logger.info(f"Starting replay from {first_file_time}")
 
     first_file = True
 
@@ -88,10 +123,12 @@ def read_market_snapshot_with_timing(
             adjusted_wait_time = time_diff / speed_multiplier
 
             if adjusted_wait_time > 0:
-                print(f"Waiting {adjusted_wait_time:.2f}s (original: {time_diff:.2f}s)")
+                logger.debug(
+                    f"Waiting {adjusted_wait_time:.2f}s (original: {time_diff:.2f}s)"
+                )
                 time.sleep(adjusted_wait_time)
 
-        print(f"[{file_timestamp}] Reading file: {os.path.basename(file)}")
+        logger.info(f"[{file_timestamp}] Reading file: {os.path.basename(file)}")
 
         try:
             df = pl.read_csv(file)
@@ -104,16 +141,16 @@ def read_market_snapshot_with_timing(
 
             is_valid, error_msg = validate_SnapshotMsg_schema(df)
             if not is_valid:
-                print(f"❌ Schema validation failed: {error_msg}")
+                logger.error(f"Schema validation failed: {error_msg}")
                 continue
 
             if first_file:
                 if not spot_check_SnapshotMsg_with_pydantic(df, sample_size=5):
-                    print(f"❌ Pydantic validation failed for {file}")
+                    logger.error(f"Pydantic validation failed for {file}")
                     continue
                 first_file = False
 
-            print(f"✓ Validated {len(df)} rows")
+            logger.info(f"Validated {len(df)} rows")
 
             payload = df.write_json()
 
@@ -125,7 +162,7 @@ def read_market_snapshot_with_timing(
                 r.expire(STREAM_NAME, 1 * 19 * 3600)
 
         except Exception as e:
-            print(f"Error processing file {file}: {e}")
+            logger.error(f"Error processing file {file}: {e}")
             continue
 
 
@@ -137,10 +174,18 @@ if __name__ == "__main__":
     parser.add_argument(
         "--speed", type=float, default=1.0, help="Speed multiplier (default: 1.0)"
     )
+    parser.add_argument(
+        "--start-from",
+        type=str,
+        default=None,
+        help="Resume from timestamp (HHMMSS), e.g., 050110 to start from 05:01:10",
+    )
 
     args = parser.parse_args()
 
-    print(f"Replaying market snapshots for date: {args.date}")
-    print(f"Speed: {args.speed}x")
+    logger.info(f"Replaying market snapshots for date: {args.date}")
+    logger.info(f"Speed: {args.speed}x")
+    if args.start_from:
+        logger.info(f"Starting from: {args.start_from}")
 
-    read_market_snapshot_with_timing(args.date, args.speed)
+    read_market_snapshot_with_timing(args.date, args.speed, args.start_from)

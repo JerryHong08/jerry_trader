@@ -230,8 +230,8 @@ class StateEngine:
                         }
                     )
 
-                # Always update cursor
-                self._update_state_cursor(symbol, timestamp)
+                # Always update cursor with current state
+                self._update_state_cursor(symbol, current_state, timestamp)
 
             # Acknowledge the message
             self.r.xack(self.INPUT_STREAM_NAME, self.CONSUMER_GROUP, message_id)
@@ -278,22 +278,29 @@ class StateEngine:
         # Calculate rank velocity (positive = improving, negative = falling)
         rank_velocity = prev_rank - current_rank
 
-        # Determine state
+        # Determine state and reason
         if symbol not in self._ticker_states:
             state = "new_entrant"
+            state_reason = "New to top gainers"
         elif rank_velocity >= 5:
             state = "rising_fast"
+            state_reason = f"Rank +{rank_velocity} ({percent_change:+.1f}%)"
         elif rank_velocity >= 2:
             state = "rising"
+            state_reason = f"Rank +{rank_velocity}"
         elif rank_velocity <= -5:
             state = "falling_fast"
+            state_reason = f"Rank {rank_velocity}"
         elif rank_velocity <= -2:
             state = "falling"
+            state_reason = f"Rank {rank_velocity}"
         else:
             state = "stable"
+            state_reason = f"Rank #{current_rank}"
 
         return {
             "state": state,
+            "stateReason": state_reason,
             "rank": current_rank,
             "prev_rank": prev_rank,
             "rank_velocity": rank_velocity,
@@ -334,7 +341,7 @@ class StateEngine:
 
         Measurement: movers_state
         Tags: symbol, run_mode, db_id
-        Fields: state, rank, percent_change, rank_velocity
+        Fields: state, stateReason, rank, percent_change, rank_velocity
         Time: state_change timestamp
         """
         point = (
@@ -343,6 +350,7 @@ class StateEngine:
             .tag("run_mode", self.run_mode)
             .tag("db_id", self.db_id)
             .field("state", state.get("state", "unknown"))
+            .field("stateReason", state.get("stateReason", ""))
             .field("rank", int(state.get("rank", 0)))
             .field("percent_change", float(state.get("percent_change", 0.0)))
             .field("rank_velocity", int(state.get("rank_velocity", 0)))
@@ -419,13 +427,24 @@ class StateEngine:
     # OUTPUT: REDIS HSET (Cursor)
     # =========================================================================
 
-    def _update_state_cursor(self, symbol: str, timestamp: datetime) -> None:
+    def _update_state_cursor(
+        self, symbol: str, current_state: Dict, timestamp: datetime
+    ) -> None:
         """
         Update the state cursor in Redis HSET.
         Used for recovery/replay to know where to resume state computation.
+        Also stores current state and stateReason for quick lookup.
         """
         cursor_value = timestamp.isoformat()
-        self.r.hset(self.CURSOR_HSET_NAME, symbol, cursor_value)
+        # Store timestamp, state, and stateReason in HSET
+        self.r.hset(
+            self.CURSOR_HSET_NAME,
+            mapping={
+                symbol: cursor_value,
+                f"{symbol}_state": current_state.get("state", "stable"),
+                f"{symbol}_stateReason": current_state.get("stateReason", ""),
+            },
+        )
 
     # =========================================================================
     # PUBLIC API - State Access

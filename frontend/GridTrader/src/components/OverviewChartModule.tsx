@@ -1,31 +1,32 @@
-import React, { useState, useEffect } from 'react';
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from 'recharts';
-import { Filter, Focus, TrendingUp } from 'lucide-react';
+import React, { useState, useEffect, useRef, useMemo, useCallback, memo } from 'react';
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend, Brush, ReferenceLine } from 'recharts';
+import { Filter, Focus, TrendingUp, Wifi, WifiOff, ZoomIn, ZoomOut, Maximize2 } from 'lucide-react';
 import type { ModuleProps, RankItem, TickerState } from '../types';
-import { useBackendTimestamp } from '../hooks/useBackendTimestamps';
+import { useBackendTimestamp, timestampStore, parseTimestamp } from '../hooks/useBackendTimestamps';
+import { useOverviewChartData, useWebSocketConnection, useChartSubscriptions, type ChartSegment, type TickerDataWithHistory } from '../hooks/useWebSocket';
 
-// State history data structure for each ticker
+// State history data structure for each ticker (also exported from useWebSocket)
 interface StateHistoryPoint {
   timestamp: number;
   state: TickerState;
 }
 
-interface TickerDataWithHistory extends RankItem {
+interface LocalTickerDataWithHistory extends RankItem {
   stateHistory: StateHistoryPoint[];
 }
 
 const STATE_COLORS: Record<TickerState, string> = {
-  'confirming': '#eab308',
-  'on-watch': '#3b82f6',
-  'dead': '#6b7280',
-  'fresh-new': '#a855f7',
-  'running-up': '#10b981',
+  'Best': '#10b981',      // Green
+  'Good': '#34d399',      // Emerald
+  'OnWatch': '#3b82f6',   // Blue
+  'NotGood': '#eab308',   // Yellow
+  'Bad': '#6b7280',       // Gray
 };
 
 // Generate mock data with state history
-const generateMockRankData = (): TickerDataWithHistory[] => {
+const generateMockRankData = (): LocalTickerDataWithHistory[] => {
   const symbols = ['AAPL', 'TSLA', 'NVDA', 'MSFT', 'GOOGL', 'AMZN', 'META', 'AMD', 'NFLX', 'COIN', 'PLTR', 'RIVN', 'LCID', 'SOFI', 'BABA', 'NIO', 'SHOP', 'SQ', 'PYPL', 'ROKU'];
-  const states: TickerState[] = ['confirming', 'on-watch', 'dead', 'fresh-new', 'running-up'];
+  const states: TickerState[] = ['Best', 'Good', 'OnWatch', 'NotGood', 'Bad'];
   const now = Date.now();
 
   return symbols.map((symbol) => {
@@ -67,7 +68,7 @@ const generateMockRankData = (): TickerDataWithHistory[] => {
 // Generate mock price history with state changes for all symbols
 // Returns structured data with segments pre-calculated
 // Now focused on pre-market hours: 4:00 AM - 9:30 AM
-const generateOverviewData = (rankData: TickerDataWithHistory[]) => {
+const generateOverviewData = (rankData: LocalTickerDataWithHistory[]) => {
   const data: any[] = [];
   const now = Date.now();
 
@@ -188,20 +189,30 @@ export function OverviewChartModule({
   settings,
   onSettingsChange
 }: ModuleProps) {
-  const [rankData, setRankData] = useState<TickerDataWithHistory[]>([]);
+  const [rankData, setRankData] = useState<(LocalTickerDataWithHistory | TickerDataWithHistory)[]>([]);
   const [chartData, setChartData] = useState<any[]>([]);
   const [segmentInfo, setSegmentInfo] = useState<Record<string, Array<{key: string, color: string, startIdx: number, endIdx: number}>>>({});
-  const defaultStates: TickerState[] = settings?.overviewChart?.selectedStates || ['running-up', 'fresh-new', 'on-watch', 'confirming'];
+  const [useMockData, setUseMockData] = useState(false); // Toggle for mock/live data
+  // Default to ALL states selected so chart shows all tickers
+  const allStatesDefault: TickerState[] = ['Best', 'Good', 'OnWatch', 'NotGood', 'Bad'];
+  const defaultStates: TickerState[] = settings?.overviewChart?.selectedStates || allStatesDefault;
   const [selectedStates, setSelectedStates] = useState<Set<TickerState>>(new Set(defaultStates));
   const [showFilter, setShowFilter] = useState(false);
   const [focusMode, setFocusMode] = useState(settings?.overviewChart?.focusMode || false);
   const [timeRange, setTimeRange] = useState<string>(settings?.overviewChart?.timeRange || 'all');
   const [showTimeRangeMenu, setShowTimeRangeMenu] = useState(false);
 
-  const allStates: TickerState[] = ['confirming', 'on-watch', 'dead', 'fresh-new', 'running-up'];
+  // Brush/zoom state for interactive chart
+  const [brushStartIndex, setBrushStartIndex] = useState<number | undefined>(undefined);
+  const [brushEndIndex, setBrushEndIndex] = useState<number | undefined>(undefined);
+  const [hoveredTicker, setHoveredTicker] = useState<string | null>(null);
+  const hoverTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const allStates: TickerState[] = ['Best', 'Good', 'OnWatch', 'NotGood', 'Bad'];
 
   const timeRangeOptions = [
     { value: 'all', label: 'All', minutes: null },
+    { value: 'free', label: 'Free (drag)', minutes: null },  // Free mode for brush
     { value: '2h', label: 'Last 2 Hours', minutes: 120 },
     { value: '1h', label: 'Last Hour', minutes: 60 },
     { value: '30m', label: 'Last 30 Minutes', minutes: 30 },
@@ -212,14 +223,69 @@ export function OverviewChartModule({
   // Backend timestamp for market data domain (same as Rank List)
   const backendTimestamp = useBackendTimestamp('market-data');
 
-  // Initialize data
+  // WebSocket connection for live data
+  const connectionStatus = useWebSocketConnection();
+  const {
+    chartData: liveChartData,
+    segmentInfo: liveSegmentInfo,
+    rankData: liveRankData,
+    timestamp: liveTimestamp,
+    isConnected,
+    refresh
+  } = useOverviewChartData();
+
+  // Chart subscriptions from RankList
+  const { subscribedTickers } = useChartSubscriptions();
+
+  // Use live data when connected and not using mock mode
   useEffect(() => {
+    if (useMockData) {
+      // Mock mode is enabled - always use mock data
+      const mockData = generateMockRankData();
+      const { data, segmentInfo: segments } = generateOverviewData(mockData);
+      setRankData(mockData);
+      setChartData(data);
+      setSegmentInfo(segments);
+    } else if (isConnected) {
+      // Live mode - use live data from backend
+      if (liveChartData.length > 0) {
+        // Have chart data from backend
+        setChartData(liveChartData);
+        setSegmentInfo(liveSegmentInfo);
+        setRankData(liveRankData);
+        // Update timestamp store with live timestamp
+        const parsedTime = parseTimestamp(liveTimestamp);
+        if (parsedTime) {
+          timestampStore.updateTimestamp('market-data', parsedTime);
+        }
+      } else if (liveRankData.length > 0) {
+        // Connected but no chart data yet - generate chart from rankData
+        const convertedRankData = liveRankData.map(item => ({
+          ...item,
+          stateHistory: [{ timestamp: Date.now(), state: item.state }]
+        } as LocalTickerDataWithHistory));
+        const { data, segmentInfo: segments } = generateOverviewData(convertedRankData);
+        setRankData(convertedRankData);
+        setChartData(data);
+        setSegmentInfo(segments);
+        // Update timestamp
+        const parsedTime = parseTimestamp(liveTimestamp);
+        if (parsedTime) {
+          timestampStore.updateTimestamp('market-data', parsedTime);
+        }
+      }
+    }
+  }, [liveChartData, liveSegmentInfo, liveRankData, liveTimestamp, isConnected, useMockData]);
+
+  // Initialize with mock data on first render
+  useEffect(() => {
+    // Only run once on mount - show mock data initially
     const mockData = generateMockRankData();
     const { data, segmentInfo: segments } = generateOverviewData(mockData);
     setRankData(mockData);
     setChartData(data);
     setSegmentInfo(segments);
-  }, []);
+  }, []); // Empty deps = run once on mount
 
   // Update settings from props
   useEffect(() => {
@@ -234,142 +300,230 @@ export function OverviewChartModule({
     }
   }, [settings?.overviewChart?.selectedStates, settings?.overviewChart?.focusMode, settings?.overviewChart?.timeRange]);
 
-  const toggleState = (state: TickerState) => {
-    const newStates = new Set(selectedStates);
-    if (newStates.has(state)) {
-      newStates.delete(state);
-    } else {
-      newStates.add(state);
-    }
-    setSelectedStates(newStates);
-    onSettingsChange?.({
-      overviewChart: {
-        selectedStates: Array.from(newStates),
-        focusMode,
-        timeRange,
+  const toggleState = useCallback((state: TickerState) => {
+    setSelectedStates(prev => {
+      const newStates = new Set(prev);
+      if (newStates.has(state)) {
+        newStates.delete(state);
+      } else {
+        newStates.add(state);
       }
+      onSettingsChange?.({
+        overviewChart: {
+          selectedStates: Array.from(newStates),
+          focusMode,
+          timeRange,
+        }
+      });
+      return newStates;
     });
-  };
+  }, [focusMode, timeRange, onSettingsChange]);
 
-  const toggleFocusMode = () => {
-    const newFocusMode = !focusMode;
-    setFocusMode(newFocusMode);
-    onSettingsChange?.({
-      overviewChart: {
-        selectedStates: Array.from(selectedStates),
-        focusMode: newFocusMode,
-        timeRange,
-      }
+  const toggleFocusMode = useCallback(() => {
+    setFocusMode(prev => {
+      const newFocusMode = !prev;
+      onSettingsChange?.({
+        overviewChart: {
+          selectedStates: Array.from(selectedStates),
+          focusMode: newFocusMode,
+          timeRange,
+        }
+      });
+      return newFocusMode;
     });
-  };
+  }, [selectedStates, timeRange, onSettingsChange]);
 
-  const getStateColor = (state: TickerState): string => {
+  const getStateColor = useCallback((state: TickerState): string => {
     switch (state) {
-      case 'confirming': return 'bg-yellow-600';
-      case 'on-watch': return 'bg-blue-600';
-      case 'dead': return 'bg-gray-600';
-      case 'fresh-new': return 'bg-purple-600';
-      case 'running-up': return 'bg-green-600';
+      case 'Best': return 'bg-green-600';
+      case 'Good': return 'bg-emerald-500';
+      case 'OnWatch': return 'bg-blue-600';
+      case 'NotGood': return 'bg-yellow-600';
+      case 'Bad': return 'bg-gray-600';
       default: return 'bg-gray-600';
     }
-  };
+  }, []);
 
-  const CustomTooltip = ({ active, payload, label }: any) => {
-    if (active && payload && payload.length) {
-      // Group by symbol (remove segment suffix)
-      const symbolData: Record<string, {value: number, state: TickerState, color: string}> = {};
+  // Memoized CustomTooltip - only shows the hovered ticker
+  const CustomTooltip = useMemo(() => {
+    return memo(({ active, payload, label }: any) => {
+      if (!active || !payload || payload.length === 0) return null;
 
-      payload.forEach((entry: any) => {
+      // If no ticker is hovered, find the one with max value at this point
+      let targetSymbol = hoveredTicker;
+
+      if (!targetSymbol) {
+        // Find the ticker with the maximum absolute value at this point
+        let maxValue = -Infinity;
+        payload.forEach((entry: any) => {
+          if (entry.value !== null && entry.dataKey.includes('_seg')) {
+            const absVal = Math.abs(entry.value);
+            if (absVal > maxValue) {
+              maxValue = absVal;
+              targetSymbol = entry.dataKey.split('_seg')[0];
+            }
+          }
+        });
+      }
+
+      if (!targetSymbol) return null;
+
+      // Find data for the target ticker
+      let tickerData: { value: number; state: TickerState; color: string; stateReason?: string } | null = null;
+
+      for (const entry of payload) {
         if (entry.value !== null && entry.dataKey.includes('_seg')) {
           const symbol = entry.dataKey.split('_seg')[0];
-          if (!symbolData[symbol]) {
+          if (symbol === targetSymbol) {
             const state = entry.payload[`${symbol}_state`];
-            symbolData[symbol] = {
+            const stateReason = entry.payload[`${symbol}_stateReason`];
+            tickerData = {
               value: entry.value,
               state,
               color: entry.stroke,
+              stateReason,
             };
+            break;
+          }
+        }
+      }
+
+      if (!tickerData) return null;
+
+      const stateColorClass = (() => {
+        switch (tickerData.state) {
+          case 'Best': return 'bg-green-600';
+          case 'Good': return 'bg-emerald-500';
+          case 'OnWatch': return 'bg-blue-600';
+          case 'NotGood': return 'bg-yellow-600';
+          case 'Bad': return 'bg-gray-600';
+          default: return 'bg-gray-600';
+        }
+      })();
+
+      return (
+        <div className="bg-zinc-800 border border-zinc-700 p-2 text-xs shadow-lg">
+          <div className="mb-1 text-gray-400">{label}</div>
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <div
+                className="w-2 h-2 rounded-full"
+                style={{ backgroundColor: tickerData.color }}
+              />
+              <span className="font-medium" style={{ color: tickerData.color }}>
+                {targetSymbol}
+              </span>
+              <span style={{ color: tickerData.color }}>
+                {tickerData.value >= 0 ? '+' : ''}{tickerData.value.toFixed(2)}%
+              </span>
+            </div>
+            <div className="flex items-center gap-2 ml-4">
+              <span className={`px-1 py-0.5 text-[10px] ${stateColorClass} rounded`}>
+                {tickerData.state}
+              </span>
+              {tickerData.stateReason && (
+                <span className="text-gray-400 text-[10px]">
+                  {tickerData.stateReason}
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    });
+  }, [hoveredTicker]);
+
+  // Memoized CustomLegend
+  const CustomLegend = useMemo(() => {
+    return memo(({ payload }: any) => {
+      // Group by symbol
+      const symbolMap: Record<string, {color: string}> = {};
+      payload.forEach((entry: any) => {
+        if (entry.dataKey.includes('_seg')) {
+          const symbol = entry.dataKey.split('_seg')[0];
+          if (!symbolMap[symbol]) {
+            symbolMap[symbol] = { color: entry.color };
           }
         }
       });
 
       return (
-        <div className="bg-zinc-800 border border-zinc-700 p-2 text-xs max-h-64 overflow-auto">
-          <div className="mb-1">{label}</div>
-          {Object.entries(symbolData).map(([symbol, data]) => (
-            <div key={symbol} className="flex items-center gap-2">
+        <div className="flex flex-wrap gap-3 justify-center mt-2">
+          {Object.entries(symbolMap).map(([symbol, data]) => (
+            <div key={symbol} className="flex items-center gap-1 text-xs">
               <div
-                className="w-2 h-2 rounded-full"
+                className="w-3 h-0.5"
                 style={{ backgroundColor: data.color }}
               />
-              <span style={{ color: data.color }}>
-                {symbol}: {data.value.toFixed(2)}%
-              </span>
-              <span className={`px-1 py-0.5 text-[10px] ${getStateColor(data.state)} rounded`}>
-                {data.state}
-              </span>
+              <span>{symbol}</span>
             </div>
           ))}
         </div>
       );
-    }
-    return null;
-  };
-
-  // Custom legend to show only one entry per ticker
-  const CustomLegend = ({ payload }: any) => {
-    // Group by symbol
-    const symbolMap: Record<string, {color: string}> = {};
-    payload.forEach((entry: any) => {
-      if (entry.dataKey.includes('_seg')) {
-        const symbol = entry.dataKey.split('_seg')[0];
-        if (!symbolMap[symbol]) {
-          symbolMap[symbol] = { color: entry.color };
-        }
-      }
     });
+  }, []);
 
-    return (
-      <div className="flex flex-wrap gap-3 justify-center mt-2">
-        {Object.entries(symbolMap).map(([symbol, data]) => (
-          <div key={symbol} className="flex items-center gap-1 text-xs">
-            <div
-              className="w-3 h-0.5"
-              style={{ backgroundColor: data.color }}
-            />
-            <span>{symbol}</span>
-          </div>
-        ))}
-      </div>
-    );
-  };
+  // Memoize displayed rank data to avoid recalculation on every render
+  const displayedRankData = useMemo(() => {
+    let result: TickerDataWithHistory[];
 
-  // Determine which tickers to show
-  let displayedRankData: TickerDataWithHistory[];
+    if (focusMode && syncGroup && selectedSymbol) {
+      // Focus mode: show only selected symbol if its current state matches the filter
+      result = rankData.filter(
+        item => item.symbol === selectedSymbol && selectedStates.has(item.state)
+      );
+    } else {
+      // Normal mode: filter by selected states AND subscription status
+      result = rankData.filter(item => {
+        const matchesState = selectedStates.has(item.state);
+        // If we have subscriptions, filter by them; otherwise show all
+        const matchesSubscription = subscribedTickers.size === 0 || subscribedTickers.has(item.symbol);
+        return matchesState && matchesSubscription;
+      });
+    }
+    return result;
+  }, [rankData, focusMode, syncGroup, selectedSymbol, selectedStates, subscribedTickers]);
 
-  if (focusMode && syncGroup && selectedSymbol) {
-    // Focus mode: show only selected symbol if its current state matches the filter
-    displayedRankData = rankData.filter(
-      item => item.symbol === selectedSymbol && selectedStates.has(item.state)
-    );
-  } else {
-    // Normal mode: filter by selected states
-    displayedRankData = rankData.filter(item => selectedStates.has(item.state));
-  }
+  // Memoize filtered chart data
+  const filteredChartData = useMemo(() => {
+    const selectedTimeRangeOption = timeRangeOptions.find(opt => opt.value === timeRange);
 
-  // Apply time range filter to chart data
-  let filteredChartData = chartData;
-  const selectedTimeRangeOption = timeRangeOptions.find(opt => opt.value === timeRange);
+    // In 'free' mode, use brush indices; otherwise use time-based filtering
+    if (timeRange === 'free' && brushStartIndex !== undefined && brushEndIndex !== undefined) {
+      // Free mode with brush - data is already filtered by Brush component
+      return chartData;
+    } else if (selectedTimeRangeOption && selectedTimeRangeOption.minutes !== null && chartData.length > 0) {
+      // Use the latest timestamp from chart data (not machine time) for replay mode compatibility
+      const latestTimestamp = Math.max(...chartData.map(p => p.timestamp || 0));
+      const cutoffTime = latestTimestamp - selectedTimeRangeOption.minutes * 60 * 1000;
+      return chartData.filter(point => point.timestamp >= cutoffTime);
+    }
+    return chartData;
+  }, [chartData, timeRange, brushStartIndex, brushEndIndex]);
 
-  if (selectedTimeRangeOption && selectedTimeRangeOption.minutes !== null) {
-    // Filter to show only the last N minutes
-    const cutoffTime = Date.now() - selectedTimeRangeOption.minutes * 60 * 1000;
-    filteredChartData = chartData.filter(point => point.timestamp >= cutoffTime);
-  }
+  // Handle brush change for free mode - memoized
+  const handleBrushChange = useCallback((brushData: { startIndex?: number; endIndex?: number }) => {
+    if (brushData.startIndex !== undefined && brushData.endIndex !== undefined) {
+      setBrushStartIndex(brushData.startIndex);
+      setBrushEndIndex(brushData.endIndex);
+    }
+  }, []);
 
-  const handleTimeRangeChange = (value: string) => {
+  // Reset zoom to show all data - memoized
+  const resetZoom = useCallback(() => {
+    setBrushStartIndex(undefined);
+    setBrushEndIndex(undefined);
+    setTimeRange('all');
+  }, []);
+
+  const handleTimeRangeChange = useCallback((value: string) => {
     setTimeRange(value);
     setShowTimeRangeMenu(false);
+    // Reset brush when changing time range
+    if (value !== 'free') {
+      setBrushStartIndex(undefined);
+      setBrushEndIndex(undefined);
+    }
     onSettingsChange?.({
       overviewChart: {
         selectedStates: Array.from(selectedStates),
@@ -377,7 +531,53 @@ export function OverviewChartModule({
         timeRange: value,
       }
     });
-  };
+  }, [selectedStates, focusMode, onSettingsChange]);
+
+  // Throttled hover handlers to reduce state updates
+  const handleLineMouseEnter = useCallback((symbol: string) => {
+    if (hoverTimeoutRef.current) {
+      clearTimeout(hoverTimeoutRef.current);
+    }
+    setHoveredTicker(symbol);
+  }, []);
+
+  const handleLineMouseLeave = useCallback(() => {
+    if (hoverTimeoutRef.current) {
+      clearTimeout(hoverTimeoutRef.current);
+    }
+    // Debounce the leave to avoid flickering between lines
+    hoverTimeoutRef.current = setTimeout(() => {
+      setHoveredTicker(null);
+    }, 50);
+  }, []);
+
+  const handleChartMouseLeave = useCallback(() => {
+    if (hoverTimeoutRef.current) {
+      clearTimeout(hoverTimeoutRef.current);
+    }
+    setHoveredTicker(null);
+  }, []);
+
+  const getConnectionStatusColor = useCallback(() => {
+    switch (connectionStatus) {
+      case 'connected': return 'text-green-500';
+      case 'connecting': return 'text-yellow-500';
+      case 'error': return 'text-red-500';
+      default: return 'text-gray-500';
+    }
+  }, [connectionStatus]);
+
+  // Memoize the lines to render
+  const chartLines = useMemo(() => {
+    return displayedRankData.flatMap((item) => {
+      const segments = segmentInfo[item.symbol] || [];
+      return segments.map((segment) => ({
+        key: segment.key,
+        symbol: item.symbol,
+        color: segment.color,
+      }));
+    });
+  }, [displayedRankData, segmentInfo]);
 
   return (
     <div className="h-full flex flex-col bg-zinc-900">
@@ -385,6 +585,10 @@ export function OverviewChartModule({
       <div className="p-3 border-b border-zinc-800">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
+            {/* Connection status indicator */}
+            <div className={`flex items-center gap-1 ${getConnectionStatusColor()}`} title={`Status: ${connectionStatus}`}>
+              {isConnected ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
+            </div>
             <span className="text-sm">
               {focusMode && syncGroup && selectedSymbol
                 ? `Focused: ${selectedSymbol}`
@@ -396,9 +600,38 @@ export function OverviewChartModule({
             <span className="text-xs text-gray-500">
               Updated: {backendTimestamp}
             </span>
+            {/* Mock/Live toggle */}
+            <button
+              onClick={() => setUseMockData(!useMockData)}
+              className={`text-xs px-2 py-0.5 rounded ${useMockData ? 'bg-yellow-600' : 'bg-green-700'}`}
+              title={useMockData ? 'Using mock data' : 'Using live data'}
+            >
+              {useMockData ? 'Mock' : 'Live'}
+            </button>
           </div>
 
           <div className="flex items-center gap-2">
+            {/* Reset zoom button (only for free mode with active zoom) */}
+            {timeRange === 'free' && (brushStartIndex !== undefined || brushEndIndex !== undefined) && (
+              <button
+                onClick={resetZoom}
+                className="p-1 hover:bg-zinc-800 transition-colors rounded text-xs text-gray-400 flex items-center gap-1"
+                title="Reset zoom"
+              >
+                <Maximize2 className="w-3 h-3" />
+                Reset
+              </button>
+            )}
+            {/* Refresh button (only for live mode) */}
+            {!useMockData && (
+              <button
+                onClick={refresh}
+                className="p-1 hover:bg-zinc-800 transition-colors rounded text-xs text-gray-400"
+                title="Refresh data"
+              >
+                ↻
+              </button>
+            )}
             {/* Time Range Button */}
             <div className="relative">
               <button
@@ -479,7 +712,11 @@ export function OverviewChartModule({
         ) : (
           <div className="w-full h-full">
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={filteredChartData} margin={{ top: 10, right: 20, left: 10, bottom: 10 }}>
+              <LineChart
+                data={filteredChartData}
+                margin={{ top: 10, right: 20, left: 10, bottom: timeRange === 'free' ? 40 : 10 }}
+                onMouseLeave={handleChartMouseLeave}
+              >
                 <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
                 <XAxis
                   dataKey="date"
@@ -495,23 +732,37 @@ export function OverviewChartModule({
                 <Tooltip content={<CustomTooltip />} />
                 <Legend content={<CustomLegend />} />
 
-                {/* Render line segments for each displayed ticker */}
-                {displayedRankData.map((item) => {
-                  const segments = segmentInfo[item.symbol] || [];
-                  return segments.map((segment, idx) => (
-                    <Line
-                      key={segment.key}
-                      type="monotone"
-                      dataKey={segment.key}
-                      stroke={segment.color}
-                      strokeWidth={2}
-                      dot={false}
-                      isAnimationActive={false}
-                      connectNulls={false}
-                      legendType="none"
-                    />
-                  ));
-                })}
+                {/* Render line segments using memoized line data */}
+                {chartLines.map((line) => (
+                  <Line
+                    key={line.key}
+                    type="monotone"
+                    dataKey={line.key}
+                    stroke={line.color}
+                    strokeWidth={hoveredTicker === line.symbol ? 3 : 2}
+                    strokeOpacity={hoveredTicker && hoveredTicker !== line.symbol ? 0.3 : 1}
+                    dot={false}
+                    isAnimationActive={false}
+                    connectNulls={false}
+                    legendType="none"
+                    onMouseEnter={() => handleLineMouseEnter(line.symbol)}
+                    onMouseLeave={handleLineMouseLeave}
+                    style={{ cursor: 'pointer' }}
+                  />
+                ))}
+
+                {/* Brush for free zoom mode */}
+                {timeRange === 'free' && (
+                  <Brush
+                    dataKey="date"
+                    height={30}
+                    stroke="#3b82f6"
+                    fill="#1f2937"
+                    onChange={handleBrushChange}
+                    startIndex={brushStartIndex}
+                    endIndex={brushEndIndex}
+                  />
+                )}
               </LineChart>
             </ResponsiveContainer>
           </div>

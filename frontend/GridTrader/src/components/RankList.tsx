@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { TrendingUp, TrendingDown, ArrowUpDown, ArrowUp, ArrowDown, Settings, X, Newspaper } from 'lucide-react';
+import React, { useState, useEffect, useRef, useMemo, useCallback, memo } from 'react';
+import { TrendingUp, TrendingDown, ArrowUpDown, ArrowUp, ArrowDown, Settings, X, Newspaper, Wifi, WifiOff, Eye, EyeOff } from 'lucide-react';
 import type { ModuleProps, RankItem, TickerState, RankListSortColumn, RankListSortDirection } from '../types';
-import { useBackendTimestamp } from '../hooks/useBackendTimestamps';
+import { useBackendTimestamp, timestampStore, parseTimestamp } from '../hooks/useBackendTimestamps';
+import { useRankListData, useWebSocketConnection, useChartSubscriptions } from '../hooks/useWebSocket';
 
 // Default column configuration
 const DEFAULT_COLUMNS: RankListSortColumn[] = [
@@ -50,7 +51,7 @@ const COLUMN_LABELS: Record<string, string> = {
 // Mock data for top gainers
 const generateMockData = (): RankItem[] => {
   const symbols = ['AAPL', 'TSLA', 'NVDA', 'MSFT', 'GOOGL', 'AMZN', 'META', 'AMD', 'NFLX', 'COIN', 'PLTR', 'RIVN', 'LCID', 'SOFI', 'BABA', 'NIO', 'SHOP', 'SQ', 'PYPL', 'ROKU'];
-  const states: TickerState[] = ['confirming', 'on-watch', 'dead', 'fresh-new', 'running-up'];
+  const states: TickerState[] = ['Best', 'Good', 'OnWatch', 'NotGood', 'Bad'];
 
   return symbols.map((symbol, index) => {
     // Randomly assign news timing: 30% fresh (< 1hr), 30% old (1-24hrs), 40% no news
@@ -85,11 +86,11 @@ const generateMockData = (): RankItem[] => {
 
 const getStateColor = (state: TickerState): string => {
   switch (state) {
-    case 'confirming': return 'bg-yellow-600';
-    case 'on-watch': return 'bg-blue-600';
-    case 'dead': return 'bg-gray-600';
-    case 'fresh-new': return 'bg-purple-600';
-    case 'running-up': return 'bg-green-600';
+    case 'Best': return 'bg-green-600';
+    case 'Good': return 'bg-emerald-500';
+    case 'OnWatch': return 'bg-blue-600';
+    case 'NotGood': return 'bg-yellow-600';
+    case 'Bad': return 'bg-gray-600';
     default: return 'bg-gray-600';
   }
 };
@@ -104,6 +105,7 @@ const getNewsAge = (timestamp?: number): 'fresh' | 'old' | 'none' => {
 
 export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, onSettingsChange }: ModuleProps) {
   const [data, setData] = useState<RankItem[]>([]);
+  const [useMockData, setUseMockData] = useState(false); // Toggle for mock/live data
   const [sortColumn, setSortColumn] = useState<RankListSortColumn>(settings?.rankList?.sortColumn || 'changePercent');
   const [sortDirection, setSortDirection] = useState<RankListSortDirection>(settings?.rankList?.sortDirection || 'desc');
   const [visibleColumns, setVisibleColumns] = useState<RankListSortColumn[]>(
@@ -116,12 +118,28 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
     settings?.rankList?.columnOrder || DEFAULT_COLUMNS
   );
   const [showColumnSettings, setShowColumnSettings] = useState(false);
+
+  // Chart subscription management
+  const { subscribedTickers, toggleSubscription, isSubscribed, subscribeAll } = useChartSubscriptions();
+
+  // Auto-subscribe top N tickers when data loads (if no subscriptions yet)
+  useEffect(() => {
+    if (data.length > 0 && subscribedTickers.size === 0) {
+      // Subscribe top 20 by default
+      const top20 = data.slice(0, 20).map(item => item.symbol);
+      subscribeAll(top20);
+    }
+  }, [data, subscribedTickers.size, subscribeAll]);
   const [resizingColumn, setResizingColumn] = useState<string | null>(null);
   const [draggedColumn, setDraggedColumn] = useState<RankListSortColumn | null>(null);
   const [dragOverColumn, setDragOverColumn] = useState<RankListSortColumn | null>(null);
 
   // Backend timestamp for market data domain
   const backendTimestamp = useBackendTimestamp('market-data');
+
+  // WebSocket connection for live data
+  const connectionStatus = useWebSocketConnection();
+  const { data: liveData, timestamp: liveTimestamp, isConnected, refresh } = useRankListData();
 
   // Use refs for resize state to avoid re-renders during drag
   const resizeStateRef = useRef<{
@@ -136,33 +154,44 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
     currentWidth: 0,
   });
 
+  // Use live data when connected and not using mock mode
   useEffect(() => {
-    setData(generateMockData());
-
-    // Simulate real-time updates
-    const interval = setInterval(() => {
+    if (useMockData) {
+      // Mock mode is enabled - always use mock data
       setData(generateMockData());
-    }, 5000);
+      const interval = setInterval(() => {
+        setData(generateMockData());
+      }, 5000);
+      return () => clearInterval(interval);
+    } else if (isConnected && liveData.length > 0) {
+      // Live mode with connected backend and data available
+      setData(liveData);
+      // Update timestamp store with live timestamp
+      const parsedTime = parseTimestamp(liveTimestamp);
+      if (parsedTime) {
+        timestampStore.updateTimestamp('market-data', parsedTime);
+      }
+    }
+    // If not using mock and either not connected or no data, keep existing state
+    // This prevents auto-switching to mock data when connection is temporarily lost
+  }, [liveData, liveTimestamp, isConnected, useMockData]);
 
-    return () => clearInterval(interval);
+  const formatNumber = useCallback((num: number, decimals = 2) => {
+    return num.toFixed(decimals).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
   }, []);
 
-  const formatNumber = (num: number, decimals = 2) => {
-    return num.toFixed(decimals).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-  };
-
-  const formatVolume = (vol: number) => {
+  const formatVolume = useCallback((vol: number) => {
     if (vol >= 1e9) return `${(vol / 1e9).toFixed(2)}B`;
     if (vol >= 1e6) return `${(vol / 1e6).toFixed(2)}M`;
     if (vol >= 1e3) return `${(vol / 1e3).toFixed(2)}K`;
     return vol.toString();
-  };
+  }, []);
 
-  const handleRowClick = (symbol: string) => {
+  const handleRowClick = useCallback((symbol: string) => {
     onSymbolSelect?.(symbol);
-  };
+  }, [onSymbolSelect]);
 
-  const handleSort = (column: RankListSortColumn) => {
+  const handleSort = useCallback((column: RankListSortColumn) => {
     let newDirection: RankListSortDirection = 'desc';
 
     if (column === sortColumn) {
@@ -184,18 +213,18 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
     setSortColumn(column);
     setSortDirection(newDirection);
     onSettingsChange?.(newSettings);
-  };
+  }, [sortColumn, sortDirection, visibleColumns, columnWidths, columnOrder, onSettingsChange]);
 
-  const getSortIcon = (column: RankListSortColumn) => {
+  const getSortIcon = useCallback((column: RankListSortColumn) => {
     if (sortColumn !== column) {
       return <ArrowUpDown className="w-3 h-3 opacity-30" />;
     }
     return sortDirection === 'asc'
       ? <ArrowUp className="w-3 h-3" />
       : <ArrowDown className="w-3 h-3" />;
-  };
+  }, [sortColumn, sortDirection]);
 
-  const toggleColumnVisibility = (column: RankListSortColumn) => {
+  const toggleColumnVisibility = useCallback((column: RankListSortColumn) => {
     const newVisibleColumns = visibleColumns.includes(column)
       ? visibleColumns.filter(c => c !== column)
       : [...visibleColumns, column];
@@ -211,7 +240,7 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
         columnOrder,
       },
     });
-  };
+  }, [sortColumn, sortDirection, visibleColumns, columnWidths, columnOrder, onSettingsChange]);
 
   // Column resizing - using refs to avoid re-renders
   const handleResizeStart = (e: React.MouseEvent, column: string) => {
@@ -329,32 +358,36 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
     setDragOverColumn(null);
   };
 
-  // Sort the data
-  const sortedData = [...data].sort((a, b) => {
-    let aVal: any = a[sortColumn as keyof RankItem];
-    let bVal: any = b[sortColumn as keyof RankItem];
+  // Memoize sorted data to avoid re-sorting on every render
+  const sortedData = useMemo(() => {
+    return [...data].sort((a, b) => {
+      let aVal: any = a[sortColumn as keyof RankItem];
+      let bVal: any = b[sortColumn as keyof RankItem];
 
-    // Handle news sorting
-    if (sortColumn === 'news') {
-      aVal = a.latestNewsTime || 0;
-      bVal = b.latestNewsTime || 0;
-    }
+      // Handle news sorting
+      if (sortColumn === 'news') {
+        aVal = a.latestNewsTime || 0;
+        bVal = b.latestNewsTime || 0;
+      }
 
-    // Handle string comparison
-    if (sortColumn === 'symbol' || sortColumn === 'state') {
-      aVal = String(aVal).toLowerCase();
-      bVal = String(bVal).toLowerCase();
-    }
+      // Handle string comparison
+      if (sortColumn === 'symbol' || sortColumn === 'state') {
+        aVal = String(aVal).toLowerCase();
+        bVal = String(bVal).toLowerCase();
+      }
 
-    if (sortDirection === 'asc') {
-      return aVal > bVal ? 1 : -1;
-    } else {
-      return aVal < bVal ? 1 : -1;
-    }
-  });
+      if (sortDirection === 'asc') {
+        return aVal > bVal ? 1 : -1;
+      } else {
+        return aVal < bVal ? 1 : -1;
+      }
+    });
+  }, [data, sortColumn, sortDirection]);
 
-  // Get ordered visible columns
-  const orderedVisibleColumns = columnOrder.filter(col => visibleColumns.includes(col));
+  // Memoize ordered visible columns
+  const orderedVisibleColumns = useMemo(() => {
+    return columnOrder.filter(col => visibleColumns.includes(col));
+  }, [columnOrder, visibleColumns]);
 
   const renderCell = (column: RankListSortColumn, item: RankItem, index: number) => {
     switch (column) {
@@ -437,25 +470,57 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
     return 'text-right';
   };
 
+  const getConnectionStatusColor = () => {
+    switch (connectionStatus) {
+      case 'connected': return 'text-green-500';
+      case 'connecting': return 'text-yellow-500';
+      case 'error': return 'text-red-500';
+      default: return 'text-gray-500';
+    }
+  };
+
   return (
     <div className="h-full flex flex-col">
       {/* Column Settings Button */}
       <div className="flex items-center justify-between p-2 border-b border-zinc-800 bg-zinc-900">
         <div className="flex items-center gap-3">
+          {/* Connection status indicator */}
+          <div className={`flex items-center gap-1 ${getConnectionStatusColor()}`} title={`Status: ${connectionStatus}`}>
+            {isConnected ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
+          </div>
           <div className="text-sm text-gray-400">
             {data.length} symbols
           </div>
           <div className="text-xs text-gray-500">
             Updated: {backendTimestamp}
           </div>
+          {/* Mock/Live toggle */}
+          <button
+            onClick={() => setUseMockData(!useMockData)}
+            className={`text-xs px-2 py-0.5 rounded ${useMockData ? 'bg-yellow-600' : 'bg-green-700'}`}
+            title={useMockData ? 'Using mock data' : 'Using live data'}
+          >
+            {useMockData ? 'Mock' : 'Live'}
+          </button>
         </div>
-        <button
-          onClick={() => setShowColumnSettings(!showColumnSettings)}
-          className="p-1 hover:bg-zinc-800 transition-colors rounded"
-          title="Column Settings"
-        >
-          <Settings className="w-4 h-4" />
-        </button>
+        <div className="flex items-center gap-2">
+          {!useMockData && (
+            <button
+              onClick={refresh}
+              className="p-1 hover:bg-zinc-800 transition-colors rounded text-xs text-gray-400"
+              title="Refresh data"
+            >
+              ↻
+            </button>
+          )}
+          <button
+            onClick={() => setShowColumnSettings(!showColumnSettings)}
+            className="p-1 hover:bg-zinc-800 transition-colors rounded"
+            title="Column Settings"
+          >
+            <Settings className="w-4 h-4" />
+          </button>
+        </div>
       </div>
 
       {/* Column Settings Panel */}
@@ -491,6 +556,14 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
         <table className="w-full text-sm">
           <thead className="sticky top-0 bg-zinc-800 border-b border-zinc-700">
             <tr>
+              {/* Chart subscription toggle column */}
+              <th
+                className="text-center p-2 text-gray-400 relative"
+                style={{ width: 40 }}
+                title="Toggle chart display"
+              >
+                <Eye className="w-3 h-3 mx-auto" />
+              </th>
               <th
                 className="text-left p-2 text-gray-400 relative"
                 style={{ width: columnWidths['#'] || DEFAULT_COLUMN_WIDTHS['#'] }}
@@ -538,6 +611,27 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
                   selectedSymbol === item.symbol ? 'bg-zinc-700/50' : ''
                 }`}
               >
+                {/* Chart subscription toggle */}
+                <td className="p-2 text-center">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleSubscription(item.symbol);
+                    }}
+                    className={`p-1 rounded transition-colors ${
+                      isSubscribed(item.symbol)
+                        ? 'text-green-500 hover:text-green-400'
+                        : 'text-gray-600 hover:text-gray-400'
+                    }`}
+                    title={isSubscribed(item.symbol) ? 'Hide from chart' : 'Show in chart'}
+                  >
+                    {isSubscribed(item.symbol) ? (
+                      <Eye className="w-4 h-4" />
+                    ) : (
+                      <EyeOff className="w-4 h-4" />
+                    )}
+                  </button>
+                </td>
                 <td className="p-2 text-gray-500">{index + 1}</td>
                 {orderedVisibleColumns.map(column => (
                   <td key={column} className={`p-2 ${getColumnAlignment(column)}`}>

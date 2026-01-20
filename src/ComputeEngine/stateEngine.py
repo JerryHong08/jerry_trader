@@ -258,13 +258,12 @@ class StateEngine:
         """
         Compute the current state for a ticker.
 
-        State categories:
-        - "new_entrant": just entered tracking
-        - "rising_fast": rank improved by >= 5
-        - "rising": rank improved by >= 2
-        - "falling_fast": rank dropped by >= 5
-        - "falling": rank dropped by >= 2
-        - "stable": rank relatively unchanged
+        State categories (matching frontend directly):
+        - "Best": new entrant or rank improved by >= 5
+        - "Good": rank improved by >= 2
+        - "OnWatch": rank relatively unchanged (stable)
+        - "NotGood": rank dropped by >= 2
+        - "Bad": rank dropped by >= 5
 
         TODO: Add more sophisticated state logic in the future
         """
@@ -278,24 +277,24 @@ class StateEngine:
         # Calculate rank velocity (positive = improving, negative = falling)
         rank_velocity = prev_rank - current_rank
 
-        # Determine state and reason
+        # Determine state and reason (using frontend state values directly)
         if symbol not in self._ticker_states:
-            state = "new_entrant"
+            state = "Best"
             state_reason = "New to top gainers"
         elif rank_velocity >= 5:
-            state = "rising_fast"
+            state = "Best"
             state_reason = f"Rank +{rank_velocity} ({percent_change:+.1f}%)"
         elif rank_velocity >= 2:
-            state = "rising"
+            state = "Good"
             state_reason = f"Rank +{rank_velocity}"
         elif rank_velocity <= -5:
-            state = "falling_fast"
+            state = "Bad"
             state_reason = f"Rank {rank_velocity}"
         elif rank_velocity <= -2:
-            state = "falling"
+            state = "NotGood"
             state_reason = f"Rank {rank_velocity}"
         else:
-            state = "stable"
+            state = "OnWatch"
             state_reason = f"Rank #{current_rank}"
 
         return {
@@ -386,6 +385,7 @@ class StateEngine:
         }
         """
         to_state = current_state.get("state", "unknown")
+        state_reason = current_state.get("stateReason", "")
 
         # Determine reason for state change
         reason = self._determine_state_change_reason(current_state)
@@ -394,6 +394,7 @@ class StateEngine:
             "symbol": symbol,
             "from": from_state,
             "to": to_state,
+            "stateReason": state_reason,
             "reason": reason,
             "ts": str(int(timestamp.timestamp())),
         }
@@ -433,18 +434,10 @@ class StateEngine:
         """
         Update the state cursor in Redis HSET.
         Used for recovery/replay to know where to resume state computation.
-        Also stores current state and stateReason for quick lookup.
+        Only stores the timestamp cursor value.
         """
         cursor_value = timestamp.isoformat()
-        # Store timestamp, state, and stateReason in HSET
-        self.r.hset(
-            self.CURSOR_HSET_NAME,
-            mapping={
-                symbol: cursor_value,
-                f"{symbol}_state": current_state.get("state", "stable"),
-                f"{symbol}_stateReason": current_state.get("stateReason", ""),
-            },
-        )
+        self.r.hset(self.CURSOR_HSET_NAME, symbol, cursor_value)
 
     # =========================================================================
     # PUBLIC API - State Access

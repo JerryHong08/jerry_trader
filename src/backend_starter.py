@@ -18,7 +18,7 @@ from datetime import datetime
 from threading import Thread
 from typing import Optional
 
-from BackendForFrontend.bff_gridtrader import GridTraderBFF
+from BackendForFrontend.bff import GridTraderBFF
 from ComputeEngine.snapshotProcessor import SnapshotProcessor
 from ComputeEngine.stateEngine import StateEngine
 from utils.logger import setup_logger

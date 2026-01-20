@@ -49,22 +49,8 @@ class GridTraderChartDataManager:
         "Bad": "#6b7280",  # Gray
     }
 
-    # Map backend states to frontend states
-    # Since stateEngine is in development, we use simple mapping
-    STATE_MAPPING: Dict[str, str] = {
-        "new_entrant": "Best",
-        "rising_fast": "Best",
-        "rising": "Good",
-        "stable": "OnWatch",
-        "falling": "NotGood",
-        "falling_fast": "Bad",
-        # Direct mappings for when backend sends new state values
-        "Best": "Best",
-        "Good": "Good",
-        "OnWatch": "OnWatch",
-        "NotGood": "NotGood",
-        "Bad": "Bad",
-    }
+    # Valid state values (backend now emits these directly)
+    VALID_STATES = {"Best", "Good", "OnWatch", "NotGood", "Bad"}
 
     def __init__(
         self,
@@ -72,8 +58,7 @@ class GridTraderChartDataManager:
         suffix_id: Optional[str] = None,
     ):
         self._chart_data_dirty = True
-        self._cached_chart_data: Optional[Dict] = None
-        self._cached_rank_data: Optional[List[Dict]] = None
+        self._cached_chart_data_lw: Optional[Dict] = None
         self._last_query_time: Optional[datetime] = None
 
         self.run_mode = "replay" if replay_date else "live"
@@ -151,8 +136,8 @@ class GridTraderChartDataManager:
         return range_start, range_end
 
     def get_subscribed_tickers(self) -> List[str]:
-        """Get all subscribed tickers from Redis Set."""
-        return list(self.redis_client.smembers(self.SUBSCRIBED_SET_NAME))
+        """Get all subscribed tickers from Redis ZSET."""
+        return list(self.redis_client.zrange(self.SUBSCRIBED_SET_NAME, 0, -1))
 
     def get_top_n_tickers(self, n: int = 20) -> List[str]:
         """
@@ -181,10 +166,6 @@ class GridTraderChartDataManager:
         ]
         current_membership.sort(key=lambda x: x[1])
         return [ticker for ticker, rank in current_membership]
-
-    def _map_state_to_frontend(self, backend_state: str) -> str:
-        """Map backend state to frontend state."""
-        return self.STATE_MAPPING.get(backend_state, "OnWatch")
 
     def get_ticker_history(
         self, ticker: str, since: Optional[datetime] = None, limit: int = 500
@@ -256,13 +237,15 @@ class GridTraderChartDataManager:
             results = []
             for table in tables:
                 for record in table.records:
-                    backend_state = record.values.get("state", "stable")
-                    frontend_state = self._map_state_to_frontend(backend_state)
+                    state = record.values.get("state", "OnWatch")
+                    # Validate state is a valid frontend state
+                    if state not in self.VALID_STATES:
+                        state = "OnWatch"
                     state_reason = record.values.get("stateReason", "")
                     results.append(
                         {
                             "timestamp": record.get_time(),
-                            "state": frontend_state,
+                            "state": state,
                             "stateReason": state_reason,
                         }
                     )
@@ -275,6 +258,11 @@ class GridTraderChartDataManager:
         """
         Get latest rank list data from Redis stream.
         Returns tuple of (list matching frontend RankItem interface, timestamp string).
+
+        Only emits columns that are in the stream message:
+        ['symbol', 'rank', 'price', 'change', 'changePercent', 'volume', 'relativeVolume5min', 'relativeVolumeDaily'] add vwap in the future.
+
+        State and other columns are updated separately by the state stream listener.
         """
         entries = self.redis_client.xrevrange(self.STREAM_NAME, count=1)
 
@@ -296,35 +284,19 @@ class GridTraderChartDataManager:
             return [], timestamp
 
         # Transform to frontend format
+        # Only emit columns from stream message, frontend handles defaults for other columns
         result = []
         for item in tickers_data:
-            # Get the latest state and stateReason from state cursor
-            symbol = item.get("symbol", "")
-            state_key = f"{symbol}_state"
-            state_reason_key = f"{symbol}_stateReason"
-            backend_state = (
-                self.redis_client.hget(self.HSET_NAME, state_key) or "stable"
-            )
-            state_reason = (
-                self.redis_client.hget(self.HSET_NAME, state_reason_key) or ""
-            )
-            frontend_state = self._map_state_to_frontend(backend_state)
-
             result.append(
                 {
-                    "symbol": symbol,
+                    "symbol": item.get("symbol", ""),
+                    "rank": item.get("rank", 999),
                     "price": item.get("price", 0.0),
                     "change": item.get("change", 0.0),
                     "changePercent": item.get("changePercent", 0.0),
                     "volume": item.get("volume", 0),
-                    "marketCap": item.get("marketCap", 0),
-                    "state": frontend_state,
-                    "stateReason": state_reason,
-                    "float": item.get("float_share", 0),
-                    "relativeVolumeDaily": item.get("relativeVolumeDaily", 1.0),
                     "relativeVolume5min": item.get("relativeVolume5min", 1.0),
-                    "latestNewsTime": item.get("latestNewsTime"),  # May be None
-                    "rank": item.get("rank", 999),
+                    "relativeVolumeDaily": item.get("relativeVolumeDaily", 1.0),
                 }
             )
 
@@ -332,183 +304,97 @@ class GridTraderChartDataManager:
         result.sort(key=lambda x: x.get("rank", 999))
         return result, timestamp
 
-    def get_overview_chart_data(
+    def get_overview_chart_data_lw(
         self,
         force_refresh: bool = False,
         top_n: int = 20,
-        interval_minutes: int = 5,
     ) -> Dict[str, Any]:
         """
-        Get data formatted for GridTrader's OverviewChartModule.
+        Get data formatted for Lightweight Charts OverviewChartModule.
+
+        This method outputs data in a format ready for TradingView Lightweight Charts,
+        eliminating the need for frontend data conversion.
 
         Returns:
             {
-                "data": [...time series data points...],
-                "segmentInfo": {
-                    "AAPL": [{"key": "AAPL_seg0", "color": "#10b981", "startIdx": 0, "endIdx": 10}, ...],
+                "seriesData": {
+                    "AAPL": {
+                        "data": [{"time": 1737300000, "value": 5.2}, ...],  # time in seconds
+                        "states": [{"time": 1737300000, "state": "Best"}, ...]
+                    },
                     ...
                 },
                 "rankData": [...RankItem data...],
                 "timestamp": "..."
             }
-
-        Each data point contains:
-            - date: time label (e.g., "9:30")
-            - timestamp: epoch milliseconds
-            - {symbol}_value: percent change value
-            - {symbol}_state: state at that time
-            - {symbol}_seg0, {symbol}_seg1, ...: segment values (null when not in segment)
         """
         # Return cached data if not dirty and not forced
         if (
             not force_refresh
             and not self._chart_data_dirty
-            and self._cached_chart_data is not None
+            and self._cached_chart_data_lw is not None
         ):
-            return self._cached_chart_data
+            return self._cached_chart_data_lw
 
         # Get top N tickers
         tickers = self.get_top_n_tickers(n=top_n)
         if not tickers:
-            return {"data": [], "segmentInfo": {}, "rankData": [], "timestamp": None}
+            return {"seriesData": {}, "rankData": [], "timestamp": None}
 
         # Collect all data for each ticker
-        ticker_histories: Dict[str, List[Dict]] = {}
-        ticker_state_histories: Dict[str, List[Dict]] = {}
+        series_data: Dict[str, Dict[str, List]] = {}
 
         for ticker in tickers:
-            ticker_histories[ticker] = self.get_ticker_history(ticker)
-            ticker_state_histories[ticker] = self.get_ticker_state_history(ticker)
+            ticker_history = self.get_ticker_history(ticker)
+            ticker_state_history = self.get_ticker_state_history(ticker)
 
-        # Build unified time series
-        all_timestamps = set()
-        for history in ticker_histories.values():
-            for point in history:
-                all_timestamps.add(point["timestamp"])
+            # Build per-ticker series data
+            data_points: List[Dict] = []
+            state_points: List[Dict] = []
 
-        if not all_timestamps:
-            return {"data": [], "segmentInfo": {}, "rankData": [], "timestamp": None}
+            for point in ticker_history:
+                ts = point["timestamp"]
+                # Convert to seconds for Lightweight Charts (uses Unix timestamp in seconds)
+                # Ensure plain Python int (not numpy.int64) for JSON serialization
+                time_seconds = int(ts.timestamp())
+                value = point.get("changePercent")
 
-        sorted_timestamps = sorted(all_timestamps)
+                if value is not None:
+                    # Ensure value is a plain Python float for JSON serialization
+                    value_float = float(value) if value is not None else 0.0
+                    data_points.append({"time": time_seconds, "value": value_float})
 
-        # Build data points
-        data = []
-        for ts in sorted_timestamps:
-            # Format time label
-            ts_local = ts.astimezone(ZoneInfo("America/New_York"))
-            time_label = ts_local.strftime("%H:%M")
+                    # Find the state at this timestamp
+                    current_state = "OnWatch"  # Default
+                    for sh in ticker_state_history:
+                        if sh["timestamp"] <= ts:
+                            current_state = sh["state"]
+                        else:
+                            break
+                    state_points.append({"time": time_seconds, "state": current_state})
 
-            data_point: Dict[str, Any] = {
-                "date": time_label,
-                "timestamp": int(ts.timestamp() * 1000),  # Epoch milliseconds
+            series_data[ticker] = {
+                "data": data_points,
+                "states": state_points,
             }
-
-            # Add data for each ticker
-            for ticker in tickers:
-                history = ticker_histories.get(ticker, [])
-                state_history = ticker_state_histories.get(ticker, [])
-
-                # Find the value at this timestamp (or interpolate)
-                value = None
-                for point in history:
-                    if point["timestamp"] == ts:
-                        value = point["changePercent"]
-                        break
-
-                # Find the state and stateReason at this timestamp
-                current_state = "OnWatch"  # Default
-                current_state_reason = ""
-                for sh in state_history:
-                    if sh["timestamp"] <= ts:
-                        current_state = sh["state"]
-                        current_state_reason = sh.get("stateReason", "")
-                    else:
-                        break
-
-                data_point[f"{ticker}_value"] = value
-                data_point[f"{ticker}_state"] = current_state
-                data_point[f"{ticker}_stateReason"] = current_state_reason
-
-            data.append(data_point)
-
-        # Build segment info for each ticker
-        segment_info: Dict[str, List[Dict]] = {}
-
-        for ticker in tickers:
-            segments: List[Dict] = []
-            current_state: Optional[str] = None
-            segment_start = 0
-            segment_index = 0
-
-            for idx, point in enumerate(data):
-                point_state = point.get(f"{ticker}_state")
-                point_value = point.get(f"{ticker}_value")
-
-                if point_value is None:
-                    continue
-
-                if point_state != current_state:
-                    if current_state is not None:
-                        # Close previous segment
-                        segment_key = f"{ticker}_seg{segment_index}"
-                        segments.append(
-                            {
-                                "key": segment_key,
-                                "color": self.STATE_COLORS.get(
-                                    current_state, "#6b7280"
-                                ),
-                                "startIdx": segment_start,
-                                "endIdx": idx,
-                            }
-                        )
-                        segment_index += 1
-
-                    # Start new segment
-                    segment_start = idx
-                    current_state = point_state
-
-            # Close final segment
-            if current_state is not None:
-                segment_key = f"{ticker}_seg{segment_index}"
-                segments.append(
-                    {
-                        "key": segment_key,
-                        "color": self.STATE_COLORS.get(current_state, "#6b7280"),
-                        "startIdx": segment_start,
-                        "endIdx": len(data) - 1,
-                    }
-                )
-
-            segment_info[ticker] = segments
-
-        # Add segment values to data points
-        for ticker, segments in segment_info.items():
-            for segment in segments:
-                for idx, point in enumerate(data):
-                    if idx >= segment["startIdx"] and idx <= segment["endIdx"]:
-                        point[segment["key"]] = point.get(f"{ticker}_value")
-                    else:
-                        point[segment["key"]] = None
 
         # Get rank data for legend/display (returns tuple of data and timestamp)
         rank_data, snapshot_timestamp = self.get_latest_rank_data()
 
-        # Build result - use snapshot timestamp from data, not machine time
         result = {
-            "data": data,
-            "segmentInfo": segment_info,
+            "seriesData": series_data,
             "rankData": rank_data,
-            "timestamp": snapshot_timestamp,  # Use the actual snapshot timestamp
+            "timestamp": snapshot_timestamp,
         }
 
         # Cache the result
-        self._cached_chart_data = result
+        self._cached_chart_data_lw = result
         self._chart_data_dirty = False
         self._last_query_time = datetime.now(ZoneInfo("America/New_York"))
 
         logger.debug(
-            f"Overview chart data generated: {len(tickers)} tickers, "
-            f"{len(data)} data points, timestamp={result['timestamp']}"
+            f"LW Overview chart data generated: {len(tickers)} tickers, "
+            f"timestamp={result['timestamp']}"
         )
 
         return result

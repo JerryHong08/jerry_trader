@@ -324,7 +324,7 @@ export function GridItem({
       onUpdate({ settings: { ...item.settings, stockDetail: { view: value as any } } });
     } else if (item.moduleType === 'order-management') {
       onUpdate({ settings: { ...item.settings, orderManagement: { view: value as any } } });
-    } else if (item.moduleType === 'overview-chart') {
+    } else if (item.moduleType === 'overview-chart' || item.moduleType === 'overview-chart') {
       const focusMode = value === 'focus';
       onUpdate({
         settings: {

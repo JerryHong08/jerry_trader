@@ -122,9 +122,13 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
   // Chart subscription management
   const { subscribedTickers, toggleSubscription, isSubscribed, subscribeAll } = useChartSubscriptions();
 
-  // Auto-subscribe top N tickers when data loads (if no subscriptions yet)
+  // Ref to track if auto-subscribe has been done (prevents re-running)
+  const hasAutoSubscribedRef = useRef(false);
+
+  // Auto-subscribe top N tickers when data loads (only once)
   useEffect(() => {
-    if (data.length > 0 && subscribedTickers.size === 0) {
+    if (data.length > 0 && !hasAutoSubscribedRef.current && subscribedTickers.size === 0) {
+      hasAutoSubscribedRef.current = true;
       // Subscribe top 20 by default
       const top20 = data.slice(0, 20).map(item => item.symbol);
       subscribeAll(top20);
@@ -176,11 +180,13 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
     // This prevents auto-switching to mock data when connection is temporarily lost
   }, [liveData, liveTimestamp, isConnected, useMockData]);
 
-  const formatNumber = useCallback((num: number, decimals = 2) => {
+  const formatNumber = useCallback((num: number | undefined | null, decimals = 2) => {
+    if (num === undefined || num === null) return '-';
     return num.toFixed(decimals).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
   }, []);
 
-  const formatVolume = useCallback((vol: number) => {
+  const formatVolume = useCallback((vol: number | undefined | null) => {
+    if (vol === undefined || vol === null) return '-';
     if (vol >= 1e9) return `${(vol / 1e9).toFixed(2)}B`;
     if (vol >= 1e6) return `${(vol / 1e6).toFixed(2)}M`;
     if (vol >= 1e3) return `${(vol / 1e3).toFixed(2)}K`;
@@ -431,15 +437,15 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
 
       case 'change':
         return (
-          <span className={item.change >= 0 ? 'text-green-500' : 'text-red-500'}>
-            {item.change >= 0 ? '+' : ''}{formatNumber(item.change)}
+          <span className={(item.change ?? 0) >= 0 ? 'text-green-500' : 'text-red-500'}>
+            {(item.change ?? 0) >= 0 ? '+' : ''}{formatNumber(item.change)}
           </span>
         );
 
       case 'changePercent':
         return (
-          <span className={item.changePercent >= 0 ? 'text-green-500' : 'text-red-500'}>
-            {item.changePercent >= 0 ? '+' : ''}{formatNumber(item.changePercent)}%
+          <span className={(item.changePercent ?? 0) >= 0 ? 'text-green-500' : 'text-red-500'}>
+            {(item.changePercent ?? 0) >= 0 ? '+' : ''}{formatNumber(item.changePercent)}%
           </span>
         );
 
@@ -450,10 +456,10 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
         return <span className="text-gray-400">{formatVolume(item.float)}</span>;
 
       case 'relativeVolumeDaily':
-        return <span className="text-gray-400">{item.relativeVolumeDaily.toFixed(2)}x</span>;
+        return <span className="text-gray-400">{item.relativeVolumeDaily?.toFixed(2) ?? '-'}x</span>;
 
       case 'relativeVolume5min':
-        return <span className="text-gray-400">{item.relativeVolume5min.toFixed(2)}x</span>;
+        return <span className="text-gray-400">{item.relativeVolume5min?.toFixed(2) ?? '-'}x</span>;
 
       case 'marketCap':
         return <span className="text-gray-400">${formatVolume(item.marketCap)}</span>;

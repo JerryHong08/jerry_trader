@@ -3,15 +3,26 @@
  *
  * Connects to the FastAPI BFF via native WebSocket and provides real-time data updates
  * for RankList and OverviewChart components.
+ *
+ * Uses Zustand store for state management to ensure:
+ * - Snapshot updates patch only dynamic fields (price, change, volume, etc.)
+ * - State updates patch only state and stateReason fields
+ * - State consistency across different update sources
  */
 
-import { useEffect, useRef, useCallback, useState } from 'react';
+import { useEffect, useCallback, useState, useMemo } from 'react';
 import type { RankItem, TickerState } from '../types';
+import {
+  useMarketDataStore,
+  type LWSeriesData,
+  type ConnectionStatus,
+} from '../stores/marketDataStore';
 
 // Configuration - use Vite env variable or default
-const BFF_HTTP_URL = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_BFF_URL)
-  ? import.meta.env.VITE_BFF_URL as string
-  : 'http://localhost:5001';
+const BFF_HTTP_URL =
+  typeof import.meta !== 'undefined' && import.meta.env?.VITE_BFF_URL
+    ? (import.meta.env.VITE_BFF_URL as string)
+    : 'http://localhost:5001';
 
 // Convert HTTP URL to WebSocket URL
 const BFF_WS_URL = BFF_HTTP_URL.replace(/^http/, 'ws');
@@ -19,7 +30,12 @@ const BFF_WS_URL = BFF_HTTP_URL.replace(/^http/, 'ws');
 // Generate unique client ID
 const CLIENT_ID = `gridtrader_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-// Types for backend data
+// ============================================================================
+// Re-export types from store for backwards compatibility
+// ============================================================================
+
+export type { LWSeriesData, ConnectionStatus };
+
 export interface StateHistoryPoint {
   timestamp: number;
   state: TickerState;
@@ -29,16 +45,8 @@ export interface TickerDataWithHistory extends RankItem {
   stateHistory: StateHistoryPoint[];
 }
 
-export interface ChartSegment {
-  key: string;
-  color: string;
-  startIdx: number;
-  endIdx: number;
-}
-
 export interface OverviewChartData {
-  data: Record<string, any>[];
-  segmentInfo: Record<string, ChartSegment[]>;
+  seriesData: Record<string, LWSeriesData>;
   rankData: RankItem[];
   timestamp: string | null;
 }
@@ -52,8 +60,13 @@ export interface StateChangeEvent {
   symbol: string;
   from: TickerState;
   to: TickerState;
+  stateReason: string;
   timestamp: string;
 }
+
+// ============================================================================
+// WebSocket Singleton
+// ============================================================================
 
 // WebSocket message types
 interface WebSocketMessage {
@@ -61,100 +74,29 @@ interface WebSocketMessage {
   [key: string]: any;
 }
 
-// Connection status
-export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
-
 // Singleton WebSocket instance
 let wsInstance: WebSocket | null = null;
-let connectionStatus: ConnectionStatus = 'disconnected';
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 10;
 const RECONNECT_DELAY = 1000;
 let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
 
-const listeners = new Set<() => void>();
-
-// Cached data
-let cachedRankData: RankItem[] = [];
-let cachedChartData: OverviewChartData | null = null;
-let lastRankTimestamp: string | null = null;
-let lastChartTimestamp: string | null = null;
-
-// Chart subscription state - which tickers to display in overview chart
-let chartSubscribedTickers: Set<string> = new Set();
-
 // Message queue for messages sent while connecting
 let messageQueue: WebSocketMessage[] = [];
 
-function getWebSocket(): WebSocket {
-  if (!wsInstance || wsInstance.readyState === WebSocket.CLOSED) {
-    connectionStatus = 'connecting';
-    notifyListeners();
-
-    const wsUrl = `${BFF_WS_URL}/ws/${CLIENT_ID}`;
-    console.log('[WebSocket] Connecting to:', wsUrl);
-
-    wsInstance = new WebSocket(wsUrl);
-
-    wsInstance.onopen = () => {
-      console.log('[WebSocket] Connected to BFF');
-      connectionStatus = 'connected';
-      reconnectAttempts = 0;
-
-      // Subscribe to market snapshot updates
-      sendMessage({ type: 'subscribe_market_snapshot', payload: {} });
-
-      // Flush message queue
-      while (messageQueue.length > 0) {
-        const msg = messageQueue.shift();
-        if (msg) sendMessage(msg);
-      }
-
-      notifyListeners();
-    };
-
-    wsInstance.onclose = (event) => {
-      console.log('[WebSocket] Disconnected:', event.code, event.reason);
-      connectionStatus = 'disconnected';
-      wsInstance = null;
-      notifyListeners();
-
-      // Auto-reconnect
-      if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-        reconnectAttempts++;
-        console.log(`[WebSocket] Reconnecting in ${RECONNECT_DELAY}ms (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
-        reconnectTimeout = setTimeout(() => {
-          getWebSocket();
-        }, RECONNECT_DELAY * reconnectAttempts);
-      }
-    };
-
-    wsInstance.onerror = (error) => {
-      console.error('[WebSocket] Connection error:', error);
-      connectionStatus = 'error';
-      notifyListeners();
-    };
-
-    wsInstance.onmessage = (event) => {
-      try {
-        const message: WebSocketMessage = JSON.parse(event.data);
-        handleMessage(message);
-      } catch (e) {
-        console.error('[WebSocket] Failed to parse message:', e);
-      }
-    };
+// Stock detail message handlers map
+const stockDetailHandlers = new Map<
+  string,
+  {
+    onDetail: (data: any) => void;
+    onError: (data: any) => void;
   }
+>();
 
-  return wsInstance;
-}
-
-// Stock detail message handlers map (needs to be before handleMessage)
-const stockDetailHandlers = new Map<string, {
-  onDetail: (data: any) => void;
-  onError: (data: any) => void;
-}>();
-
-function registerStockDetailHandler(ticker: string, handlers: { onDetail: (data: any) => void; onError: (data: any) => void }) {
+function registerStockDetailHandler(
+  ticker: string,
+  handlers: { onDetail: (data: any) => void; onError: (data: any) => void }
+) {
   stockDetailHandlers.set(ticker, handlers);
 }
 
@@ -162,31 +104,64 @@ function unregisterStockDetailHandler(ticker: string) {
   stockDetailHandlers.delete(ticker);
 }
 
+/**
+ * Send a message via WebSocket. Queues if not connected.
+ */
+function sendMessage(message: WebSocketMessage) {
+  if (wsInstance && wsInstance.readyState === WebSocket.OPEN) {
+    wsInstance.send(JSON.stringify(message));
+  } else {
+    // Queue message for later
+    messageQueue.push(message);
+    // Ensure connection is being established
+    getWebSocket();
+  }
+}
+
+/**
+ * Handle incoming WebSocket messages.
+ * Updates Zustand store with partial patches.
+ */
 function handleMessage(message: WebSocketMessage) {
+  const store = useMarketDataStore.getState();
+
   switch (message.type) {
     case 'rank_list_update':
-      cachedRankData = message.data || [];
-      lastRankTimestamp = message.timestamp;
-      notifyListeners();
+      // Patch snapshot data (preserves state)
+      store.patchSnapshotData(message.data || [], message.timestamp);
       break;
 
     case 'overview_chart_update':
-      cachedChartData = {
-        data: message.data || [],
-        segmentInfo: message.segmentInfo || {},
-        rankData: message.rankData || [],
-        timestamp: message.timestamp,
-      };
-      lastChartTimestamp = message.timestamp;
-      notifyListeners();
+      // Patch rank data if included
+      if (message.rankData) {
+        store.patchSnapshotData(message.rankData, message.timestamp);
+      }
+      // Update chart series data
+      if (message.seriesData) {
+        // Debug: Check the data format from backend
+        const firstSymbol = Object.keys(message.seriesData)[0];
+        if (firstSymbol && message.seriesData[firstSymbol]?.data?.length > 0) {
+          const samplePoint = message.seriesData[firstSymbol].data[0];
+          if (typeof samplePoint.time !== 'number') {
+            console.warn('[WebSocket] Invalid time format in seriesData:',
+              'type:', typeof samplePoint.time,
+              'value:', samplePoint.time
+            );
+          }
+        }
+        store.setChartData(message.seriesData, message.timestamp);
+      }
       break;
 
     case 'state_change':
-      // Update cached rank data with new state
-      cachedRankData = cachedRankData.map(item =>
-        item.symbol === message.symbol ? { ...item, state: message.to as TickerState } : item
-      );
-      notifyListeners();
+      // Patch state only (preserves snapshot data)
+      if (message.symbol) {
+        store.patchStateChange(
+          message.symbol,
+          message.to as TickerState,
+          message.stateReason
+        );
+      }
       break;
 
     case 'stock_detail':
@@ -208,99 +183,136 @@ function handleMessage(message: WebSocketMessage) {
       break;
 
     default:
-      // Silently ignore unknown message types to reduce logging
+      // Silently ignore unknown message types
       break;
   }
 }
 
-function sendMessage(message: WebSocketMessage) {
-  if (wsInstance && wsInstance.readyState === WebSocket.OPEN) {
-    wsInstance.send(JSON.stringify(message));
-  } else {
-    // Queue message for later
-    messageQueue.push(message);
-    // Ensure connection is being established
-    getWebSocket();
+/**
+ * Get or create WebSocket connection.
+ */
+function getWebSocket(): WebSocket {
+  if (!wsInstance || wsInstance.readyState === WebSocket.CLOSED) {
+    const store = useMarketDataStore.getState();
+    store.setConnectionStatus('connecting');
+
+    const wsUrl = `${BFF_WS_URL}/ws/${CLIENT_ID}`;
+    console.log('[WebSocket] Connecting to:', wsUrl);
+
+    wsInstance = new WebSocket(wsUrl);
+
+    wsInstance.onopen = () => {
+      console.log('[WebSocket] Connected to BFF');
+      useMarketDataStore.getState().setConnectionStatus('connected');
+      reconnectAttempts = 0;
+
+      // Subscribe to market snapshot updates
+      sendMessage({ type: 'subscribe_market_snapshot', payload: {} });
+
+      // Flush message queue
+      while (messageQueue.length > 0) {
+        const msg = messageQueue.shift();
+        if (msg) sendMessage(msg);
+      }
+    };
+
+    wsInstance.onclose = (event) => {
+      console.log('[WebSocket] Disconnected:', event.code, event.reason);
+      useMarketDataStore.getState().setConnectionStatus('disconnected');
+      wsInstance = null;
+
+      // Auto-reconnect
+      if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+        reconnectAttempts++;
+        console.log(
+          `[WebSocket] Reconnecting in ${RECONNECT_DELAY}ms (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`
+        );
+        reconnectTimeout = setTimeout(() => {
+          getWebSocket();
+        }, RECONNECT_DELAY * reconnectAttempts);
+      }
+    };
+
+    wsInstance.onerror = (error) => {
+      console.error('[WebSocket] Connection error:', error);
+      useMarketDataStore.getState().setConnectionStatus('error');
+    };
+
+    wsInstance.onmessage = (event) => {
+      try {
+        const message: WebSocketMessage = JSON.parse(event.data);
+        handleMessage(message);
+      } catch (e) {
+        console.error('[WebSocket] Failed to parse message:', e);
+      }
+    };
   }
+
+  return wsInstance;
 }
 
-// Batched notify to avoid excessive re-renders
-let notifyPending = false;
-function notifyListeners() {
-  if (notifyPending) return;
-  notifyPending = true;
-  // Use requestAnimationFrame to batch notifications
-  requestAnimationFrame(() => {
-    notifyPending = false;
-    listeners.forEach(listener => listener());
-  });
-}
+// ============================================================================
+// Public API - Chart Subscriptions
+// ============================================================================
 
 /**
  * Update which tickers are subscribed for overview chart display
  */
 export function updateChartSubscription(ticker: string, subscribed: boolean) {
-  if (subscribed) {
-    chartSubscribedTickers.add(ticker);
-  } else {
-    chartSubscribedTickers.delete(ticker);
-  }
+  const store = useMarketDataStore.getState();
+  store.updateChartSubscription(ticker, subscribed);
+
   // Notify backend of subscription change
   sendMessage({
     type: 'update_chart_subscription',
     payload: {
       ticker,
       subscribed,
-      allSubscribed: Array.from(chartSubscribedTickers)
-    }
+      allSubscribed: Array.from(store.chartSubscribedTickers),
+    },
   });
-  notifyListeners();
 }
 
 /**
  * Get current chart subscribed tickers
  */
 export function getChartSubscribedTickers(): Set<string> {
-  return new Set(chartSubscribedTickers);
+  return new Set(useMarketDataStore.getState().chartSubscribedTickers);
 }
 
 /**
  * Set all chart subscriptions at once
  */
 export function setChartSubscriptions(tickers: string[]) {
-  chartSubscribedTickers = new Set(tickers);
+  useMarketDataStore.getState().setChartSubscriptions(tickers);
   sendMessage({
     type: 'set_chart_subscriptions',
-    payload: { tickers }
+    payload: { tickers },
   });
-  notifyListeners();
 }
+
+// ============================================================================
+// React Hooks
+// ============================================================================
 
 /**
  * Hook for WebSocket connection status
  */
 export function useWebSocketConnection(): ConnectionStatus {
-  const [status, setStatus] = useState<ConnectionStatus>(connectionStatus);
+  const status = useMarketDataStore((s) => s.connectionStatus);
 
   useEffect(() => {
     // Initialize WebSocket connection
     getWebSocket();
-
-    const listener = () => {
-      setStatus(connectionStatus);
-    };
-
-    listeners.add(listener);
-    return () => {
-      listeners.delete(listener);
-    };
   }, []);
 
   return status;
 }
 
 /**
- * Hook for Rank List data from backend
+ * Hook for Rank List data from backend.
+ * Derives sorted array from entity map for rendering.
+ * Uses useMemo to avoid creating new array on every render.
  */
 export function useRankListData(): {
   data: RankItem[];
@@ -308,37 +320,43 @@ export function useRankListData(): {
   isConnected: boolean;
   refresh: () => void;
 } {
-  const [data, setData] = useState<RankItem[]>(cachedRankData);
-  const [timestamp, setTimestamp] = useState<string | null>(lastRankTimestamp);
-  const [isConnected, setIsConnected] = useState(connectionStatus === 'connected');
+  // Subscribe to entities Map - this triggers re-render when entities change
+  const entities = useMarketDataStore((s) => s.entities);
+  const rankTimestamp = useMarketDataStore((s) => s.rankTimestamp);
+  const isConnected = useMarketDataStore((s) => s.connectionStatus === 'connected');
+
+  // Memoize the sorted array to avoid creating new reference on every render
+  const data = useMemo(() => {
+    const arr = Array.from(entities.values());
+    return arr
+      .map((entity) => ({
+        ...entity,
+        state: entity.state ?? 'OnWatch', // Default to OnWatch if no state yet
+      }))
+      .sort((a, b) => {
+        // Sort by rank if available
+        if (a.rank !== undefined && b.rank !== undefined) {
+          return a.rank - b.rank;
+        }
+        // Fallback to changePercent descending
+        return (b.changePercent ?? 0) - (a.changePercent ?? 0);
+      }) as RankItem[];
+  }, [entities]);
 
   useEffect(() => {
     getWebSocket();
-
-    const listener = () => {
-      setData([...cachedRankData]);
-      setTimestamp(lastRankTimestamp);
-      setIsConnected(connectionStatus === 'connected');
-    };
-
-    listeners.add(listener);
-
-    // If already connected and have cached data, use it
-    if (cachedRankData.length > 0) {
-      setData([...cachedRankData]);
-      setTimestamp(lastRankTimestamp);
-    }
-
-    return () => {
-      listeners.delete(listener);
-    };
   }, []);
 
   const refresh = useCallback(() => {
     sendMessage({ type: 'refresh_rank_list', payload: {} });
   }, []);
 
-  return { data, timestamp, isConnected, refresh };
+  return {
+    data,
+    timestamp: rankTimestamp,
+    isConnected,
+    refresh,
+  };
 }
 
 /**
@@ -351,26 +369,17 @@ export function useChartSubscriptions(): {
   subscribeAll: (tickers: string[]) => void;
   unsubscribeAll: () => void;
 } {
-  const [subscribedTickers, setSubscribedTickers] = useState<Set<string>>(new Set(chartSubscribedTickers));
-
-  useEffect(() => {
-    const listener = () => {
-      setSubscribedTickers(new Set(chartSubscribedTickers));
-    };
-
-    listeners.add(listener);
-    return () => {
-      listeners.delete(listener);
-    };
-  }, []);
+  const subscribedTickers = useMarketDataStore((s) => s.chartSubscribedTickers);
 
   const toggleSubscription = useCallback((ticker: string) => {
-    const isCurrentlySubscribed = chartSubscribedTickers.has(ticker);
+    const isCurrentlySubscribed = useMarketDataStore
+      .getState()
+      .chartSubscribedTickers.has(ticker);
     updateChartSubscription(ticker, !isCurrentlySubscribed);
   }, []);
 
   const isSubscribed = useCallback((ticker: string) => {
-    return chartSubscribedTickers.has(ticker);
+    return useMarketDataStore.getState().chartSubscribedTickers.has(ticker);
   }, []);
 
   const subscribeAll = useCallback((tickers: string[]) => {
@@ -381,68 +390,64 @@ export function useChartSubscriptions(): {
     setChartSubscriptions([]);
   }, []);
 
-  return { subscribedTickers, toggleSubscription, isSubscribed, subscribeAll, unsubscribeAll };
+  return {
+    subscribedTickers,
+    toggleSubscription,
+    isSubscribed,
+    subscribeAll,
+    unsubscribeAll,
+  };
 }
 
 /**
- * Hook for Overview Chart data from backend
+ * Hook for Overview Chart data from backend.
+ * Returns data in Lightweight Charts ready format.
+ * Derives rank data from entity map to ensure state consistency.
  */
 export function useOverviewChartData(): {
-  chartData: Record<string, any>[];
-  segmentInfo: Record<string, ChartSegment[]>;
+  seriesData: Record<string, LWSeriesData>;
   rankData: TickerDataWithHistory[];
   timestamp: string | null;
   isConnected: boolean;
   refresh: () => void;
 } {
-  const [chartData, setChartData] = useState<Record<string, any>[]>([]);
-  const [segmentInfo, setSegmentInfo] = useState<Record<string, ChartSegment[]>>({});
-  const [rankData, setRankData] = useState<TickerDataWithHistory[]>([]);
-  const [timestamp, setTimestamp] = useState<string | null>(null);
-  const [isConnected, setIsConnected] = useState(connectionStatus === 'connected');
+  const seriesData = useMarketDataStore((s) => s.seriesData);
+  const entities = useMarketDataStore((s) => s.entities);
+  const chartTimestamp = useMarketDataStore((s) => s.chartTimestamp);
+  const isConnected = useMarketDataStore((s) => s.connectionStatus === 'connected');
 
   useEffect(() => {
     getWebSocket();
-
-    const listener = () => {
-      if (cachedChartData) {
-        setChartData(cachedChartData.data || []);
-        setSegmentInfo(cachedChartData.segmentInfo || {});
-        // Convert rankData to TickerDataWithHistory (add empty stateHistory if needed)
-        const convertedRankData: TickerDataWithHistory[] = (cachedChartData.rankData || []).map(item => ({
-          ...item,
-          stateHistory: [], // State history is in segmentInfo
-        }));
-        setRankData(convertedRankData);
-        setTimestamp(cachedChartData.timestamp);
-      }
-      setIsConnected(connectionStatus === 'connected');
-    };
-
-    listeners.add(listener);
-
-    // If already have cached data, use it
-    if (cachedChartData) {
-      setChartData(cachedChartData.data || []);
-      setSegmentInfo(cachedChartData.segmentInfo || {});
-      const convertedRankData: TickerDataWithHistory[] = (cachedChartData.rankData || []).map(item => ({
-        ...item,
-        stateHistory: [],
-      }));
-      setRankData(convertedRankData);
-      setTimestamp(cachedChartData.timestamp);
-    }
-
-    return () => {
-      listeners.delete(listener);
-    };
   }, []);
 
   const refresh = useCallback(() => {
     sendMessage({ type: 'refresh_chart', payload: {} });
   }, []);
 
-  return { chartData, segmentInfo, rankData, timestamp, isConnected, refresh };
+  // Derive rank data with stateHistory from entity map - memoized to avoid new array each render
+  const rankData: TickerDataWithHistory[] = useMemo(() => {
+    const arr = Array.from(entities.values());
+    return arr
+      .map((entity) => ({
+        ...entity,
+        state: entity.state ?? 'OnWatch',
+        stateHistory: [], // State history is in seriesData.states
+      }))
+      .sort((a, b) => {
+        if (a.rank !== undefined && b.rank !== undefined) {
+          return a.rank - b.rank;
+        }
+        return (b.changePercent ?? 0) - (a.changePercent ?? 0);
+      }) as TickerDataWithHistory[];
+  }, [entities]);
+
+  return {
+    seriesData,
+    rankData,
+    timestamp: chartTimestamp,
+    isConnected,
+    refresh,
+  };
 }
 
 /**
@@ -454,8 +459,12 @@ export function useStockDetail(ticker: string | null): {
   isLoading: boolean;
   error: string | null;
 } {
-  const [history, setHistory] = useState<{ timestamp: string; changePercent: number; price: number }[]>([]);
-  const [stateHistory, setStateHistory] = useState<{ timestamp: string; state: TickerState }[]>([]);
+  const [history, setHistory] = useState<
+    { timestamp: string; changePercent: number; price: number }[]
+  >([]);
+  const [stateHistory, setStateHistory] = useState<
+    { timestamp: string; state: TickerState }[]
+  >([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -510,10 +519,7 @@ export function disconnectSocket() {
   if (wsInstance) {
     wsInstance.close();
     wsInstance = null;
-    connectionStatus = 'disconnected';
-    cachedRankData = [];
-    cachedChartData = null;
-    messageQueue = [];
-    notifyListeners();
   }
+  useMarketDataStore.getState().reset();
+  messageQueue = [];
 }

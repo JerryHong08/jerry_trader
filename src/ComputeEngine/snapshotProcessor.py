@@ -453,6 +453,7 @@ class SnapshotProcessor:
                     pl.col("prev_close").last(),
                     pl.col("timestamp").last(),
                     pl.col("prev_volume").last(),
+                    pl.col("vwap").last(),
                 )
                 .sort("percent_change", descending=True)
                 .collect()
@@ -575,15 +576,21 @@ class SnapshotProcessor:
     def _update_subscription_set(
         self, current_top_n: pl.DataFrame, timestamp: datetime
     ) -> List[str]:
-        """Add new top N tickers to subscription set."""
+        """Add new top N tickers to subscription ZSET with first_appearance_time as score."""
         new_subscriptions = []
+        timestamp_score = timestamp.timestamp()  # Unix timestamp as score
 
         for row in current_top_n.iter_rows(named=True):
             ticker = row["ticker"]
-            added = self.r.sadd(self.SUBSCRIBED_SET_NAME, ticker)
+            # ZADD with NX option: only add if not exists (preserves first appearance time)
+            added = self.r.zadd(
+                self.SUBSCRIBED_SET_NAME, {ticker: timestamp_score}, nx=True
+            )
             if added:
                 new_subscriptions.append(ticker)
-                logger.debug(f"_update_subscription_set - New subscription: {ticker}")
+                logger.debug(
+                    f"_update_subscription_set - New subscription: {ticker} at {timestamp}"
+                )
 
         if new_subscriptions:
             logger.info(
@@ -593,8 +600,8 @@ class SnapshotProcessor:
         return new_subscriptions
 
     def _get_all_subscribed_tickers(self) -> List[str]:
-        """Get all subscribed tickers from Redis Set."""
-        return list(self.r.smembers(self.SUBSCRIBED_SET_NAME))
+        """Get all subscribed tickers from Redis ZSET."""
+        return list(self.r.zrange(self.SUBSCRIBED_SET_NAME, 0, -1))
 
     def get_subscribed_tickers(self) -> List[str]:
         """Public method to get subscribed tickers."""
@@ -654,6 +661,7 @@ class SnapshotProcessor:
             volume = float(row.get("accumulated_volume", 0))
             relative_volume_5min = float(row.get("relativeVolume5min", 1.0))
             relative_volume_daily = float(row.get("relativeVolumeDaily", 0.0))
+            vwap = float(row.get("vwap", 0.0))
 
             stream_tickers_data.append(
                 {
@@ -665,6 +673,7 @@ class SnapshotProcessor:
                     "volume": volume,
                     "relativeVolume5min": relative_volume_5min,
                     "relativeVolumeDaily": relative_volume_daily,
+                    "vwap": vwap,
                 }
             )
 
@@ -681,6 +690,7 @@ class SnapshotProcessor:
                 .field("relativeVolume5min", relative_volume_5min)
                 .field("relativeVolumeDaily", relative_volume_daily)
                 .field("prev_close", float(row.get("prev_close", 0.0)))
+                .field("vwap", vwap)
                 .time(timestamp)
             )
             influx_points.append(point)

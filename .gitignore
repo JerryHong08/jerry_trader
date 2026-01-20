@@ -17,3 +17,13 @@ node_modules/
 momo_token.py
 
 *data.csv
+
+# Build outputs
+build/
+dist/
+node_modules/
+
+# Vite/Rollup build assets
+/assets/index-*.js
+/assets/
+public/build/

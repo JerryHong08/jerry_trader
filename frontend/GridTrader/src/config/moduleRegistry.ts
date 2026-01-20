@@ -35,7 +35,7 @@ export const moduleRegistry: Record<ModuleType, ModuleConfig> = {
   'overview-chart': {
     type: 'overview-chart',
     name: 'Overview Chart',
-    description: 'Top 20 movers multi-line chart',
+    description: 'High-performance overview chart with Lightweight Charts',
     component: OverviewChartModule,
     defaultSize: { width: 800, height: 500 },
     supportSync: true,

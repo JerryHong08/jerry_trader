@@ -34,6 +34,7 @@
         "cmdk": "^1.1.1",
         "embla-carousel-react": "^8.6.0",
         "input-otp": "^1.4.2",
+        "lightweight-charts": "^5.1.0",
         "lucide-react": "^0.487.0",
         "next-themes": "^0.4.6",
         "re-resizable": "*",
@@ -46,7 +47,8 @@
         "sonner": "^2.0.3",
         "tailwind-merge": "*",
         "tailwindcss": "*",
-        "vaul": "^1.1.2"
+        "vaul": "^1.1.2",
+        "zustand": "^5.0.10"
     },
     "devDependencies": {
         "@types/node": "^20.10.0",

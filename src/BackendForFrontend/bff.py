@@ -9,7 +9,7 @@ This version is designed for the GridTrader frontend which uses:
 - OverviewChartModule: Segmented line chart with state-colored segments
 
 Usage:
-    python -m src.BackendForFrontend.bff_gridtrader --replay-date 20260115 --suffix-id test
+    python -m src.BackendForFrontend.bff --replay-date 20260115 --suffix-id test
 
 Note: Run backendStarter.py first to start the backend services.
 """
@@ -260,7 +260,7 @@ class GridTraderBFF:
         @self.app.get("/api/overview-chart")
         async def get_overview_chart():
             """API endpoint to get overview chart data."""
-            chart_data = self.chart_manager.get_overview_chart_data()
+            chart_data = self.chart_manager.get_overview_chart_data_lw()
             return chart_data
 
         @self.app.get("/api/stock/{ticker}")
@@ -301,7 +301,7 @@ class GridTraderBFF:
         @self.app.get("/api/test-data")
         async def test_data():
             """Test endpoint to check current data."""
-            chart_data = self.chart_manager.get_overview_chart_data()
+            chart_data = self.chart_manager.get_overview_chart_data_lw()
             rank_data = self.chart_manager.get_latest_rank_data()
             subscribed = self.chart_manager.get_subscribed_tickers()
             return {
@@ -378,7 +378,9 @@ class GridTraderBFF:
             )
 
         elif msg_type == "refresh_chart":
-            chart_data = self.chart_manager.get_overview_chart_data(force_refresh=True)
+            chart_data = self.chart_manager.get_overview_chart_data_lw(
+                force_refresh=True
+            )
             await self.manager.send_personal_message(
                 {"type": "overview_chart_update", **chart_data}, client_id
             )
@@ -447,8 +449,11 @@ class GridTraderBFF:
             await self.manager.broadcast_to_subscribers(payload, "market_snapshot")
 
     async def _emit_overview_chart_update(self, client_id: Optional[str] = None):
-        """Emit overview chart update to specific client or all subscribed clients."""
-        chart_data = self.chart_manager.get_overview_chart_data()
+        """Emit overview chart update to specific client or all subscribed clients.
+
+        Uses Lightweight Charts format for optimal frontend performance.
+        """
+        chart_data = self.chart_manager.get_overview_chart_data_lw()
         payload = {"type": "overview_chart_update", **chart_data}
 
         if client_id:
@@ -548,24 +553,22 @@ class GridTraderBFF:
                     for stream_name, message_list in messages:
                         for message_id, message_data in message_list:
                             # Map backend state to frontend state
-                            from_state = message_data.get("from", "stable")
-                            to_state = message_data.get("to", "stable")
-
-                            state_mapping = self.chart_manager.STATE_MAPPING
-                            frontend_from = state_mapping.get(from_state, "OnWatch")
-                            frontend_to = state_mapping.get(to_state, "OnWatch")
+                            from_state = message_data.get("from", "OnWatch")
+                            to_state = message_data.get("to", "OnWatch")
+                            state_reason = message_data.get("stateReason", "")
 
                             state_change = {
                                 "type": "state_change",
                                 "symbol": message_data.get("symbol"),
-                                "from": frontend_from,
-                                "to": frontend_to,
-                                "timestamp": message_data.get("timestamp"),
+                                "from": from_state,
+                                "to": to_state,
+                                "stateReason": state_reason,
+                                "timestamp": message_data.get("ts"),
                             }
 
                             logger.info(
                                 f"State change: {state_change['symbol']} "
-                                f"{frontend_from} -> {frontend_to}"
+                                f"{from_state} -> {to_state}"
                             )
 
                             # Broadcast to all connected clients
@@ -655,13 +658,13 @@ def main():
         epilog="""
 Examples:
     # Live mode
-    python -m src.BackendForFrontend.bff_gridtrader
+    python -m src.BackendForFrontend.bff
 
     # Replay mode
-    python -m src.BackendForFrontend.bff_gridtrader --replay-date 20260115 --suffix-id test
+    python -m src.BackendForFrontend.bff --replay-date 20260115 --suffix-id test
 
     # Custom host/port
-    python -m src.BackendForFrontend.bff_gridtrader --host 0.0.0.0 --port 8080
+    python -m src.BackendForFrontend.bff --host 0.0.0.0 --port 8080
         """,
     )
     parser.add_argument(

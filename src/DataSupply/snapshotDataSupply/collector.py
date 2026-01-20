@@ -19,10 +19,6 @@ import redis
 from dotenv import load_dotenv
 
 from config import cache_dir
-from DataUtils.schema import (
-    spot_check_SnapshotMsg_with_pydantic,
-    validate_SnapshotMsg_schema,
-)
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
@@ -128,7 +124,6 @@ class MarketsnapshotCollector:
             return None
 
     def run_collector_engine(self):
-        first_run = True
         if not self.is_trading_day_today():
             logger.info("run_collector_engine - 🚫 Not a trading day. Exit.")
             return
@@ -155,65 +150,90 @@ class MarketsnapshotCollector:
                 # Record successful fetch
                 self.last_successful_fetch = time.time()
 
-                # Process data - now snapshot is a list of dicts from JSON
+                # Process data - flatten all nested dicts and save everything
                 data_list = []
                 for item in snapshot:
-                    # Access dict fields instead of object attributes
-                    if item.get("day") and item.get("prevDay"):
-                        prev_close = float(item["prevDay"].get("c", 0))
-                        if prev_close != 0:
-                            data_list.append(
-                                {
-                                    "ticker": item["ticker"],
-                                    "percent_change": item.get("todaysChangePerc", 0),
-                                    "accumulated_volume": float(
-                                        item.get("min", {}).get("av", 0)
-                                    ),
-                                    # "current_price": float(item.get('min', {}).get('c', 0)),
-                                    "current_price": float(
-                                        item.get("lastTrade", {}).get("p", 0)
-                                    ),
-                                    "prev_close": prev_close,
-                                    "timestamp": item.get("updated", 0),
-                                    "prev_volume": item["prevDay"].get("v", 0),
-                                    # "vwap": float(item.get("min", {}).get("vw", 0)),
-                                }
-                            )
+                    # Flatten the nested structure
+                    flattened = {
+                        "ticker": item.get("ticker"),
+                        "todaysChange": item.get("todaysChange"),
+                        "todaysChangePerc": item.get("todaysChangePerc"),
+                        "updated": item.get("updated"),
+                    }
+
+                    # Flatten day
+                    if item.get("day"):
+                        for key, val in item["day"].items():
+                            flattened[f"day_{key}"] = val
+
+                    # Flatten prevDay
+                    if item.get("prevDay"):
+                        for key, val in item["prevDay"].items():
+                            flattened[f"prevDay_{key}"] = val
+
+                    # Flatten min
+                    if item.get("min"):
+                        for key, val in item["min"].items():
+                            flattened[f"min_{key}"] = val
+
+                    # Flatten lastTrade
+                    if item.get("lastTrade"):
+                        for key, val in item["lastTrade"].items():
+                            if key == "c":  # c is an array, convert to string
+                                flattened[f"lastTrade_{key}"] = json.dumps(val)
+                            else:
+                                flattened[f"lastTrade_{key}"] = val
+
+                    # Flatten lastQuote
+                    if item.get("lastQuote"):
+                        for key, val in item["lastQuote"].items():
+                            flattened[f"lastQuote_{key}"] = val
+
+                    data_list.append(flattened)
 
                 if not data_list:
                     logger.info("run_collector_engine - ⚠️  No data collected from API")
                     continue
 
                 df = pl.DataFrame(data_list)
-                df = df.with_columns(
+
+                logger.info(
+                    f"run_collector_engine - ✓ Collected {len(df)} rows with {len(df.columns)} columns"
+                )
+
+                # Save full snapshot to CSV
+                market_mover_file = self.save_snapshot(df)
+
+                # Prepare subset for Redis stream (original format)
+                stream_df = pl.DataFrame(
+                    [
+                        {
+                            "ticker": item.get("ticker"),
+                            "percent_change": item.get("todaysChangePerc", 0),
+                            "accumulated_volume": float(
+                                item.get("min", {}).get("av", 0)
+                            ),
+                            "current_price": float(
+                                item.get("lastTrade", {}).get("p", 0)
+                            ),
+                            "prev_close": float(item.get("prevDay", {}).get("c", 0)),
+                            "timestamp": item.get("updated", 0),
+                            "prev_volume": item.get("prevDay", {}).get("v", 0),
+                            "vwap": float(item.get("min", {}).get("vwap", 0)),
+                        }
+                        for item in snapshot
+                        if item.get("day")
+                        and item.get("prevDay")
+                        and float(item.get("prevDay", {}).get("c", 0)) != 0
+                    ]
+                )
+
+                stream_df = stream_df.with_columns(
                     (pl.col("timestamp") // 1_000_000).alias("timestamp")
                 )
 
-                # 1. Fast schema validation (every run)
-                is_valid, error_msg = validate_SnapshotMsg_schema(df)
-                if not is_valid:
-                    logger.info(
-                        f"run_collector_engine - ❌ Schema validation failed: {error_msg}"
-                    )
-                    continue
-
-                # 2. Pydantic deep validation (first run or periodically)
-                if first_run:
-                    if not spot_check_SnapshotMsg_with_pydantic(df, sample_size=5):
-                        logger.info(
-                            "run_collector_engine - ❌ Pydantic validation failed on first run"
-                        )
-                        continue
-                    logger.info("run_collector_engine - ✅ First run validation passed")
-                    first_run = False
-
-                logger.info(f"run_collector_engine - ✓ Validated {len(df)} rows")
-
-                # Save snapshot
-                market_mover_file = self.save_snapshot(df)
-
                 # Publish to Redis
-                payload = df.write_json()
+                payload = stream_df.write_json()
                 today = datetime.now(ZoneInfo("America/New_York")).strftime("%Y%m%d")
                 STREAM_NAME = f"market_snapshot_stream:{today}"
                 assert ":" in STREAM_NAME, "STREAM_NAME must include a date suffix!"

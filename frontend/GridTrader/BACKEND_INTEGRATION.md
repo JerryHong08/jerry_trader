@@ -23,7 +23,7 @@ This document describes how to connect the GridTrader frontend to the Python bac
 ┌───────────────────────────────────────────────────────────────────────────┐
 │                       GridTrader BFF (Python FastAPI)                      │
 │  ┌───────────────────────────────────────────────────────────────────┐   │
-│  │                    bff_gridtrader.py                               │   │
+│  │                    bff.py                               │   │
 │  │  - FastAPI + Native WebSocket (real-time updates)                  │   │
 │  │  - REST API endpoints                                               │   │
 │  │  - Redis Stream listeners                                           │   │
@@ -55,10 +55,10 @@ This document describes how to connect the GridTrader frontend to the Python bac
 # Make sure Redis and InfluxDB are running first
 
 # Start all backend services (live mode)
-python -m src.BackendForFrontend.gridtrader_starter
+python -m src.BackendForFrontend.backend_starter
 
 # Or with replay mode (historical data)
-python -m src.BackendForFrontend.gridtrader_starter \
+python -m src.BackendForFrontend.backend_starter \
   --replay-date 20260115 \
   --suffix-id test \
   --load-history 20260115
@@ -220,8 +220,8 @@ The connection status is shown with a WiFi icon:
 ## Files Created/Modified
 
 ### New Files
-- `src/BackendForFrontend/bff_gridtrader.py` - GridTrader BFF server (FastAPI + WebSocket)
-- `src/BackendForFrontend/gridtrader_starter.py` - Backend starter script
+- `src/BackendForFrontend/bff.py` - GridTrader BFF server (FastAPI + WebSocket)
+- `src/BackendForFrontend/backend_starter.py` - Backend starter script
 - `src/ChartdataManager/overviewchartdataManager.py` - Chart data manager
 - `frontend/GridTrader/src/hooks/useWebSocket.ts` - Native WebSocket hook
 - `frontend/GridTrader/src/vite-env.d.ts` - Vite type declarations

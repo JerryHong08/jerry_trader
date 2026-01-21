@@ -116,7 +116,7 @@ class SnapshotProcessor:
         self.last_df = pl.DataFrame()
 
         # Volume tracking for relative volume calculation
-        # Structure: {ticker: [(timestamp, accumulated_volume), ...]}
+        # Structure: {ticker: [(timestamp, volume), ...]}
         self._volume_history: Dict[str, List[Tuple[datetime, float]]] = defaultdict(
             list
         )
@@ -433,29 +433,25 @@ class SnapshotProcessor:
             common_stocks_lf = get_common_stocks(filter_date_str)
             filtered_df = (
                 common_stocks_lf.join(lf, on="ticker", how="inner")
-                .sort("percent_change", descending=True)
+                .sort("changePercent", descending=True)
                 .collect()
             )
         except Exception as e:
             logger.error(f"_prepare_data - Error filtering common stocks: {e}")
-            filtered_df = lf.sort("percent_change", descending=True).collect()
+            filtered_df = lf.sort("changePercent", descending=True).collect()
 
         # Fill missing data from last snapshot if needed
         if len(self.last_df) > 0 and len(self.last_df) != len(filtered_df):
+            # Dynamically get all columns except the grouping column
+            all_columns = filtered_df.columns
+            agg_columns = [col for col in all_columns if col != "ticker"]
+
             filled_df = (
                 pl.concat([self.last_df.lazy(), filtered_df.lazy()], how="vertical")
                 .sort("timestamp")
                 .group_by(["ticker"])
-                .agg(
-                    pl.col("percent_change").last(),
-                    pl.col("accumulated_volume").last(),
-                    pl.col("current_price").last(),
-                    pl.col("prev_close").last(),
-                    pl.col("timestamp").last(),
-                    pl.col("prev_volume").last(),
-                    pl.col("vwap").last(),
-                )
-                .sort("percent_change", descending=True)
+                .agg([pl.col(col).last() for col in agg_columns])
+                .sort("changePercent", descending=True)
                 .collect()
             )
         else:
@@ -472,12 +468,12 @@ class SnapshotProcessor:
         return _parse_transfrom_timetamp(timestamp_value)
 
     def _compute_ranks(self, df: pl.DataFrame) -> pl.DataFrame:
-        """Add competition ranking based on percent_change."""
-        return df.sort("percent_change", descending=True).with_columns(
-            pl.col("percent_change")
+        """Add competition ranking based on changePercent."""
+        return df.sort("changePercent", descending=True).with_columns(
+            pl.col("changePercent")
             .rank(method="min", descending=True)
             .cast(pl.Int32)
-            .alias("competition_rank")
+            .alias("rank")
         )
 
     def _compute_derived_metrics(
@@ -486,14 +482,14 @@ class SnapshotProcessor:
         """Compute change, relativeVolumeDaily, and relativeVolume5min."""
         # Compute change
         df = ranked_df.with_columns(
-            (pl.col("current_price") - pl.col("prev_close")).alias("change")
+            (pl.col("price") - pl.col("prev_close")).alias("change")
         )
 
         # Compute relativeVolumeDaily
         if "prev_volume" in df.columns:
             df = df.with_columns(
                 pl.when(pl.col("prev_volume") > 0)
-                .then(pl.col("accumulated_volume") / pl.col("prev_volume"))
+                .then(pl.col("volume") / pl.col("prev_volume"))
                 .otherwise(0.0)
                 .alias("relativeVolumeDaily")
             )
@@ -504,10 +500,8 @@ class SnapshotProcessor:
         relative_5min_values = []
         for row in df.iter_rows(named=True):
             ticker = row["ticker"]
-            accumulated_volume = row.get("accumulated_volume", 0.0)
-            rel_5min = self._compute_relative_volume_5min(
-                ticker, timestamp, accumulated_volume
-            )
+            volume = row.get("volume", 0.0)
+            rel_5min = self._compute_relative_volume_5min(ticker, timestamp, volume)
             relative_5min_values.append(rel_5min)
 
         df = df.with_columns(pl.Series("relativeVolume5min", relative_5min_values))
@@ -515,10 +509,10 @@ class SnapshotProcessor:
         return df
 
     def _compute_relative_volume_5min(
-        self, ticker: str, timestamp: datetime, accumulated_volume: float
+        self, ticker: str, timestamp: datetime, volume: float
     ) -> float:
         """Compute relativeVolume5min = last_1min_volume / last_5min_avg_volume."""
-        self._volume_history[ticker].append((timestamp, accumulated_volume))
+        self._volume_history[ticker].append((timestamp, volume))
 
         # Keep only last 6 minutes of data
         cutoff_time = timestamp - timedelta(minutes=6)
@@ -541,7 +535,7 @@ class SnapshotProcessor:
         if volume_1min_ago is None:
             volume_1min_ago = history[0][1]
 
-        last_1min_volume = max(0.0, accumulated_volume - volume_1min_ago)
+        last_1min_volume = max(0.0, volume - volume_1min_ago)
 
         # Calculate last 5 minute average
         five_min_ago = timestamp - timedelta(minutes=5)
@@ -561,7 +555,7 @@ class SnapshotProcessor:
         else:
             time_span_minutes = 5.0
 
-        last_5min_total_volume = max(0.0, accumulated_volume - volume_5min_ago)
+        last_5min_total_volume = max(0.0, volume - volume_5min_ago)
         last_5min_avg_volume = last_5min_total_volume / time_span_minutes
 
         if last_5min_avg_volume > 0:
@@ -649,54 +643,58 @@ class SnapshotProcessor:
         timestamp_iso = timestamp.isoformat()
         stream_tickers_data = []
 
+        # Fields to exclude from output
+        exclude_fields = {"ticker", "timestamp"}
+
+        # Fields that should remain as integers
+        int_fields = {"competition_rank", "rank"}
+
         for ticker in subscribed_tickers:
             row = df_dict.get(ticker)
             if row is None:
                 continue
 
-            rank = int(row.get("competition_rank", 0))
-            price = float(row.get("current_price", 0.0))
-            change = float(row.get("change", 0.0))
-            change_percent = float(row.get("percent_change", 0.0))
-            volume = float(row.get("accumulated_volume", 0))
-            relative_volume_5min = float(row.get("relativeVolume5min", 1.0))
-            relative_volume_daily = float(row.get("relativeVolumeDaily", 0.0))
-            vwap = float(row.get("vwap", 0.0))
-
-            stream_tickers_data.append(
-                {
-                    "symbol": ticker,
-                    "rank": rank,
-                    "price": price,
-                    "change": change,
-                    "changePercent": change_percent,
-                    "volume": volume,
-                    "relativeVolume5min": relative_volume_5min,
-                    "relativeVolumeDaily": relative_volume_daily,
-                    "vwap": vwap,
-                }
-            )
-
+            # Dynamically build stream data and InfluxDB point
+            stream_data = {"symbol": ticker}
             point = (
                 influxdb_client.Point("market_snapshot")
                 .tag("symbol", ticker)
                 .tag("run_mode", self.run_mode)
                 .tag("db_id", self.db_id)
-                .field("rank", rank)
-                .field("price", price)
-                .field("change", change)
-                .field("changePercent", change_percent)
-                .field("volume", volume)
-                .field("relativeVolume5min", relative_volume_5min)
-                .field("relativeVolumeDaily", relative_volume_daily)
-                .field("prev_close", float(row.get("prev_close", 0.0)))
-                .field("vwap", vwap)
-                .time(timestamp)
             )
+
+            # Process all fields dynamically
+            for field_name, field_value in row.items():
+                if field_name in exclude_fields:
+                    continue
+
+                # Convert to appropriate type
+                try:
+                    if field_name in int_fields:
+                        numeric_value = (
+                            int(field_value) if field_value is not None else 0
+                        )
+                    elif isinstance(field_value, (int, float)):
+                        numeric_value = float(field_value)
+                    else:
+                        numeric_value = (
+                            float(field_value) if field_value is not None else 0.0
+                        )
+                except (ValueError, TypeError):
+                    continue
+
+                stream_data[field_name] = numeric_value
+                point = point.field(field_name, numeric_value)
+
+            stream_tickers_data.append(stream_data)
+            point = point.time(timestamp)
             influx_points.append(point)
 
         # Write to output stream
         if stream_tickers_data:
+            logger.debug(
+                "_write_to_output_stream_and_influx - Writing to output stream"
+            )
             stream_message = {
                 "timestamp": timestamp_iso,
                 "data": json.dumps(stream_tickers_data),

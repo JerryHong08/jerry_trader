@@ -67,7 +67,8 @@ class GridTraderChartDataManager:
             if replay_date
             else datetime.now(ZoneInfo("America/New_York")).strftime("%Y%m%d")
         )
-        self.db_id = self._derive_db_id(self.db_date, suffix_id)
+
+        self.db_id = f"{self.db_date}_{suffix_id}" if suffix_id else f"{self.db_date}"
 
         # ------- Redis Configuration -------
         self.redis_client = redis.Redis(
@@ -92,16 +93,6 @@ class GridTraderChartDataManager:
         logger.info(
             f"GridTraderChartDataManager initialized: mode={self.run_mode}, db_id={self.db_id}"
         )
-
-    @staticmethod
-    def _derive_db_id(db_date: Optional[str], override: Optional[str]) -> str:
-        if db_date and override:
-            return f"{db_date}_{override}"
-        if override:
-            return override
-        if db_date:
-            return db_date
-        return "na"
 
     def mark_dirty(self):
         """Mark chart data as needing refresh."""

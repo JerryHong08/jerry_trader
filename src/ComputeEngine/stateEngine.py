@@ -57,7 +57,7 @@ class StateEngine:
             if replay_date
             else datetime.now(ZoneInfo("America/New_York")).strftime("%Y%m%d")
         )
-        self.db_id = self._derive_db_id(self.db_date, suffix_id)
+        self.db_id = f"{self.db_date}_{suffix_id}" if suffix_id else f"{self.db_date}"
 
         # ---------- InfluxDB Configuration ----------
         token = os.environ.get("INFLUXDB_TOKEN")
@@ -97,7 +97,7 @@ class StateEngine:
                 raise
 
         # In-memory state cache for state change detection
-        # Structure: {ticker: {state, rank, prev_rank, rank_velocity, percent_change, timestamp}}
+        # Structure: {ticker: {state, rank, prev_rank, rank_velocity, changePercent, timestamp}}
         self._ticker_states: Dict[str, Dict] = {}
 
         # Reload states from InfluxDB for recovery
@@ -108,16 +108,6 @@ class StateEngine:
             f"db_id={self.db_id}, INPUT={self.INPUT_STREAM_NAME}, "
             f"OUTPUT={self.OUTPUT_STREAM_NAME}"
         )
-
-    @staticmethod
-    def _derive_db_id(db_date: Optional[str], override: Optional[str]) -> str:
-        if db_date and override:
-            return f"{db_date}_{override}"
-        if override:
-            return override
-        if db_date:
-            return db_date
-        return "na"
 
     # =========================================================================
     # PUBLIC API - Start Listener
@@ -268,7 +258,7 @@ class StateEngine:
         TODO: Add more sophisticated state logic in the future
         """
         current_rank = ticker_data.get("rank", 999)
-        percent_change = ticker_data.get("changePercent", 0.0)
+        changePercent = ticker_data.get("changePercent", 0.0)
 
         # Get previous state for velocity calculation
         prev_state = self._ticker_states.get(symbol, {})
@@ -283,7 +273,7 @@ class StateEngine:
             state_reason = "New to top gainers"
         elif rank_velocity >= 5:
             state = "Best"
-            state_reason = f"Rank +{rank_velocity} ({percent_change:+.1f}%)"
+            state_reason = f"Rank +{rank_velocity} ({changePercent:+.1f}%)"
         elif rank_velocity >= 2:
             state = "Good"
             state_reason = f"Rank +{rank_velocity}"
@@ -303,7 +293,7 @@ class StateEngine:
             "rank": current_rank,
             "prev_rank": prev_rank,
             "rank_velocity": rank_velocity,
-            "percent_change": percent_change,
+            "changePercent": changePercent,
             "timestamp": timestamp,
         }
 
@@ -340,7 +330,7 @@ class StateEngine:
 
         Measurement: movers_state
         Tags: symbol, run_mode, db_id
-        Fields: state, stateReason, rank, percent_change, rank_velocity
+        Fields: state, stateReason, rank, changePercent, rank_velocity
         Time: state_change timestamp
         """
         point = (
@@ -351,7 +341,7 @@ class StateEngine:
             .field("state", state.get("state", "unknown"))
             .field("stateReason", state.get("stateReason", ""))
             .field("rank", int(state.get("rank", 0)))
-            .field("percent_change", float(state.get("percent_change", 0.0)))
+            .field("changePercent", float(state.get("changePercent", 0.0)))
             .field("rank_velocity", int(state.get("rank_velocity", 0)))
             .time(timestamp)
         )
@@ -380,7 +370,7 @@ class StateEngine:
             "symbol": "ROKU",
             "from": "confirming",
             "to": "running-up",
-            "reason": "percentChange",
+            "reason": "changePercent",
             "ts": 1704898330
         }
         """
@@ -500,8 +490,8 @@ class StateEngine:
                         self._ticker_states[ticker] = {
                             "state": record.values.get("state", "unknown"),
                             "rank": int(record.values.get("rank", 999)),
-                            "percent_change": float(
-                                record.values.get("percent_change", 0.0)
+                            "changePercent": float(
+                                record.values.get("changePercent", 0.0)
                             ),
                             "rank_velocity": int(record.values.get("rank_velocity", 0)),
                             "timestamp": record.get_time(),

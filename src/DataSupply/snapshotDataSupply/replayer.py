@@ -42,7 +42,10 @@ def extract_timestamp_from_filename(filename: str) -> datetime:
 
 
 def read_market_snapshot_with_timing(
-    replay_date: str, speed_multiplier: float = 1.0, start_from: str | None = None
+    replay_date: str,
+    speed_multiplier: float = 1.0,
+    start_from: str | None = None,
+    file_format: str = "parquet",
 ) -> None:
     """
     replay file in market_mover_dir for the given date with timing based on filenames.
@@ -51,6 +54,7 @@ def read_market_snapshot_with_timing(
         replay_date: replay date YYYYMMDD
         speed_multiplier: replay speed
         start_from: optional timestamp (HHMMSS) to resume replay from (will start from the first file after this time)
+        file_format: file format to read ('parquet' or 'csv'), default is 'parquet'
     """
     year = replay_date[:4]
     month = replay_date[4:6]
@@ -62,10 +66,15 @@ def read_market_snapshot_with_timing(
         logger.warning(f"Directory not found: {market_mover_dir}")
         return
 
-    all_files = glob.glob(os.path.join(market_mover_dir, "*_market_snapshot.csv"))
+    file_extension = "parquet" if file_format == "parquet" else "csv"
+    all_files = glob.glob(
+        os.path.join(market_mover_dir, f"*_market_snapshot.{file_extension}")
+    )
 
     if not all_files:
-        logger.warning(f"No market snapshot files found in {market_mover_dir}")
+        logger.warning(
+            f"No market snapshot {file_extension} files found in {market_mover_dir}"
+        )
         return
 
     all_files.sort()
@@ -129,20 +138,23 @@ def read_market_snapshot_with_timing(
         logger.info(f"[{file_timestamp}] Reading file: {os.path.basename(file)}")
 
         try:
-            # Read all columns from CSV
-            df = pl.read_csv(file)
+            # Read all columns from file (CSV or Parquet)
+            if file_format == "parquet":
+                df = pl.read_parquet(file)
+            else:
+                df = pl.read_csv(file)
 
             # Select only the columns needed for downstream processing
             # Map new column names to original expected names
             df = df.select(
                 [
                     pl.col("ticker"),
-                    pl.col("todaysChangePerc").alias("percent_change"),
-                    pl.col("min_av").alias("accumulated_volume"),
-                    pl.col("lastTrade_p").alias("current_price"),
+                    pl.col("todaysChangePerc").alias("changePercent"),
+                    pl.col("min_av").alias("volume"),
+                    pl.col("lastTrade_p").alias("price"),
                     pl.col("prevDay_c").alias("prev_close"),
                     pl.col("prevDay_v").alias("prev_volume"),
-                    pl.col("min_vwap").alias("vwap"),
+                    pl.col("min_vw").alias("vwap"),
                 ]
             )
 
@@ -475,6 +487,13 @@ Examples:
         "--speed", type=float, default=1.0, help="Speed multiplier (default: 1.0)"
     )
     parser.add_argument(
+        "--format",
+        type=str,
+        default="parquet",
+        choices=["parquet", "csv"],
+        help="File format to replay (default: parquet)",
+    )
+    parser.add_argument(
         "--start-from",
         type=str,
         default=None,
@@ -510,7 +529,10 @@ Examples:
     else:
         logger.info(f"Replaying market snapshots for date: {args.date}")
         logger.info(f"Speed: {args.speed}x")
+        logger.info(f"Format: {args.format}")
         if args.start_from:
             logger.info(f"Starting from: {args.start_from}")
 
-        read_market_snapshot_with_timing(args.date, args.speed, args.start_from)
+        read_market_snapshot_with_timing(
+            args.date, args.speed, args.start_from, args.format
+        )

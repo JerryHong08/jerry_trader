@@ -13,6 +13,52 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, model_v
 logger = logging.getLogger(__name__)
 
 
+# Snapshot data schema for Parquet optimization
+MASSIVE_SNAPSHOT_SCHEMA = {
+    "ticker": pl.Utf8,
+    "todaysChange": pl.Float64,
+    "todaysChangePerc": pl.Float64,
+    "updated": pl.Int64,
+    # day fields
+    "day_c": pl.Float64,
+    "day_h": pl.Float64,
+    "day_l": pl.Float64,
+    "day_o": pl.Float64,
+    "day_v": pl.Int64,  # volume should be integer
+    "day_vw": pl.Float64,
+    # prevDay fields
+    "prevDay_c": pl.Float64,
+    "prevDay_h": pl.Float64,
+    "prevDay_l": pl.Float64,
+    "prevDay_o": pl.Float64,
+    "prevDay_v": pl.Int64,  # volume should be integer
+    "prevDay_vw": pl.Float64,
+    # min fields
+    "min_av": pl.Int64,  # accumulated volume should be integer
+    "min_c": pl.Float64,
+    "min_h": pl.Float64,
+    "min_l": pl.Float64,
+    "min_n": pl.Int64,
+    "min_o": pl.Float64,
+    "min_t": pl.Int64,
+    "min_v": pl.Int64,  # volume should be integer
+    "min_vw": pl.Float64,
+    # lastTrade fields
+    "lastTrade_c": pl.Utf8,  # array stored as JSON string
+    "lastTrade_i": pl.Utf8,
+    "lastTrade_p": pl.Float64,
+    "lastTrade_s": pl.Int64,  # size/volume should be integer
+    "lastTrade_t": pl.Int64,
+    "lastTrade_x": pl.Int64,
+    # lastQuote fields
+    "lastQuote_P": pl.Float64,
+    "lastQuote_S": pl.Int64,  # bid size should be integer
+    "lastQuote_p": pl.Float64,
+    "lastQuote_s": pl.Int64,  # ask size should be integer
+    "lastQuote_t": pl.Int64,
+}
+
+
 class FloatSourceData(BaseModel):
     source: str = Field(..., description="Data Source")
     float_shares: Optional[float] = None
@@ -30,13 +76,11 @@ class FloatShares(BaseModel):
 
 class SnapshotMessage(BaseModel):
     ticker: str = Field(..., description="Stock ticker symbol")
-    percent_change: float = Field(
+    changePercent: float = Field(
         ..., description="Percentage change from previous close"
     )
-    accumulated_volume: float = Field(
-        ..., description="Total accumulated trading volume"
-    )
-    current_price: float = Field(..., description="Current stock price")
+    volume: float = Field(..., description="Total accumulated trading volume")
+    price: float = Field(..., description="Current stock price")
     prev_close: float = Field(..., description="Previous closing price")
     prev_volume: float = Field(..., description="Previous trading volume")
     timestamp: int = Field(..., description="Timestamp in milliseconds")
@@ -46,23 +90,14 @@ def validate_SnapshotMsg_schema(df: pl.DataFrame) -> tuple[bool, str]:
     """
     Fast DataFrame schema validation
     """
-    required_schema = {
-        "ticker": pl.Utf8,
-        "percent_change": pl.Float64,
-        "accumulated_volume": pl.Float64,
-        "current_price": pl.Float64,
-        "prev_close": pl.Float64,
-        "prev_volume": pl.Float64,
-        "timestamp": pl.Int64,
-    }
 
     # Check columns
-    missing = set(required_schema.keys()) - set(df.columns)
+    missing = set(MASSIVE_SNAPSHOT_SCHEMA.keys()) - set(df.columns)
     if missing:
         return False, f"Missing columns: {missing}"
 
     # Check types
-    for col, expected_type in required_schema.items():
+    for col, expected_type in MASSIVE_SNAPSHOT_SCHEMA.items():
         if df[col].dtype != expected_type:
             return (
                 False,
@@ -71,7 +106,9 @@ def validate_SnapshotMsg_schema(df: pl.DataFrame) -> tuple[bool, str]:
 
     # Check for nulls
     null_counts = df.null_count()
-    null_cols = [col for col in required_schema.keys() if null_counts[col][0] > 0]
+    null_cols = [
+        col for col in MASSIVE_SNAPSHOT_SCHEMA.keys() if null_counts[col][0] > 0
+    ]
     if null_cols:
         return False, f"Null values in columns: {null_cols}"
 

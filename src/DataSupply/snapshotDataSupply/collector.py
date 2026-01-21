@@ -19,6 +19,7 @@ import redis
 from dotenv import load_dotenv
 
 from config import cache_dir
+from DataUtils.schema import MASSIVE_SNAPSHOT_SCHEMA
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
@@ -187,6 +188,8 @@ class MarketsnapshotCollector:
                     # Flatten lastQuote
                     if item.get("lastQuote"):
                         for key, val in item["lastQuote"].items():
+                            # if item.get('ticker') == 'AAPL':
+                            #     logger.debug(f"run_collector_engine - lastQuote key: {key}, val: {val}")
                             flattened[f"lastQuote_{key}"] = val
 
                     data_list.append(flattened)
@@ -195,7 +198,7 @@ class MarketsnapshotCollector:
                     logger.info("run_collector_engine - ⚠️  No data collected from API")
                     continue
 
-                df = pl.DataFrame(data_list)
+                df = pl.DataFrame(data_list, schema=MASSIVE_SNAPSHOT_SCHEMA)
 
                 logger.info(
                     f"run_collector_engine - ✓ Collected {len(df)} rows with {len(df.columns)} columns"
@@ -209,17 +212,13 @@ class MarketsnapshotCollector:
                     [
                         {
                             "ticker": item.get("ticker"),
-                            "percent_change": item.get("todaysChangePerc", 0),
-                            "accumulated_volume": float(
-                                item.get("min", {}).get("av", 0)
-                            ),
-                            "current_price": float(
-                                item.get("lastTrade", {}).get("p", 0)
-                            ),
+                            "changePercent": item.get("todaysChangePerc", 0),
+                            "volume": float(item.get("min", {}).get("av", 0)),
+                            "price": float(item.get("lastTrade", {}).get("p", 0)),
                             "prev_close": float(item.get("prevDay", {}).get("c", 0)),
                             "timestamp": item.get("updated", 0),
                             "prev_volume": item.get("prevDay", {}).get("v", 0),
-                            "vwap": float(item.get("min", {}).get("vwap", 0)),
+                            "vwap": float(item.get("min", {}).get("vw", 0)),
                         }
                         for item in snapshot
                         if item.get("day")
@@ -266,10 +265,10 @@ class MarketsnapshotCollector:
         market_mover_dir = os.path.join(cache_dir, "market_mover", year, month, date)
         os.makedirs(market_mover_dir, exist_ok=True)
         market_mover_file = os.path.join(
-            market_mover_dir, f"{updated_time}_market_snapshot.csv"
+            market_mover_dir, f"{updated_time}_market_snapshot.parquet"
         )
 
-        df.write_csv(market_mover_file)
+        df.write_parquet(market_mover_file, compression="zstd")
         return market_mover_file
 
 

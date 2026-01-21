@@ -73,6 +73,7 @@
     --color-zinc-800: oklch(.274 .006 286.033);
     --color-zinc-900: oklch(.21 .006 285.885);
     --color-zinc-950: oklch(.141 .005 285.823);
+    --color-emerald-500: oklch(0.696 0.17 162.48);
     --color-black: #000;
     --color-white: #fff;
     --spacing: .25rem;
@@ -887,6 +888,10 @@
 
   .bg-green-600 {
     background-color: var(--color-green-600);
+  }
+
+  .bg-emerald-500 {
+    background-color: var(--color-emerald-500);
   }
 
   .bg-purple-600 {

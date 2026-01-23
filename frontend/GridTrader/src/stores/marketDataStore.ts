@@ -4,13 +4,14 @@
  * Manages all market data state including:
  * - Rank entity map (symbol → entity)
  * - Chart series data
- * - Chart subscriptions
+ * - Visible tickers (pure UI state)
  * - WebSocket connection status
  *
  * Key Design:
  * - Snapshot updates patch only dynamic fields (price, change, volume, etc.)
  * - State updates patch only state and stateReason fields
  * - This preserves state consistency across different update sources
+ * - Visibility is pure frontend UI state - not synced with backend
  */
 
 import { create } from 'zustand';
@@ -53,8 +54,11 @@ interface MarketDataState {
   seriesData: Record<string, LWSeriesData>;
   chartTimestamp: string | null;
 
-  // Chart subscriptions - which tickers to display in overview chart
-  chartSubscribedTickers: Set<string>;
+  // Visible tickers - which tickers to display in overview chart (pure UI state)
+  visibleTickers: Set<string>;
+
+  // Hidden tickers - tickers user explicitly hid (used to persist visibility state)
+  hiddenTickers: Set<string>;
 
   // WebSocket connection status
   connectionStatus: ConnectionStatus;
@@ -96,14 +100,19 @@ interface MarketDataState {
   setConnectionStatus: (status: ConnectionStatus) => void;
 
   /**
-   * Update a single chart subscription.
+   * Update a single ticker visibility (UI state only).
    */
-  updateChartSubscription: (ticker: string, subscribed: boolean) => void;
+  updateTickerVisibility: (ticker: string, visible: boolean) => void;
 
   /**
-   * Set all chart subscriptions at once.
+   * Set all visible tickers at once (UI state only).
    */
-  setChartSubscriptions: (tickers: string[]) => void;
+  setVisibleTickers: (tickers: string[]) => void;
+
+  /**
+   * Sync visibility with new chart data: new tickers become visible, explicitly hidden stay hidden.
+   */
+  syncVisibility: (allTickers: string[]) => void;
 
   /**
    * Reset all state (for disconnect/cleanup).
@@ -120,7 +129,8 @@ export const useMarketDataStore = create<MarketDataState>()(
     rankTimestamp: null,
     seriesData: {},
     chartTimestamp: null,
-    chartSubscribedTickers: new Set(),
+    visibleTickers: new Set(),
+    hiddenTickers: new Set(),
     connectionStatus: 'disconnected',
 
     // ============================================================================
@@ -173,6 +183,7 @@ export const useMarketDataStore = create<MarketDataState>()(
               changePercent: item.changePercent ?? 0,
               volume: item.volume ?? 0,
               marketCap: 0, // Static field, will be set by other source
+              vwap: item.vwap ?? 0, // Snapshotdata field
               float: 0, // Static field
               relativeVolumeDaily: item.relativeVolumeDaily ?? 0,
               relativeVolume5min: item.relativeVolume5min ?? 0,
@@ -211,6 +222,7 @@ export const useMarketDataStore = create<MarketDataState>()(
             changePercent: 0,
             volume: 0,
             marketCap: 0,
+            vwap: 0,
             float: 0,
             relativeVolumeDaily: 0,
             relativeVolume5min: 0,
@@ -231,20 +243,49 @@ export const useMarketDataStore = create<MarketDataState>()(
       set({ connectionStatus });
     },
 
-    updateChartSubscription: (ticker, subscribed) => {
+    updateTickerVisibility: (ticker, visible) => {
       set((state) => {
-        const newSet = new Set(state.chartSubscribedTickers);
-        if (subscribed) {
-          newSet.add(ticker);
+        const newVisibleSet = new Set(state.visibleTickers);
+        const newHiddenSet = new Set(state.hiddenTickers);
+        if (visible) {
+          newVisibleSet.add(ticker);
+          newHiddenSet.delete(ticker); // Remove from explicitly hidden
         } else {
-          newSet.delete(ticker);
+          newVisibleSet.delete(ticker);
+          newHiddenSet.add(ticker); // Mark as explicitly hidden
         }
-        return { chartSubscribedTickers: newSet };
+        return { visibleTickers: newVisibleSet, hiddenTickers: newHiddenSet };
       });
     },
 
-    setChartSubscriptions: (tickers) => {
-      set({ chartSubscribedTickers: new Set(tickers) });
+    setVisibleTickers: (tickers) => {
+      set({ visibleTickers: new Set(tickers) });
+    },
+
+    syncVisibility: (allTickers) => {
+      set((state) => {
+        const allTickersSet = new Set(allTickers);
+        const newVisibleSet = new Set<string>();
+
+        // For each ticker in the new data:
+        // - If not explicitly hidden, make it visible
+        allTickers.forEach((ticker) => {
+          if (!state.hiddenTickers.has(ticker)) {
+            newVisibleSet.add(ticker);
+          }
+        });
+
+        // Also clean up hiddenTickers: remove tickers that are no longer in data
+        // This prevents the hiddenTickers set from growing indefinitely
+        const newHiddenSet = new Set<string>();
+        state.hiddenTickers.forEach((ticker) => {
+          if (allTickersSet.has(ticker)) {
+            newHiddenSet.add(ticker);
+          }
+        });
+
+        return { visibleTickers: newVisibleSet, hiddenTickers: newHiddenSet };
+      });
     },
 
     reset: () => {
@@ -253,7 +294,8 @@ export const useMarketDataStore = create<MarketDataState>()(
         rankTimestamp: null,
         seriesData: {},
         chartTimestamp: null,
-        chartSubscribedTickers: new Set(),
+        visibleTickers: new Set(),
+        hiddenTickers: new Set(),
         connectionStatus: 'disconnected',
       });
     },
@@ -272,8 +314,8 @@ export function getRankDataArray(): RankItem[] {
 }
 
 /**
- * Get chart subscribed tickers from store (non-reactive).
+ * Get visible tickers from store (non-reactive).
  */
-export function getChartSubscribedTickers(): Set<string> {
-  return new Set(useMarketDataStore.getState().chartSubscribedTickers);
+export function getVisibleTickers(): Set<string> {
+  return new Set(useMarketDataStore.getState().visibleTickers);
 }

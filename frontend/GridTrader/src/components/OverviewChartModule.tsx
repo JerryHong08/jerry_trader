@@ -15,7 +15,8 @@ import { createChart, IChartApi, ISeriesApi, LineSeries, LineData, Time, ColorTy
 import { Filter, Focus, TrendingUp, Wifi, WifiOff, ZoomIn, ZoomOut, Maximize2, RotateCcw } from 'lucide-react';
 import type { ModuleProps, RankItem, TickerState } from '../types';
 import { useBackendTimestamp, timestampStore, parseTimestamp } from '../hooks/useBackendTimestamps';
-import { useOverviewChartData, useWebSocketConnection, useChartSubscriptions, type TickerDataWithHistory } from '../hooks/useWebSocket';
+import { useOverviewChartData, useWebSocketConnection, useTickerVisibility, setTopN as sendSetTopN, type TickerDataWithHistory } from '../hooks/useWebSocket';
+import { GridItem } from './GridItem';
 
 // ============================================================================
 // Types & Constants
@@ -124,88 +125,6 @@ const CHART_THEME = {
   rightPriceScale: {
     borderColor: '#27272a',
   },
-};
-
-// ============================================================================
-// Mock Data Generation (same logic as original)
-// ============================================================================
-
-const generateMockRankData = (): LocalTickerDataWithHistory[] => {
-  const symbols = ['AAPL', 'TSLA', 'NVDA', 'MSFT', 'GOOGL', 'AMZN', 'META', 'AMD', 'NFLX', 'COIN', 'PLTR', 'RIVN', 'LCID', 'SOFI', 'BABA', 'NIO', 'SHOP', 'SQ', 'PYPL', 'ROKU'];
-  const states: TickerState[] = ['Best', 'Good', 'OnWatch', 'NotGood', 'Bad'];
-  const now = Date.now();
-
-  return symbols.map((symbol) => {
-    const currentState = states[Math.floor(Math.random() * states.length)];
-    const numStateChanges = Math.floor(Math.random() * 3) + 3;
-    const stateHistory: StateHistoryPoint[] = [];
-    const premarketMinutes = 330;
-
-    for (let i = numStateChanges; i >= 0; i--) {
-      const minutesAgo = (premarketMinutes / numStateChanges) * i;
-      const timestamp = now - minutesAgo * 60 * 1000;
-      const state = i === 0 ? currentState : states[Math.floor(Math.random() * states.length)];
-      stateHistory.push({ timestamp, state });
-    }
-
-    stateHistory.sort((a, b) => b.timestamp - a.timestamp);
-
-    return {
-      symbol,
-      price: Math.random() * 500 + 50,
-      change: Math.random() * 20 - 5,
-      changePercent: Math.random() * 15,
-      volume: Math.random() * 100000000,
-      marketCap: Math.random() * 1000000000000,
-      state: currentState,
-      float: Math.random() * 500000000,
-      relativeVolumeDaily: Math.random() * 5 + 0.5,
-      relativeVolume5min: Math.random() * 10 + 0.2,
-      stateHistory,
-    };
-  }).sort((a, b) => b.changePercent - a.changePercent).slice(0, 20);
-};
-
-// Generate time series data for chart (MOCK DATA ONLY)
-const generateMockChartSeriesData = (rankData: LocalTickerDataWithHistory[]): Map<string, { data: LineData<Time>[]; states: { time: Time; state: TickerState }[] }> => {
-  const result = new Map<string, { data: LineData<Time>[]; states: { time: Time; state: TickerState }[] }>();
-  const now = Date.now();
-  const intervalMinutes = 5;
-  const totalMinutes = 330; // Pre-market duration
-  const numPoints = Math.floor(totalMinutes / intervalMinutes) + 1;
-
-  rankData.forEach((item) => {
-    const data: LineData<Time>[] = [];
-    const states: { time: Time; state: TickerState }[] = [];
-
-    for (let i = 0; i < numPoints; i++) {
-      const minutesFromStart = i * intervalMinutes;
-      const timestamp = now - (totalMinutes - minutesFromStart) * 60 * 1000;
-      // Convert to seconds for lightweight-charts Time format
-      const time = Math.floor(timestamp / 1000) as Time;
-
-      const volatility = 0.03;
-      const trend = minutesFromStart / totalMinutes;
-      const noise = (Math.random() - 0.5) * volatility * 100;
-      const value = (trend * item.changePercent) + noise;
-
-      data.push({ time, value });
-
-      // Find state at this timestamp
-      let currentState = item.state;
-      for (const sh of item.stateHistory) {
-        if (sh.timestamp <= timestamp) {
-          currentState = sh.state;
-          break;
-        }
-      }
-      states.push({ time, state: currentState });
-    }
-
-    result.set(item.symbol, { data, states });
-  });
-
-  return result;
 };
 
 // Note: Backend sends data in Lightweight Charts ready format.
@@ -336,7 +255,6 @@ export function OverviewChartModule({
   // State
   const [rankData, setRankData] = useState<LocalTickerDataWithHistory[]>([]);
   const [chartSeriesData, setChartSeriesData] = useState<Map<string, { data: LineData<Time>[]; states: { time: Time; state: TickerState }[] }>>(new Map());
-  const [useMockData, setUseMockData] = useState(false);
   const [chartReady, setChartReady] = useState(false);
   const [containerReady, setContainerReady] = useState(false);
 
@@ -346,7 +264,7 @@ export function OverviewChartModule({
     position: { x: 0, y: 0 },
     visible: false,
   });
-  const [visibleSeries, setVisibleSeries] = useState<Set<string>>(new Set());
+  // Note: visibleSeries removed - now using visibleTickers from useTickerVisibility (pure UI state)
   const [hoveredSymbol, setHoveredSymbol] = useState<string | null>(null);
   const [showFilter, setShowFilter] = useState(false);
   const [showTimeRangeMenu, setShowTimeRangeMenu] = useState(false);
@@ -360,6 +278,10 @@ export function OverviewChartModule({
   const [useLogScale, setUseLogScale] = useState(true); // Logarithmic scale by default
   const [isFollowingLatest, setIsFollowingLatest] = useState(true); // Track if chart should follow latest data
   const isUserInteractingRef = useRef(false); // Track if user is currently interacting
+  const [topN, setTopN] = useState<number>(settings?.overviewChart?.topN || 20); // Number of top tickers to display
+  const [showTopNMenu, setShowTopNMenu] = useState(false);
+
+  const topNOptions = [10, 15, 20, 30, 50];
 
   const timeRangeOptions = [
     { value: 'all', label: 'All', minutes: null },
@@ -377,8 +299,9 @@ export function OverviewChartModule({
     timestamp: liveTimestamp,
     isConnected,
     refresh
-  } = useOverviewChartData();
-  const { subscribedTickers } = useChartSubscriptions();
+  } = useOverviewChartData(topN);
+  const { visibleTickers, toggleVisibility, isVisible, showAll } = useTickerVisibility();
+
   const backendTimestamp = useBackendTimestamp('market-data');
 
   // ============================================================================
@@ -536,28 +459,9 @@ export function OverviewChartModule({
   // Data Loading
   // ============================================================================
 
-  // Initialize with mock data
-  useEffect(() => {
-    const mockData = generateMockRankData();
-    const seriesData = generateMockChartSeriesData(mockData);
-    setRankData(mockData);
-    setChartSeriesData(seriesData);
-    setVisibleSeries(new Set(mockData.map(d => d.symbol)));
-  }, []);
-
   // Handle live data when available
   useEffect(() => {
-    if (useMockData) {
-      const mockData = generateMockRankData();
-      const seriesData = generateMockChartSeriesData(mockData);
-      setRankData(mockData);
-      setChartSeriesData(seriesData);
-      setVisibleSeries(new Set(mockData.map(d => d.symbol)));
-      // Reset initialization tracking for mock data
-      seriesInitializedRef.current.clear();
-      lastDataTimestampRef.current.clear();
-      previousSeriesDataRef.current = {};
-    } else if (isConnected && liveRankData.length > 0) {
+    if (isConnected && liveRankData.length > 0) {
       // Convert live rank data to our format
       const convertedData: LocalTickerDataWithHistory[] = liveRankData.map(item => ({
         ...item,
@@ -611,21 +515,12 @@ export function OverviewChartModule({
           seriesInitializedRef.current.clear();
         }
       } else {
-        // Fallback: generate mock data if no backend data available
+        // Fallback: do nothing.
         setRankData(convertedData);
-        const seriesData = generateMockChartSeriesData(convertedData);
-        setChartSeriesData(seriesData);
       }
 
-      // Update visibleSeries to match live data symbols - only if symbols actually changed
-      const newSymbols = convertedData.map(d => d.symbol).sort().join(',');
-      setVisibleSeries(prev => {
-        const prevSymbols = Array.from(prev).sort().join(',');
-        if (prevSymbols === newSymbols) {
-          return prev; // Return same reference if symbols unchanged
-        }
-        return new Set(convertedData.map(d => d.symbol));
-      });
+      // Note: No longer setting visibleSeries here - using visibleTickers from Zustand store instead
+      // The visibleTickers are pure UI state managed by useTickerVisibility hook
 
       if (liveTimestamp) {
         const parsedTime = parseTimestamp(liveTimestamp);
@@ -635,7 +530,7 @@ export function OverviewChartModule({
       }
     }
     // Keep existing data if no data source available
-  }, [useMockData, isConnected, liveRankData, liveSeriesData, liveTimestamp]);
+  }, [isConnected, liveRankData, liveSeriesData, liveTimestamp]);
 
   // ============================================================================
   // Series Management
@@ -652,15 +547,12 @@ export function OverviewChartModule({
 
     const result = rankData.filter(item => {
       const matchesState = selectedStates.has(item.state);
-      // When using mock data, ignore subscribedTickers filter since mock symbols differ from live
-      // Also ignore if subscribedTickers is empty (no subscriptions yet)
-      const matchesSubscription = useMockData || subscribedTickers.size === 0 || subscribedTickers.has(item.symbol);
-      // If visibleSeries is empty (not yet initialized), show all; otherwise filter by visibility
-      const isVisible = visibleSeries.size === 0 || visibleSeries.has(item.symbol);
-      return matchesState && matchesSubscription && isVisible;
+      // Filter by visibility - use visibleTickers from Zustand store (pure UI state)
+      const isTickerVisible = visibleTickers.has(item.symbol);
+      return matchesState && isTickerVisible;
     });
     return result;
-  }, [rankData, focusMode, syncGroup, selectedSymbol, selectedStates, subscribedTickers, visibleSeries, useMockData]);
+  }, [rankData, focusMode, syncGroup, selectedSymbol, selectedStates, visibleTickers]);
 
   // Check if we should enable segmentation (<=5 tickers)
   const enableSegmentation = useMemo(() => {
@@ -942,17 +834,8 @@ export function OverviewChartModule({
     });
   }, [selectedStates, focusMode, onSettingsChange]);
 
-  const toggleSeriesVisibility = useCallback((symbol: string) => {
-    setVisibleSeries(prev => {
-      const newSet = new Set(prev);
-      if (newSet.has(symbol)) {
-        newSet.delete(symbol);
-      } else {
-        newSet.add(symbol);
-      }
-      return newSet;
-    });
-  }, []);
+  // Note: toggleSeriesVisibility removed - now using toggleVisibility from useTickerVisibility
+  // This syncs legend toggles with RankList eye icons and backend
 
   const resetZoom = useCallback(() => {
     if (!chartRef.current || !chartSeriesData.size) return;
@@ -1015,14 +898,14 @@ export function OverviewChartModule({
     }
   }, []);
 
-  // Legend items
+  // Legend items - use visibleTickers for visibility state (pure UI state)
   const legendItems = useMemo(() => {
     return rankData.map((item, index) => ({
       symbol: item.symbol,
       color: LINE_COLORS[index % LINE_COLORS.length],
-      visible: visibleSeries.has(item.symbol),
+      visible: visibleTickers.has(item.symbol),
     }));
-  }, [rankData, visibleSeries]);
+  }, [rankData, visibleTickers]);
 
   // ============================================================================
   // Render
@@ -1055,18 +938,6 @@ export function OverviewChartModule({
           </div>
 
           <div className="flex items-center gap-2">
-            {/* Mock/Live toggle */}
-            <button
-              onClick={() => {
-                setUseMockData(!useMockData);
-                hasInitialFitRef.current = false; // Reset to allow new fit on data source change
-              }}
-              className={`px-2 py-1 text-xs rounded ${useMockData ? 'bg-yellow-600' : 'bg-zinc-700'}`}
-              title={useMockData ? 'Using Mock Data' : 'Using Live Data'}
-            >
-              {useMockData ? 'Mock' : 'Live'}
-            </button>
-
             {/* Logarithmic Scale Toggle */}
             <button
               onClick={() => {
@@ -1105,6 +976,37 @@ export function OverviewChartModule({
                       }`}
                     >
                       {option.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Top N Selector */}
+            <div className="relative">
+              <button
+                onClick={() => setShowTopNMenu(!showTopNMenu)}
+                className="flex items-center gap-1 px-2 py-1 text-xs bg-zinc-700 hover:bg-zinc-600 rounded"
+                title="Number of top tickers to display"
+              >
+                Top {topN}
+              </button>
+              {showTopNMenu && (
+                <div className="absolute right-0 top-full mt-1 bg-zinc-800 border border-zinc-700 rounded-md shadow-lg z-50">
+                  {topNOptions.map((n) => (
+                    <button
+                      key={n}
+                      onClick={() => {
+                        setTopN(n);
+                        setShowTopNMenu(false);
+                        // Send to backend to persist the setting
+                        sendSetTopN(n);
+                      }}
+                      className={`block w-full px-3 py-1.5 text-xs text-left hover:bg-zinc-700 ${
+                        topN === n ? 'bg-zinc-700' : ''
+                      }`}
+                    >
+                      Top {n}
                     </button>
                   ))}
                 </div>
@@ -1207,7 +1109,7 @@ export function OverviewChartModule({
       {displayedRankData.length > 0 && (
         <ChartLegend
           items={legendItems.filter(item => displayedRankData.some(d => d.symbol === item.symbol))}
-          onToggle={toggleSeriesVisibility}
+          onToggle={toggleVisibility}
           hoveredSymbol={hoveredSymbol}
           onHover={setHoveredSymbol}
         />

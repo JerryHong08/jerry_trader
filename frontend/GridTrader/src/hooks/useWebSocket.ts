@@ -150,6 +150,10 @@ function handleMessage(message: WebSocketMessage) {
           }
         }
         store.setChartData(message.seriesData, message.timestamp);
+
+        // Sync visibility: new tickers become visible, explicitly hidden stay hidden
+        const allTickers = Object.keys(message.seriesData);
+        store.syncVisibility(allTickers);
       }
       break;
 
@@ -256,39 +260,32 @@ function getWebSocket(): WebSocket {
 // ============================================================================
 
 /**
- * Update which tickers are subscribed for overview chart display
+ * Update ticker visibility in overview chart (pure UI state - no backend sync)
  */
-export function updateChartSubscription(ticker: string, subscribed: boolean) {
+export function updateTickerVisibility(ticker: string, visible: boolean) {
   const store = useMarketDataStore.getState();
-  store.updateChartSubscription(ticker, subscribed);
-
-  // Notify backend of subscription change
-  sendMessage({
-    type: 'update_chart_subscription',
-    payload: {
-      ticker,
-      subscribed,
-      allSubscribed: Array.from(store.chartSubscribedTickers),
-    },
-  });
+  store.updateTickerVisibility(ticker, visible);
 }
 
 /**
- * Get current chart subscribed tickers
+ * Get current visible tickers
  */
-export function getChartSubscribedTickers(): Set<string> {
-  return new Set(useMarketDataStore.getState().chartSubscribedTickers);
+export function getVisibleTickers(): Set<string> {
+  return new Set(useMarketDataStore.getState().visibleTickers);
 }
 
 /**
- * Set all chart subscriptions at once
+ * Set all visible tickers at once (pure UI state - no backend sync)
  */
-export function setChartSubscriptions(tickers: string[]) {
-  useMarketDataStore.getState().setChartSubscriptions(tickers);
-  sendMessage({
-    type: 'set_chart_subscriptions',
-    payload: { tickers },
-  });
+export function setVisibleTickers(tickers: string[]) {
+  useMarketDataStore.getState().setVisibleTickers(tickers);
+}
+
+/**
+ * Set top N tickers to request from backend (persists in BFF)
+ */
+export function setTopN(topN: number) {
+  sendMessage({ type: 'set_top_n', payload: { top_n: topN } });
 }
 
 // ============================================================================
@@ -360,42 +357,42 @@ export function useRankListData(): {
 }
 
 /**
- * Hook for chart subscriptions state
+ * Hook for ticker visibility state (pure UI state - no backend sync)
  */
-export function useChartSubscriptions(): {
-  subscribedTickers: Set<string>;
-  toggleSubscription: (ticker: string) => void;
-  isSubscribed: (ticker: string) => boolean;
-  subscribeAll: (tickers: string[]) => void;
-  unsubscribeAll: () => void;
+export function useTickerVisibility(): {
+  visibleTickers: Set<string>;
+  toggleVisibility: (ticker: string) => void;
+  isVisible: (ticker: string) => boolean;
+  showAll: (tickers: string[]) => void;
+  hideAll: () => void;
 } {
-  const subscribedTickers = useMarketDataStore((s) => s.chartSubscribedTickers);
+  const visibleTickers = useMarketDataStore((s) => s.visibleTickers);
 
-  const toggleSubscription = useCallback((ticker: string) => {
-    const isCurrentlySubscribed = useMarketDataStore
+  const toggleVisibility = useCallback((ticker: string) => {
+    const isCurrentlyVisible = useMarketDataStore
       .getState()
-      .chartSubscribedTickers.has(ticker);
-    updateChartSubscription(ticker, !isCurrentlySubscribed);
+      .visibleTickers.has(ticker);
+    updateTickerVisibility(ticker, !isCurrentlyVisible);
   }, []);
 
-  const isSubscribed = useCallback((ticker: string) => {
-    return useMarketDataStore.getState().chartSubscribedTickers.has(ticker);
+  const isVisible = useCallback((ticker: string) => {
+    return useMarketDataStore.getState().visibleTickers.has(ticker);
   }, []);
 
-  const subscribeAll = useCallback((tickers: string[]) => {
-    setChartSubscriptions(tickers);
+  const showAll = useCallback((tickers: string[]) => {
+    setVisibleTickers(tickers);
   }, []);
 
-  const unsubscribeAll = useCallback(() => {
-    setChartSubscriptions([]);
+  const hideAll = useCallback(() => {
+    setVisibleTickers([]);
   }, []);
 
   return {
-    subscribedTickers,
-    toggleSubscription,
-    isSubscribed,
-    subscribeAll,
-    unsubscribeAll,
+    visibleTickers,
+    toggleVisibility,
+    isVisible,
+    showAll,
+    hideAll,
   };
 }
 
@@ -403,8 +400,10 @@ export function useChartSubscriptions(): {
  * Hook for Overview Chart data from backend.
  * Returns data in Lightweight Charts ready format.
  * Derives rank data from entity map to ensure state consistency.
+ *
+ * @param topN - Number of top tickers to request from backend (default: 20)
  */
-export function useOverviewChartData(): {
+export function useOverviewChartData(topN: number = 20): {
   seriesData: Record<string, LWSeriesData>;
   rankData: TickerDataWithHistory[];
   timestamp: string | null;
@@ -421,8 +420,8 @@ export function useOverviewChartData(): {
   }, []);
 
   const refresh = useCallback(() => {
-    sendMessage({ type: 'refresh_chart', payload: {} });
-  }, []);
+    sendMessage({ type: 'refresh_chart', payload: { top_n: topN } });
+  }, [topN]);
 
   // Derive rank data with stateHistory from entity map - memoized to avoid new array each render
   const rankData: TickerDataWithHistory[] = useMemo(() => {

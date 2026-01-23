@@ -30,7 +30,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from ChartdataManager.overviewchartdataManager import GridTraderChartDataManager
+from DataManager.overviewchartdataManager import GridTraderChartDataManager
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
@@ -165,6 +165,9 @@ class GridTraderBFF:
             suffix_id=suffix_id,
         )
 
+        # Chart settings (persistent for session)
+        self.chart_top_n = 20  # Default top N tickers to send
+
         # Background tasks
         self._running = False
         self._snapshot_task = None
@@ -260,7 +263,9 @@ class GridTraderBFF:
         @self.app.get("/api/overview-chart")
         async def get_overview_chart():
             """API endpoint to get overview chart data."""
-            chart_data = self.chart_manager.get_overview_chart_data_lw()
+            chart_data = self.chart_manager.get_overview_chart_data_lw(
+                top_n=self.chart_top_n
+            )
             return chart_data
 
         @self.app.get("/api/stock/{ticker}")
@@ -301,7 +306,9 @@ class GridTraderBFF:
         @self.app.get("/api/test-data")
         async def test_data():
             """Test endpoint to check current data."""
-            chart_data = self.chart_manager.get_overview_chart_data_lw()
+            chart_data = self.chart_manager.get_overview_chart_data_lw(
+                top_n=self.chart_top_n
+            )
             rank_data = self.chart_manager.get_latest_rank_data()
             subscribed = self.chart_manager.get_subscribed_tickers()
             return {
@@ -378,12 +385,24 @@ class GridTraderBFF:
             )
 
         elif msg_type == "refresh_chart":
+            top_n = payload.get("top_n")
+            if top_n is not None:
+                self.chart_top_n = top_n  # Store for future requests
             chart_data = self.chart_manager.get_overview_chart_data_lw(
-                force_refresh=True
+                force_refresh=True,
+                top_n=self.chart_top_n,
             )
             await self.manager.send_personal_message(
                 {"type": "overview_chart_update", **chart_data}, client_id
             )
+
+        elif msg_type == "set_top_n":
+            # Persist top_n setting and broadcast new chart data to all subscribers
+            top_n = payload.get("top_n", 20)
+            self.chart_top_n = top_n
+            logger.info(f"Chart top_n set to {top_n}")
+            # Broadcast updated chart data to all subscribers
+            await self._emit_overview_chart_update()
 
         elif msg_type == "refresh_rank_list":
             rank_data, snapshot_timestamp = self.chart_manager.get_latest_rank_data()
@@ -453,7 +472,9 @@ class GridTraderBFF:
 
         Uses Lightweight Charts format for optimal frontend performance.
         """
-        chart_data = self.chart_manager.get_overview_chart_data_lw()
+        chart_data = self.chart_manager.get_overview_chart_data_lw(
+            top_n=self.chart_top_n
+        )
         payload = {"type": "overview_chart_update", **chart_data}
 
         if client_id:
@@ -495,6 +516,10 @@ class GridTraderBFF:
                         for message_id, message_data in message_list:
                             # Refresh chart data
                             self.chart_manager.mark_dirty()
+
+                            # Note: REENTER_TOP20 events are handled directly by SnapshotProcessor
+                            # STATE_BAD events are handled directly by StateEngine
+                            # Both write to the same Redis Set. Frontend syncs on connect.
 
                             # Only emit if there are subscribed clients
                             if self.manager.subscriptions["market_snapshot"]:

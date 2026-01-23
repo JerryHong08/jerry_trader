@@ -57,6 +57,7 @@ export const DEFAULT_TRADING_TEMPLATE: LayoutTemplate = {
             "relativeVolumeDaily",
             "relativeVolume5min",
             "marketCap",
+            "vwap",
             "state",
             "symbol"
           ],
@@ -72,6 +73,7 @@ export const DEFAULT_TRADING_TEMPLATE: LayoutTemplate = {
             "float": 50,
             "relativeVolumeDaily": 108,
             "relativeVolume5min": 110,
+            "vwap": 50,
             "marketCap": 110
           },
           "columnOrder": [
@@ -79,6 +81,7 @@ export const DEFAULT_TRADING_TEMPLATE: LayoutTemplate = {
             "state",
             "news",
             "price",
+            "vwap",
             "changePercent",
             "float",
             "change",
@@ -253,13 +256,14 @@ export const MINIMAL_TEMPLATE: LayoutTemplate = {
             "relativeVolumeDaily",
             "relativeVolume5min",
             "marketCap",
+            "vwap",
             "state",
             "symbol"
           ],
           "columnWidths": {
             "#": 50,
             "symbol": 50,
-            "state": 94,
+            "state": 99,
             "news": 50,
             "price": 50,
             "change": 50,
@@ -268,6 +272,7 @@ export const MINIMAL_TEMPLATE: LayoutTemplate = {
             "float": 50,
             "relativeVolumeDaily": 108,
             "relativeVolume5min": 110,
+            "vwap": 50,
             "marketCap": 110
           },
           "columnOrder": [
@@ -275,6 +280,7 @@ export const MINIMAL_TEMPLATE: LayoutTemplate = {
             "state",
             "news",
             "price",
+            "vwap",
             "changePercent",
             "float",
             "change",
@@ -412,6 +418,7 @@ export const Test_TEMPLATE: LayoutTemplate = {
             "relativeVolumeDaily",
             "relativeVolume5min",
             "marketCap",
+            "vwap",
             "state",
             "symbol"
           ],
@@ -427,6 +434,7 @@ export const Test_TEMPLATE: LayoutTemplate = {
             "float": 50,
             "relativeVolumeDaily": 108,
             "relativeVolume5min": 110,
+            "vwap": 50,
             "marketCap": 110
           },
           "columnOrder": [
@@ -434,6 +442,7 @@ export const Test_TEMPLATE: LayoutTemplate = {
             "state",
             "news",
             "price",
+            "vwap",
             "changePercent",
             "float",
             "change",

@@ -68,7 +68,6 @@ class GridTraderBackendStarter:
         """Initialize all backend services."""
         logger.info("Initializing GridTrader backend services...")
 
-        # Initialize BFF first (unless disabled) - needed for callback
         if not self.no_bff:
             self.bff = GridTraderBFF(
                 host=self.host,
@@ -90,7 +89,7 @@ class GridTraderBackendStarter:
             # Use BFF's callback method
             self.bff.on_snapshot_processed(result, is_historical)
 
-        # Initialize SnapshotProcessor with callback
+        # Initialize SnapshotProcessor
         self.processor = SnapshotProcessor(
             replay_date=self.replay_date,
             suffix_id=self.suffix_id,

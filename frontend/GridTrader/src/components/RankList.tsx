@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useMemo, useCallback, memo } from '
 import { TrendingUp, TrendingDown, ArrowUpDown, ArrowUp, ArrowDown, Settings, X, Newspaper, Wifi, WifiOff, Eye, EyeOff } from 'lucide-react';
 import type { ModuleProps, RankItem, TickerState, RankListSortColumn, RankListSortDirection } from '../types';
 import { useBackendTimestamp, timestampStore, parseTimestamp } from '../hooks/useBackendTimestamps';
-import { useRankListData, useWebSocketConnection, useChartSubscriptions } from '../hooks/useWebSocket';
+import { useRankListData, useWebSocketConnection, useTickerVisibility } from '../hooks/useWebSocket';
 
 // Default column configuration
 const DEFAULT_COLUMNS: RankListSortColumn[] = [
@@ -17,6 +17,7 @@ const DEFAULT_COLUMNS: RankListSortColumn[] = [
   'relativeVolumeDaily',
   'relativeVolume5min',
   'marketCap',
+  'vwap',
 ];
 
 const DEFAULT_COLUMN_WIDTHS: Record<string, number> = {
@@ -32,6 +33,7 @@ const DEFAULT_COLUMN_WIDTHS: Record<string, number> = {
   'relativeVolumeDaily': 110,
   'relativeVolume5min': 110,
   'marketCap': 110,
+  'vwap': 100,
 };
 
 const COLUMN_LABELS: Record<string, string> = {
@@ -46,6 +48,7 @@ const COLUMN_LABELS: Record<string, string> = {
   'relativeVolumeDaily': 'Rel Vol (D)',
   'relativeVolume5min': 'Rel Vol (5m)',
   'marketCap': 'Market Cap',
+  'vwap': 'Vwap',
 };
 
 // Mock data for top gainers
@@ -75,6 +78,7 @@ const generateMockData = (): RankItem[] => {
       changePercent: Math.random() * 15,
       volume: Math.random() * 100000000,
       marketCap: Math.random() * 1000000000000,
+      vwap: Math.random() * 500 + 50,
       state: states[Math.floor(Math.random() * states.length)],
       float: Math.random() * 500000000,
       relativeVolumeDaily: Math.random() * 5 + 0.5,
@@ -119,21 +123,21 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
   );
   const [showColumnSettings, setShowColumnSettings] = useState(false);
 
-  // Chart subscription management
-  const { subscribedTickers, toggleSubscription, isSubscribed, subscribeAll } = useChartSubscriptions();
+  // Visibility management (pure UI state)
+  const { visibleTickers, toggleVisibility, isVisible, showAll } = useTickerVisibility();
 
-  // Ref to track if auto-subscribe has been done (prevents re-running)
-  const hasAutoSubscribedRef = useRef(false);
+  // Ref to track if auto-visibility has been set (prevents re-running)
+  const hasAutoVisibleRef = useRef(false);
 
-  // Auto-subscribe top N tickers when data loads (only once)
+  // Auto-show top N tickers when data loads (only once)
   useEffect(() => {
-    if (data.length > 0 && !hasAutoSubscribedRef.current && subscribedTickers.size === 0) {
-      hasAutoSubscribedRef.current = true;
-      // Subscribe top 20 by default
+    if (data.length > 0 && !hasAutoVisibleRef.current && visibleTickers.size === 0) {
+      hasAutoVisibleRef.current = true;
+      // Show top 20 by default
       const top20 = data.slice(0, 20).map(item => item.symbol);
-      subscribeAll(top20);
+      showAll(top20);
     }
-  }, [data, subscribedTickers.size, subscribeAll]);
+  }, [data, visibleTickers.size, showAll]);
   const [resizingColumn, setResizingColumn] = useState<string | null>(null);
   const [draggedColumn, setDraggedColumn] = useState<RankListSortColumn | null>(null);
   const [dragOverColumn, setDragOverColumn] = useState<RankListSortColumn | null>(null);
@@ -464,6 +468,9 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
       case 'marketCap':
         return <span className="text-gray-400">${formatVolume(item.marketCap)}</span>;
 
+      case 'vwap':
+        return <span>${formatNumber(item.vwap)}</span>;
+
       default:
         return null;
     }
@@ -617,21 +624,21 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
                   selectedSymbol === item.symbol ? 'bg-zinc-700/50' : ''
                 }`}
               >
-                {/* Chart subscription toggle */}
+                {/* Chart visibility toggle */}
                 <td className="p-2 text-center">
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      toggleSubscription(item.symbol);
+                      toggleVisibility(item.symbol);
                     }}
                     className={`p-1 rounded transition-colors ${
-                      isSubscribed(item.symbol)
+                      isVisible(item.symbol)
                         ? 'text-green-500 hover:text-green-400'
                         : 'text-gray-600 hover:text-gray-400'
                     }`}
-                    title={isSubscribed(item.symbol) ? 'Hide from chart' : 'Show in chart'}
+                    title={isVisible(item.symbol) ? 'Hide from chart' : 'Show in chart'}
                   >
-                    {isSubscribed(item.symbol) ? (
+                    {isVisible(item.symbol) ? (
                       <Eye className="w-4 h-4" />
                     ) : (
                       <EyeOff className="w-4 h-4" />

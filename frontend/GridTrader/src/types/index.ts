@@ -44,9 +44,10 @@ export interface OverviewChartModuleSettings {
   focusMode?: boolean; // true = single ticker, false = all tickers
   timelineRange?: { start: number; end: number }; // For timeline sync
   timeRange?: string;
+  topN?: number; // Number of top tickers to request from backend
 }
 
-export type RankListSortColumn = 'symbol' | 'state' | 'price' | 'change' | 'changePercent' | 'volume' | 'marketCap' | 'float' | 'relativeVolumeDaily' | 'relativeVolume5min' | 'news';
+export type RankListSortColumn = 'symbol' | 'state' | 'price' | 'change' | 'changePercent' | 'volume' | 'marketCap' | 'float' | 'relativeVolumeDaily' | 'relativeVolume5min' | 'news' | 'vwap';
 export type RankListSortDirection = 'asc' | 'desc';
 
 export interface RankListModuleSettings {
@@ -145,6 +146,7 @@ export interface RankItem {
   changePercent: number;
   volume: number;
   marketCap: number;
+  vwap: number;
   state: TickerState;
   stateReason?: string;  // Short description of why ticker is in current state
   float: number;

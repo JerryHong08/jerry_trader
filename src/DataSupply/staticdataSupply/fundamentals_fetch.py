@@ -222,24 +222,24 @@ class FundamentalsFetcher:
                 df = pl.DataFrame(data).select(
                     [
                         "symbol",
+                        "companyName",
+                        "country",
+                        "sector",
+                        "industry",
                         "marketCap",
                         "range",
                         "averageVolume",
-                        "companyName",
-                        "cik",
-                        "exchange",
-                        "industry",
+                        "ipoDate",
+                        "fullTimeEmployees",
+                        "ceo",
                         "website",
                         "description",
-                        "ceo",
-                        "sector",
-                        "country",
-                        "fullTimeEmployees",
+                        "cik",
+                        "exchange",
                         "address",
                         "city",
                         "state",
                         "image",
-                        "ipoDate",
                     ]
                 )
             except Exception as e:

@@ -251,7 +251,7 @@ class GridTraderChartDataManager:
         Returns tuple of (list matching frontend RankItem interface, timestamp string).
 
         Only emits columns that are in the stream message:
-        ['symbol', 'rank', 'price', 'change', 'changePercent', 'volume', 'relativeVolume5min', 'relativeVolumeDaily'] add vwap in the future.
+        ['symbol', 'rank', 'price', 'change', 'changePercent', 'volume', 'relativeVolume5min', 'relativeVolumeDaily', 'vwap'].
 
         State and other columns are updated separately by the state stream listener.
         """
@@ -288,6 +288,7 @@ class GridTraderChartDataManager:
                     "volume": item.get("volume", 0),
                     "relativeVolume5min": item.get("relativeVolume5min", 1.0),
                     "relativeVolumeDaily": item.get("relativeVolumeDaily", 1.0),
+                    "vwap": item.get("vwap", 0.0),
                 }
             )
 
@@ -303,8 +304,7 @@ class GridTraderChartDataManager:
         """
         Get data formatted for Lightweight Charts OverviewChartModule.
 
-        This method outputs data in a format ready for TradingView Lightweight Charts,
-        eliminating the need for frontend data conversion.
+        Backend sends top N tickers as a superset. Frontend controls visibility.
 
         Returns:
             {
@@ -327,7 +327,7 @@ class GridTraderChartDataManager:
         ):
             return self._cached_chart_data_lw
 
-        # Get top N tickers
+        # Get top N tickers from latest snapshot (backend sends superset)
         tickers = self.get_top_n_tickers(n=top_n)
         if not tickers:
             return {"seriesData": {}, "rankData": [], "timestamp": None}

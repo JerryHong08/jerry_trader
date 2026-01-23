@@ -199,6 +199,7 @@ class StateEngine:
                     prev_state = self._ticker_states.get(symbol, {}).get(
                         "state", "unknown"
                     )
+                    new_state = current_state.get("state")
 
                     # Write to InfluxDB
                     self._write_state_to_influx(symbol, current_state, timestamp)
@@ -215,7 +216,7 @@ class StateEngine:
                         {
                             "symbol": symbol,
                             "from": prev_state,
-                            "to": current_state.get("state"),
+                            "to": new_state,
                             "timestamp": timestamp.isoformat(),
                         }
                     )
@@ -286,6 +287,10 @@ class StateEngine:
         else:
             state = "OnWatch"
             state_reason = f"Rank #{current_rank}"
+
+        if current_rank > 30:
+            state = "Bad"
+            state_reason = "Dropped out of top 30"
 
         return {
             "state": state,

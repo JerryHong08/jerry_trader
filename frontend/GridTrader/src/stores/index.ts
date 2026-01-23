@@ -7,7 +7,7 @@
 export {
   useMarketDataStore,
   getRankDataArray,
-  getChartSubscribedTickers,
+  getVisibleTickers,
   type RankEntity,
   type LWSeriesData,
   type ConnectionStatus,

@@ -13,11 +13,6 @@ interface StockFundamentals {
   floatShares: number;
   sharesOutstanding: number;
   marketCap: number;
-  peRatio: number;
-  eps: number;
-  dividend: number;
-  dividendYield: number;
-  beta: number;
   fiftyTwoWeekHigh: number;
   fiftyTwoWeekLow: number;
   avgVolume: number;
@@ -338,36 +333,6 @@ export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChan
                 <div>
                   <div className="text-gray-500 text-xs">52W Low</div>
                   <div>${formatNumber(fundamentals.fiftyTwoWeekLow)}</div>
-                </div>
-              </div>
-            </div>
-
-            {/* Financial Metrics */}
-            <div className="mb-6">
-              <h3 className="text-sm text-gray-400 mb-3 flex items-center gap-2">
-                <BarChart3 className="w-4 h-4" />
-                Financial Metrics
-              </h3>
-              <div className="grid grid-cols-2 gap-3 text-sm">
-                <div>
-                  <div className="text-gray-500 text-xs">P/E Ratio</div>
-                  <div>{formatNumber(fundamentals.peRatio)}</div>
-                </div>
-                <div>
-                  <div className="text-gray-500 text-xs">EPS</div>
-                  <div>${formatNumber(fundamentals.eps)}</div>
-                </div>
-                <div>
-                  <div className="text-gray-500 text-xs">Dividend</div>
-                  <div>${formatNumber(fundamentals.dividend)}</div>
-                </div>
-                <div>
-                  <div className="text-gray-500 text-xs">Dividend Yield</div>
-                  <div>{formatNumber(fundamentals.dividendYield)}%</div>
-                </div>
-                <div>
-                  <div className="text-gray-500 text-xs">Beta</div>
-                  <div>{formatNumber(fundamentals.beta)}</div>
                 </div>
               </div>
             </div>

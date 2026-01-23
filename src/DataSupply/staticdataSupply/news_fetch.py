@@ -1,11 +1,17 @@
 """
 Docstring for DataSupply.snapshotDataSupply.news_fetch
 News Fetch module to get latest news from different providers.
-""" ""
+"""
+
+import hashlib
+import json
 import os
 import time
+from datetime import datetime
 from typing import Dict, List, Optional
+from zoneinfo import ZoneInfo
 
+import psycopg
 import requests
 from dotenv import load_dotenv
 
@@ -16,6 +22,210 @@ from utils.logger import setup_logger
 from utils.momo_token import MoomooQuoteToken
 
 logger = setup_logger(__name__, log_to_file=True)
+
+
+# ============================================================================
+# News Persistence Layer (PostgreSQL)
+# ============================================================================
+
+
+class NewsPersistence:
+    """
+    Persist news articles to PostgreSQL database.
+
+    Schema:
+        news_events (
+            news_id TEXT PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            published_at TIMESTAMPTZ NOT NULL,
+            fetched_at TIMESTAMPTZ NOT NULL,
+            source TEXT,
+            title TEXT NOT NULL,
+            summary TEXT,
+            raw_json JSONB
+        )
+    """
+
+    def __init__(self, database_url: Optional[str] = None):
+        self.database_url = database_url or os.getenv("DATABASE_URL")
+        if not self.database_url:
+            logger.warning("DATABASE_URL not set, news persistence disabled")
+        else:
+            # Convert SQLAlchemy URL format to libpq format
+            # e.g., "postgresql+psycopg://..." -> "postgresql://..."
+            self.database_url = self.database_url.replace(
+                "postgresql+psycopg://", "postgresql://"
+            )
+        self._ensure_table()
+
+    def _get_connection(self):
+        """Get a database connection."""
+        if not self.database_url:
+            return None
+        return psycopg.connect(self.database_url)
+
+    def _ensure_table(self):
+        """Create news_events table if it doesn't exist."""
+        if not self.database_url:
+            return
+
+        create_sql = """
+        CREATE TABLE IF NOT EXISTS news_events (
+            news_id TEXT PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            published_at TIMESTAMPTZ NOT NULL,
+            fetched_at TIMESTAMPTZ NOT NULL,
+            source TEXT,
+            title TEXT NOT NULL,
+            summary TEXT,
+            raw_json JSONB
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_news_events_symbol ON news_events(symbol);
+        CREATE INDEX IF NOT EXISTS idx_news_events_published_at ON news_events(published_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_news_events_symbol_published ON news_events(symbol, published_at DESC);
+        """
+
+        try:
+            conn = self._get_connection()
+            if conn:
+                with conn.cursor() as cur:
+                    cur.execute(create_sql)
+                conn.commit()
+                conn.close()
+                logger.info("news_events table ensured")
+        except Exception as e:
+            logger.error(f"Failed to create news_events table: {e}")
+
+    def save_articles(self, articles: List[NewsArticle]) -> int:
+        """
+        Save news articles to database.
+
+        Uses UPSERT (INSERT ... ON CONFLICT) to avoid duplicates.
+
+        Args:
+            articles: List of NewsArticle objects
+
+        Returns:
+            Number of articles saved/updated
+        """
+        if not self.database_url or not articles:
+            return 0
+
+        insert_sql = """
+        INSERT INTO news_events (news_id, symbol, published_at, fetched_at, source, title, summary, raw_json)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (news_id) DO UPDATE SET
+            fetched_at = EXCLUDED.fetched_at,
+            title = EXCLUDED.title,
+            summary = EXCLUDED.summary,
+            raw_json = EXCLUDED.raw_json
+        """
+
+        now = datetime.now(ZoneInfo("America/New_York"))
+
+        rows = []
+        for article in articles:
+            # Generate stable news ID from URL
+            news_id = hashlib.md5(article.url.encode()).hexdigest()[:16]
+
+            raw_json = {
+                "url": article.url,
+                "sources": article.sources,
+                "text": article.text if article.text else None,
+            }
+
+            rows.append(
+                (
+                    news_id,
+                    article.symbol,
+                    article.published_time,
+                    now,
+                    article.sources,
+                    article.title,
+                    article.text if article.text else None,
+                    json.dumps(raw_json),
+                )
+            )
+
+        try:
+            conn = self._get_connection()
+            if conn:
+                with conn.cursor() as cur:
+                    cur.executemany(insert_sql, rows)
+                conn.commit()
+                conn.close()
+                logger.debug(f"Saved {len(rows)} news articles to database")
+                return len(rows)
+        except Exception as e:
+            logger.error(f"Failed to save news articles: {e}")
+            return 0
+
+    def get_articles(self, symbol: str, limit: int = 10) -> List[Dict]:
+        """
+        Get news articles for a symbol from database.
+
+        Args:
+            symbol: Stock ticker symbol
+            limit: Maximum number of articles to return
+
+        Returns:
+            List of article dictionaries
+        """
+        if not self.database_url:
+            return []
+
+        select_sql = """
+        SELECT news_id, symbol, published_at, fetched_at, source, title, summary, raw_json
+        FROM news_events
+        WHERE symbol = %s
+        ORDER BY published_at DESC
+        LIMIT %s
+        """
+
+        try:
+            conn = self._get_connection()
+            if conn:
+                with conn.cursor() as cur:
+                    cur.execute(select_sql, (symbol.upper(), limit))
+                    rows = cur.fetchall()
+                conn.close()
+
+                articles = []
+                for row in rows:
+                    # raw_json is already a dict (psycopg auto-deserializes JSONB)
+                    raw_json = row[7] if row[7] else {}
+                    if isinstance(raw_json, str):
+                        raw_json = json.loads(raw_json)
+
+                    articles.append(
+                        {
+                            "news_id": row[0],
+                            "symbol": row[1],
+                            "published_time": row[2].isoformat() if row[2] else None,
+                            "fetched_at": row[3].isoformat() if row[3] else None,
+                            "sources": row[4],
+                            "title": row[5],
+                            "text": row[6],
+                            "url": raw_json.get("url") if raw_json else None,
+                        }
+                    )
+                return articles
+        except Exception as e:
+            logger.error(f"Failed to get news articles for {symbol}: {e}")
+            return []
+
+
+# Global persistence instance
+_news_persistence: Optional[NewsPersistence] = None
+
+
+def get_news_persistence() -> NewsPersistence:
+    """Get or create the global news persistence instance."""
+    global _news_persistence
+    if _news_persistence is None:
+        _news_persistence = NewsPersistence()
+    return _news_persistence
 
 
 class MoomooStockResolver:
@@ -385,75 +595,3 @@ class API_NewsFetchers:
         except Exception as e:
             logger.error(f"Failed to fetch news for {symbol}: {e}")
             raise
-
-
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Stock Latest News Fetcher")
-    parser.add_argument(
-        "--ticker", default="AAPL", help="ticker you want to fetch its news"
-    )
-    parser.add_argument(
-        "--provider",
-        default="momo",
-        choices=["momo", "fmp", "benzinga"],
-        help="choose provider to fetch news (momo/fmp/benzinga)",
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=5,
-        help="Number of news articles to fetch (default: 5)",
-    )
-
-    parser.add_argument(
-        "--timeout",
-        type=int,
-        default=15,
-        help="Request timeout in seconds (default: 15)",
-    )
-
-    args = parser.parse_args()
-    ticker = args.ticker
-    provider = args.provider
-
-    articles = None
-
-    try:
-        if provider == "momo":
-            fetcher = MoomooStockResolver()
-            info = fetcher.get_stock_info(ticker)
-
-            if info:
-                logger.info(f"✅ {ticker} stock_id: {info['stock_id']}")
-                print(f"✅ {ticker} stock_id: {info['stock_id']}")
-                articles = fetcher.get_news_momo(ticker, pageSize=args.limit)
-            else:
-                logger.error(f"Could not find stock info for {ticker}")
-                print(f"❌ Could not find stock info for {ticker}")
-
-        elif provider == "fmp":
-            fetcher = API_NewsFetchers()
-            articles = fetcher.fetch_news_fmp(
-                symbol=ticker, limit=args.limit, timeout=args.timeout
-            )
-
-        elif provider == "benzinga":
-            fetcher = API_NewsFetchers()
-            articles = fetcher.fetch_news_benzinga(
-                symbol=ticker, page_size=args.limit, display_output="full"
-            )
-
-        if articles:
-            print(f"\n📰 Found {len(articles)} articles from {provider.upper()}:\n")
-            print(NewsFormatter.format_json(articles))
-        else:
-            print(f"\n⚠️  No news found for {ticker} on {provider}")
-
-    except Exception as e:
-        logger.error(f"Error fetching news: {e}")
-        import traceback
-
-        traceback.print_exc()
-        exit(1)

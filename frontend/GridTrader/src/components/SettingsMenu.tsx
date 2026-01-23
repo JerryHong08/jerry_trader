@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { Settings, X, Copy, Check, Upload, Download, Layout } from 'lucide-react';
+import { Settings, X, Copy, Check, Upload, Download, Layout, Trash2 } from 'lucide-react';
 import { getAllTemplates } from '../config/layoutTemplates';
+import { clearAllCaches, getCacheStats } from '../hooks/useWebSocket';
 import type { GridItemConfig } from '../types';
 
 interface SettingsMenuProps {
@@ -40,11 +41,19 @@ export function SettingsMenu({ gridGap, onGridGapChange, items, onImportLayout, 
   };
 
   const handleClearStorage = () => {
-    if (confirm('Are you sure you want to clear saved layout?')) {
-      localStorage.removeItem('trading-system-layout');
-      localStorage.removeItem('trading-system-gap');
-      alert('Layout cleared from browser storage.');
-    }
+    localStorage.removeItem('trading-system-layout');
+    localStorage.removeItem('trading-system-gap');
+    alert('Layout cleared from browser storage.');
+    // if (confirm('Are you sure you want to clear saved layout?')) {
+    // }
+  };
+
+  const handleClearDataCache = () => {
+    const stats = getCacheStats();
+    clearAllCaches();
+    alert('Data cache cleared successfully.');
+    // if (confirm(`Clear all cached data?\n\nThis will remove:\n- ${stats.profiles} cached profiles\n- ${stats.news} cached news articles\n\nData will be re-fetched from the server.`)) {
+    // }
   };
 
   if (!isOpen) {
@@ -167,10 +176,10 @@ export function SettingsMenu({ gridGap, onGridGapChange, items, onImportLayout, 
                 <button
                   key={template.id}
                   onClick={() => {
-                    if (confirm(`Load "${template.name}" template? This will replace your current layout.`)) {
-                      onTemplateChange(template.id);
-                      setIsOpen(false);
-                    }
+                    onTemplateChange(template.id);
+                    setIsOpen(false);
+                    // if (confirm(`Load "${template.name}" template? This will replace your current layout.`)) {
+                    // }
                   }}
                   className={`w-full text-left p-3 border transition-colors ${
                     currentTemplateId === template.id
@@ -192,6 +201,31 @@ export function SettingsMenu({ gridGap, onGridGapChange, items, onImportLayout, 
             </div>
             <p className="text-xs text-gray-500 mt-2">
               Select a template to instantly apply a predefined layout. Your current layout will be replaced.
+            </p>
+          </div>
+
+          {/* Data Cache Management */}
+          <div className="border-t border-zinc-800 pt-4">
+            <div className="flex items-center justify-between mb-2">
+              <div>
+                <label className="text-sm">Data Cache</label>
+                <p className="text-xs text-gray-500 mt-1">
+                  {(() => {
+                    const stats = getCacheStats();
+                    return `${stats.profiles} profiles, ${stats.news} news articles cached`;
+                  })()}
+                </p>
+              </div>
+              <button
+                onClick={handleClearDataCache}
+                className="flex items-center gap-2 px-3 py-1 bg-orange-600 hover:bg-orange-700 transition-colors text-sm"
+              >
+                <Trash2 className="w-4 h-4" />
+                Clear Data Cache
+              </button>
+            </div>
+            <p className="text-xs text-gray-500">
+              Cached profile and news data persists across page refreshes. Clear to force re-fetch from server.
             </p>
           </div>
 

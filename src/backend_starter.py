@@ -1,7 +1,8 @@
 """
 GridTrader Backend Starter
 
-Starts all backend services for GridTrader: SnapshotProcessor, StateEngine, and GridTrader BFF.
+Starts all backend services for GridTrader: SnapshotProcessor, StateEngine,
+StaticDataWorker, and GridTrader BFF.
 
 Usage:
     python -m src.BackendForFrontend.gridtrader_starter --replay-date 20260115 --suffix-id test
@@ -10,6 +11,7 @@ Note: Ensure Redis and InfluxDB are running before starting.
 """
 
 import argparse
+import asyncio
 import logging
 import signal
 import sys
@@ -21,6 +23,7 @@ from typing import Optional
 from BackendForFrontend.bff import GridTraderBFF
 from ComputeEngine.snapshotProcessor import SnapshotProcessor
 from ComputeEngine.stateEngine import StateEngine
+from DataSupply.staticdataSupply.static_data_worker import StaticDataWorker
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.INFO)
@@ -33,7 +36,8 @@ class GridTraderBackendStarter:
     Services:
     - SnapshotProcessor: Receives data, processes, stores to InfluxDB and Redis
     - StateEngine: Computes ticker states and writes to state stream
-    - GridTraderBFF: Backend For Frontend (Flask + WebSocket server)
+    - StaticDataWorker: Fetches static data (fundamentals, float, news) for subscribed tickers
+    - GridTraderBFF: Backend For Frontend (FastAPI + WebSocket server)
     """
 
     def __init__(
@@ -56,6 +60,8 @@ class GridTraderBackendStarter:
 
         self._running = False
         self._services = []
+        self._static_worker_task = None
+        self._event_loop = None
 
         # Initialize services
         self._init_services()
@@ -105,6 +111,16 @@ class GridTraderBackendStarter:
         )
         self._services.append(("StateEngine", self.state_engine))
 
+        # Initialize StaticDataWorker
+        self.static_worker = StaticDataWorker(
+            replay_date=self.replay_date,
+            poll_interval=1.0,
+            batch_size=5,
+            news_limit=5,
+            news_recency_hours=24.0,
+        )
+        self._services.append(("StaticDataWorker", self.static_worker))
+
         logger.info(f"Initialized {len(self._services)} services")
 
     def _signal_handler(self, signum, frame):
@@ -124,10 +140,36 @@ class GridTraderBackendStarter:
         if hasattr(self, "state_engine") and self.state_engine:
             self.state_engine.close()
 
+        if hasattr(self, "static_worker") and self.static_worker:
+            self.static_worker.stop()
+            logger.info("StaticDataWorker stopped")
+
+        if self._static_worker_task:
+            self._static_worker_task.cancel()
+
         if hasattr(self, "bff") and self.bff:
             self.bff.cleanup()
 
         logger.info("All services cleaned up")
+
+    def _start_static_worker_in_thread(self):
+        """Start static worker in a separate thread with its own event loop."""
+
+        def run_static_worker():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            self._event_loop = loop
+            try:
+                self._static_worker_task = loop.create_task(self.static_worker.start())
+                loop.run_until_complete(self._static_worker_task)
+            except asyncio.CancelledError:
+                pass
+            finally:
+                loop.close()
+
+        thread = Thread(target=run_static_worker, daemon=True)
+        thread.start()
+        return thread
 
     def run(self, debug: bool = False):
         """Run all backend services."""
@@ -149,6 +191,10 @@ class GridTraderBackendStarter:
         # Start StateEngine (it creates its own thread internally)
         self.state_engine.start()
         logger.info("StateEngine started")
+
+        # Start StaticDataWorker (async, runs in separate thread)
+        self._start_static_worker_in_thread()
+        logger.info("StaticDataWorker started")
 
         # Run BFF in the main thread (blocking)
         if self.bff:

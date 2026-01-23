@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback, memo } from 'react';
-import { TrendingUp, TrendingDown, ArrowUpDown, ArrowUp, ArrowDown, Settings, X, Newspaper, Wifi, WifiOff, Eye, EyeOff } from 'lucide-react';
+import { TrendingUp, TrendingDown, ArrowUpDown, ArrowUp, ArrowDown, Settings, X, Newspaper, Wifi, WifiOff, Eye, EyeOff, Loader2 } from 'lucide-react';
 import type { ModuleProps, RankItem, TickerState, RankListSortColumn, RankListSortDirection } from '../types';
 import { useBackendTimestamp, timestampStore, parseTimestamp } from '../hooks/useBackendTimestamps';
 import { useRankListData, useWebSocketConnection, useTickerVisibility } from '../hooks/useWebSocket';
@@ -99,12 +99,24 @@ const getStateColor = (state: TickerState): string => {
   }
 };
 
+// Deprecated: Use hasNews boolean now instead of timestamp-based age
 const getNewsAge = (timestamp?: number): 'fresh' | 'old' | 'none' => {
   if (!timestamp) return 'none';
   const ageHours = (Date.now() - timestamp) / (1000 * 60 * 60);
   if (ageHours < 1) return 'fresh';
   if (ageHours < 24) return 'old';
   return 'none';
+};
+
+// Get data status indicator color and tooltip
+const getDataStatusInfo = (hasNews?: boolean, hasProfile?: boolean): { color: string; tooltip: string } => {
+  if (hasNews === undefined && hasProfile === undefined) {
+    return { color: 'bg-orange-500', tooltip: 'Static data loading...' };
+  }
+  if (hasNews === true) {
+    return { color: 'bg-green-500', tooltip: 'Has recent news' };
+  }
+  return { color: 'bg-gray-500', tooltip: 'No recent news' };
 };
 
 export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, onSettingsChange }: ModuleProps) {
@@ -374,10 +386,10 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
       let aVal: any = a[sortColumn as keyof RankItem];
       let bVal: any = b[sortColumn as keyof RankItem];
 
-      // Handle news sorting
+      // Handle news sorting - use hasNews boolean (true=1, false=0, undefined=-1)
       if (sortColumn === 'news') {
-        aVal = a.latestNewsTime || 0;
-        bVal = b.latestNewsTime || 0;
+        aVal = a.hasNews === true ? 1 : a.hasNews === false ? 0 : -1;
+        bVal = b.hasNews === true ? 1 : b.hasNews === false ? 0 : -1;
       }
 
       // Handle string comparison
@@ -421,18 +433,30 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
         );
 
       case 'news':
-        const newsAge = getNewsAge(item.latestNewsTime);
-        if (newsAge === 'none') return null;
+        // Use hasNews boolean from static data
+        // undefined = still loading, true = has news, false = no news
+        if (item.hasNews === undefined) {
+          // Data still loading - show loading indicator
+          return (
+            <div className="flex items-center justify-center" title="Loading static data...">
+              <div className="w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />
+            </div>
+          );
+        }
+        if (!item.hasNews) {
+          return (
+            <div className="flex items-center justify-center" title="No recent news">
+              <Newspaper className="w-4 h-4 text-gray-600" />
+            </div>
+          );
+        }
+        // hasNews = true
         return (
-          <div className="flex items-center justify-center">
-            {newsAge === 'fresh' ? (
-              <div className="bg-red-600 text-white px-2 py-0.5 text-xs rounded flex items-center gap-1">
-                <Newspaper className="w-3 h-3" />
-                NEW
-              </div>
-            ) : (
-              <Newspaper className="w-4 h-4 text-gray-400" />
-            )}
+          <div className="flex items-center justify-center" title="Has recent relevant news">
+            <div className="bg-red-600 text-white px-2 py-0.5 text-xs rounded flex items-center gap-1">
+              <Newspaper className="w-3 h-3" />
+              NEWS
+            </div>
           </div>
         );
 
@@ -457,6 +481,13 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
         return <span className="text-gray-400">{formatVolume(item.volume)}</span>;
 
       case 'float':
+        // Static field - undefined = loading, null = no data, number = data
+        if (item.float === undefined) {
+          return <span className="text-gray-500"><Loader2 className="w-3 h-3 animate-spin inline" /></span>;
+        }
+        if (item.float === null || item.float === 0) {
+          return <span className="text-gray-600" title="No float data available">N/A</span>;
+        }
         return <span className="text-gray-400">{formatVolume(item.float)}</span>;
 
       case 'relativeVolumeDaily':
@@ -466,6 +497,13 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
         return <span className="text-gray-400">{item.relativeVolume5min?.toFixed(2) ?? '-'}x</span>;
 
       case 'marketCap':
+        // Static field - undefined = loading, null = no data, number = data
+        if (item.marketCap === undefined) {
+          return <span className="text-gray-500"><Loader2 className="w-3 h-3 animate-spin inline" /></span>;
+        }
+        if (item.marketCap === null || item.marketCap === 0) {
+          return <span className="text-gray-600" title="No market cap data available">N/A</span>;
+        }
         return <span className="text-gray-400">${formatVolume(item.marketCap)}</span>;
 
       case 'vwap':

@@ -158,6 +158,15 @@ class GridTraderBFF:
 
         self.SNAPSHOT_STREAM_NAME = f"market_snapshot_processed:{self.date_suffix}"
         self.STATE_STREAM_NAME = f"movers_state:{self.date_suffix}"
+        self.STATIC_UPDATE_STREAM = "static_update_stream"
+        self.STATIC_SUMMARY_PREFIX = "static:ticker:summary"
+        self.STATIC_PROFILE_PREFIX = "static:ticker:profile"
+        self.NEWS_TICKER_PREFIX = "news:ticker"
+        self.NEWS_ITEM_PREFIX = "news:item"
+
+        # Pending sets for static data worker
+        self.STATIC_PENDING_SET = "static:pending"
+        self.NEWS_PENDING_SET = "static:pending:news"  # News-only refetch
 
         # Initialize chart data manager
         self.chart_manager = GridTraderChartDataManager(
@@ -172,6 +181,7 @@ class GridTraderBFF:
         self._running = False
         self._snapshot_task = None
         self._state_task = None
+        self._static_task = None
 
         # Create FastAPI app with lifespan
         @asynccontextmanager
@@ -186,6 +196,7 @@ class GridTraderBFF:
                     self._snapshot_stream_listener()
                 )
             self._state_task = asyncio.create_task(self._state_stream_listener())
+            self._static_task = asyncio.create_task(self._static_stream_listener())
 
             yield
 
@@ -196,6 +207,8 @@ class GridTraderBFF:
                 self._snapshot_task.cancel()
             if self._state_task:
                 self._state_task.cancel()
+            if self._static_task:
+                self._static_task.cancel()
             self.cleanup()
 
         self.app = FastAPI(
@@ -296,6 +309,97 @@ class GridTraderBFF:
                 }
             else:
                 return {"error": "Stock not found"}
+
+        @self.app.get("/api/stock/{ticker}/profile")
+        async def get_stock_profile(ticker: str):
+            """API endpoint to get stock profile (static data).
+
+            Pull-based endpoint for StockDetail page.
+            Reads from static:ticker:profile:{symbol} HASH.
+            If not found, queues ticker for static data fetch.
+            """
+            ticker_upper = ticker.upper()
+            profile_key = f"{self.STATIC_PROFILE_PREFIX}:{ticker_upper}"
+            profile = self.r.hgetall(profile_key)
+            logger.debug(f"Fetched profile for {ticker}: {profile}")
+
+            if profile:
+                # Parse numeric fields
+                for field in [
+                    "marketCap",
+                    "float",
+                    "averageVolume",
+                    "fullTimeEmployees",
+                ]:
+                    if field in profile:
+                        try:
+                            profile[field] = float(profile[field])
+                        except (ValueError, TypeError):
+                            pass
+                return {
+                    "ticker": ticker_upper,
+                    "profile": profile,
+                    "timestamp": datetime.now().isoformat(),
+                }
+            else:
+                # Queue for static data fetch (will be processed by StaticDataWorker)
+                self.r.sadd("static:pending", ticker_upper)
+                logger.info(
+                    f"Profile not found for {ticker_upper}, queued for static fetch"
+                )
+                return {
+                    "error": f"Profile not found for {ticker_upper}",
+                    "ticker": ticker_upper,
+                    "queued": True,  # Indicates client can retry later
+                }
+
+        @self.app.get("/api/stock/{ticker}/news")
+        async def get_stock_news(ticker: str, limit: int = 10, refresh: bool = False):
+            """API endpoint to get stock news.
+
+            Pull-based endpoint for StockDetail page.
+            Reads from news:ticker:{symbol} ZSET + news:item:{id} HASH.
+
+            Args:
+                ticker: Stock ticker symbol
+                limit: Maximum number of news articles to return
+                refresh: If True, queue ticker for news-only refetch
+
+            If no news found or refresh=True, queues ticker for news fetch.
+            """
+            ticker_upper = ticker.upper()
+            ticker_key = f"{self.NEWS_TICKER_PREFIX}:{ticker_upper}"
+
+            # If refresh requested, queue for news-only refetch
+            if refresh:
+                self.r.sadd(self.NEWS_PENDING_SET, ticker_upper)
+                logger.info(
+                    f"News refresh requested for {ticker_upper}, queued for news fetch"
+                )
+
+            # Get news IDs sorted by timestamp (most recent first)
+            news_ids = self.r.zrevrange(ticker_key, 0, limit - 1)
+
+            articles = []
+            for news_id in news_ids:
+                item_key = f"{self.NEWS_ITEM_PREFIX}:{news_id}"
+                article = self.r.hgetall(item_key)
+                if article:
+                    articles.append(article)
+
+            # If no news found, queue for news-only fetch (not full static)
+            if not articles and not refresh:
+                self.r.sadd(self.NEWS_PENDING_SET, ticker_upper)
+                logger.info(f"News not found for {ticker_upper}, queued for news fetch")
+
+            return {
+                "ticker": ticker_upper,
+                "news": articles,
+                "count": len(articles),
+                "queued": refresh
+                or len(articles) == 0,  # Indicates if fetch is pending
+                "timestamp": datetime.now().isoformat(),
+            }
 
         @self.app.get("/api/subscribed")
         async def get_subscribed_tickers():
@@ -453,9 +557,50 @@ class GridTraderBFF:
                 {"type": "error", "message": f"Stock {ticker} not found"}, client_id
             )
 
+    def _get_static_summaries(self, symbols: List[str]) -> Dict[str, Dict]:
+        """Batch fetch static summaries for multiple symbols.
+
+        Returns dict mapping symbol -> summary data.
+        Missing symbols will have empty dict as value.
+        """
+        if not symbols:
+            return {}
+
+        # Use pipeline for efficient batch fetch
+        pipe = self.r.pipeline()
+        for symbol in symbols:
+            key = f"{self.STATIC_SUMMARY_PREFIX}:{symbol}"
+            pipe.hgetall(key)
+
+        results = pipe.execute()
+
+        summaries = {}
+        for i, symbol in enumerate(symbols):
+            summary = results[i] if results[i] else {}
+            # Parse numeric fields
+            parsed = {}
+            for field, value in summary.items():
+                if field in ["marketCap", "float"]:
+                    try:
+                        parsed[field] = float(value)
+                    except (ValueError, TypeError):
+                        parsed[field] = None
+                elif field == "hasNews":
+                    parsed[field] = value == "1"
+                else:
+                    parsed[field] = value
+            summaries[symbol] = parsed
+
+        return summaries
+
     async def _emit_rank_list_update(self, client_id: Optional[str] = None):
-        """Emit rank list update to specific client or all subscribed clients."""
+        """Emit rank list update to specific client or all subscribed clients.
+
+        Pure snapshot data only. Static data (marketCap, float, hasNews) is sent
+        separately via static_update messages from _static_stream_listener.
+        """
         rank_data, snapshot_timestamp = self.chart_manager.get_latest_rank_data()
+
         payload = {
             "type": "rank_list_update",
             "data": rank_data,
@@ -616,6 +761,152 @@ class GridTraderBFF:
                 break
             except Exception as e:
                 logger.error(f"State stream listener error: {e}")
+                await asyncio.sleep(5)
+
+    async def _static_stream_listener(self):
+        """Listen to static update stream and broadcast static data patches (async).
+
+        Static updates are low-frequency, patch-only updates for:
+        - Summary: marketCap, float, country, sector, hasNews (for RankList)
+        - Profile: full company profile (for StockDetail caching)
+
+        These NEVER overwrite snapshot or state data.
+        """
+        logger.info("Starting async static stream listener...")
+
+        # Create consumer group for BFF
+        try:
+            self.r.xgroup_create(
+                self.STATIC_UPDATE_STREAM,
+                "gridtrader_bff_static_consumers",
+                id="0",
+                mkstream=True,
+            )
+        except redis.exceptions.ResponseError as e:
+            if "BUSYGROUP" not in str(e):
+                raise
+
+        consumer_name = f"gridtrader_static_{datetime.now().timestamp()}"
+
+        while self._running:
+            try:
+                messages = self.r.xreadgroup(
+                    "gridtrader_bff_static_consumers",
+                    consumer_name,
+                    {self.STATIC_UPDATE_STREAM: ">"},
+                    count=10,
+                    block=2000,
+                )
+
+                if messages:
+                    for stream_name, message_list in messages:
+                        for message_id, message_data in message_list:
+                            symbol = message_data.get("symbol")
+
+                            # Read the static summary data (for RankList)
+                            summary_key = f"{self.STATIC_SUMMARY_PREFIX}:{symbol}"
+                            summary_data = self.r.hgetall(summary_key)
+
+                            # Read the full profile data (for StockDetail caching)
+                            profile_key = f"{self.STATIC_PROFILE_PREFIX}:{symbol}"
+                            profile_data = self.r.hgetall(profile_key)
+
+                            # Read news data (for StockDetail caching)
+                            news_ticker_key = f"{self.NEWS_TICKER_PREFIX}:{symbol}"
+                            news_ids = self.r.zrevrange(
+                                news_ticker_key, 0, 9
+                            )  # Top 10 news
+                            news_articles = []
+                            for idx, news_id in enumerate(news_ids):
+                                item_key = f"{self.NEWS_ITEM_PREFIX}:{news_id}"
+                                article = self.r.hgetall(item_key)
+                                if article:
+                                    # Transform to frontend format (consistent with REST API)
+                                    news_articles.append(
+                                        {
+                                            "id": f"{symbol}-news-{idx}",
+                                            "title": article.get("title", ""),
+                                            "source": article.get("sources", ""),
+                                            "publishedAt": article.get(
+                                                "published_time", ""
+                                            ),
+                                            "url": article.get("url", ""),
+                                            "summary": (
+                                                article.get("text", "")[:500]
+                                                if article.get("text")
+                                                else ""
+                                            ),
+                                            "isNew": False,
+                                        }
+                                    )
+
+                            if summary_data or profile_data or news_articles:
+                                # Parse summary data
+                                summary_parsed = {}
+                                for field, value in (summary_data or {}).items():
+                                    if field in ["marketCap", "float"]:
+                                        try:
+                                            summary_parsed[field] = float(value)
+                                        except (ValueError, TypeError):
+                                            summary_parsed[field] = value
+                                    elif field == "hasNews":
+                                        summary_parsed[field] = value == "1"
+                                    else:
+                                        summary_parsed[field] = value
+                                logger.debug(
+                                    f"Static summary for {symbol}: {summary_parsed}"
+                                )
+
+                                # Parse profile data (for StockDetail caching)
+                                profile_parsed = {}
+                                for field, value in (profile_data or {}).items():
+                                    if field in [
+                                        "marketCap",
+                                        "float",
+                                        "averageVolume",
+                                        "fullTimeEmployees",
+                                    ]:
+                                        try:
+                                            profile_parsed[field] = float(value)
+                                        except (ValueError, TypeError):
+                                            profile_parsed[field] = value
+                                    else:
+                                        profile_parsed[field] = value
+
+                                # Broadcast to all connected clients
+                                static_update = {
+                                    "type": "static_update",
+                                    "symbol": symbol,
+                                    "summary": summary_parsed,  # For RankList
+                                    "profile": profile_parsed,  # For StockDetail cache
+                                    "news": news_articles,  # For StockDetail news cache
+                                    "timestamp": message_data.get("timestamp"),
+                                }
+
+                                logger.info(
+                                    f"Static update: {symbol} - summary={list(summary_parsed.keys())}, "
+                                    f"profile={len(profile_parsed)} fields, news={len(news_articles)} articles"
+                                )
+
+                                for client_id in self.manager.active_connections:
+                                    await self.manager.send_personal_message(
+                                        static_update, client_id
+                                    )
+
+                            # Acknowledge the message
+                            self.r.xack(
+                                self.STATIC_UPDATE_STREAM,
+                                "gridtrader_bff_static_consumers",
+                                message_id,
+                            )
+
+                # Allow other tasks to run
+                await asyncio.sleep(0.01)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Static stream listener error: {e}")
                 await asyncio.sleep(5)
 
     def run(self, debug: bool = False):

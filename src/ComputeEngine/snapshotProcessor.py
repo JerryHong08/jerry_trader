@@ -567,10 +567,16 @@ class SnapshotProcessor:
     # SUBSCRIPTION MANAGEMENT
     # =========================================================================
 
+    # Redis key for static data pending queue
+    STATIC_PENDING_SET = "static:pending"
+
     def _update_subscription_set(
         self, current_top_n: pl.DataFrame, timestamp: datetime
     ) -> List[str]:
-        """Add new top N tickers to subscription ZSET with first_appearance_time as score."""
+        """Add new top N tickers to subscription ZSET with first_appearance_time as score.
+
+        Also queues newly subscribed tickers for static data fetch.
+        """
         new_subscriptions = []
         timestamp_score = timestamp.timestamp()  # Unix timestamp as score
 
@@ -582,13 +588,16 @@ class SnapshotProcessor:
             )
             if added:
                 new_subscriptions.append(ticker)
+                # Queue for static data fetch (fundamentals, float, news)
+                self.r.sadd(self.STATIC_PENDING_SET, ticker)
                 logger.debug(
                     f"_update_subscription_set - New subscription: {ticker} at {timestamp}"
                 )
 
         if new_subscriptions:
             logger.info(
-                f"_update_subscription_set - New subscriptions: {new_subscriptions}"
+                f"_update_subscription_set - New subscriptions: {new_subscriptions}, "
+                f"queued for static data fetch"
             )
 
         return new_subscriptions

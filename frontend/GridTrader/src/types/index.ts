@@ -145,15 +145,20 @@ export interface RankItem {
   change: number;
   changePercent: number;
   volume: number;
-  marketCap: number;
   vwap: number;
   state: TickerState;
   stateReason?: string;  // Short description of why ticker is in current state
-  float: number;
   relativeVolumeDaily: number;
   relativeVolume5min: number;
   latestNewsTime?: number; // Timestamp of latest news (milliseconds)
   isSubscribed?: boolean;  // Whether ticker is subscribed for overview chart display
+
+  // Static fields (may be undefined until static data is fetched)
+  marketCap?: number;
+  float?: number;
+  hasNews?: boolean;      // Whether ticker has news articles
+  country?: string;       // Country of company (e.g., "US")
+  sector?: string;        // Sector classification (e.g., "Technology")
 }
 
 export interface CandlestickData {

@@ -168,9 +168,7 @@ export default function App() {
   const [currentTemplateId, setCurrentTemplateId] = useState<string>(() => {
     return localStorage.getItem('trading-system-template') || '';
   });
-  const [selectedSymbols, setSelectedSymbols] = useState<Record<string, string>>({
-    'group-1': 'AAPL',
-  });
+  const [selectedSymbols, setSelectedSymbols] = useState<Record<string, string>>({});
 
   // Auto-save to localStorage whenever items or gap changes
   useEffect(() => {

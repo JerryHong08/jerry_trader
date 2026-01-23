@@ -257,7 +257,7 @@ class NewsFormatter:
             lines.append(f"**{article.symbol}** | {time_str} | {article.sources}")
             lines.append(f"[Read More]({article.url})")
             if article.text:
-                lines.append(f"\n{article.text[:200]}...\n")
+                lines.append(f"\n{article.text}...\n")
             lines.append("---\n")
         return "\n".join(lines)
 

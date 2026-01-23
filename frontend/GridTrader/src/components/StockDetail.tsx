@@ -1,8 +1,21 @@
-import React, { useState, useEffect } from 'react';
-import { Building2, Globe, TrendingUp, DollarSign, Users, Calendar, BarChart3, Newspaper, RefreshCw, ExternalLink, Sparkles } from 'lucide-react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { Building2, Globe, TrendingUp, DollarSign, Users, Calendar, BarChart3, Newspaper, RefreshCw, ExternalLink, Sparkles, AlertCircle, Loader2 } from 'lucide-react';
 import type { ModuleProps, NewsArticle, StockDetailView } from '../types';
 import { SymbolSearch } from './common/SymbolSearch';
 import { useBackendTimestamp } from '../hooks/useBackendTimestamps';
+import { useMarketDataStore } from '../stores/marketDataStore';
+import { getCachedProfile, getCachedNews, getDataStatus, setCachedProfile, setCachedNews } from '../hooks/useWebSocket';
+
+// Get patchStaticData action for updating RankList when profile is fetched
+const patchStaticData = (symbol: string, data: { float?: number; marketCap?: number; hasNews?: boolean }) => {
+  useMarketDataStore.getState().patchStaticData(symbol, data);
+};
+
+// Configuration - use Vite env variable or default
+const BFF_HTTP_URL =
+  typeof import.meta !== 'undefined' && import.meta.env?.VITE_BFF_URL
+    ? (import.meta.env.VITE_BFF_URL as string)
+    : 'http://localhost:5001';
 
 interface StockFundamentals {
   symbol: string;
@@ -10,119 +23,83 @@ interface StockFundamentals {
   country: string;
   sector: string;
   industry: string;
-  floatShares: number;
-  sharesOutstanding: number;
-  marketCap: number;
-  fiftyTwoWeekHigh: number;
-  fiftyTwoWeekLow: number;
-  avgVolume: number;
-  ipoDate: number;
-  employees: number;
+  float: number | string;
+  marketCap: number | string;
+  range: string;
+  averageVolume: number | string;
+  ipoDate: string;
+  fullTimeEmployees: number | string;
   ceo: string;
   website: string;
   description: string;
+  exchange: string;
+  address: string;
+  city: string;
+  state: string;
+  image: string;
+  lastUpdated: string;
 }
 
-// Generate mock news articles
-const generateMockNews = (symbol: string, count: number): NewsArticle[] => {
-  const headlines = [
-    'announces record quarterly earnings',
-    'unveils new product line',
-    'expands into emerging markets',
-    'reports strong revenue growth',
-    'faces regulatory challenges',
-    'announces strategic partnership',
-    'beats analyst expectations',
-    'launches innovative technology',
-    'stock surges on positive outlook',
-    'investors remain optimistic',
-    'market volatility impacts share price',
-    'CEO addresses shareholder concerns',
-    'plans major expansion',
-    'receives analyst upgrade',
-    'announces share buyback program',
-  ];
+interface BackendNewsArticle {
+  symbol: string;
+  title: string;
+  url: string;
+  sources: string;
+  published_time: string;
+  text?: string;
+}
 
-  const sources = [
-    'Bloomberg',
-    'Reuters',
-    'CNBC',
-    'Wall Street Journal',
-    'Financial Times',
-    'MarketWatch',
-    'Yahoo Finance',
-    'Seeking Alpha',
-    'The Motley Fool',
-    'Barron\'s',
-  ];
+// Fetch stock profile from backend
+const fetchStockProfile = async (symbol: string): Promise<StockFundamentals | null> => {
+  try {
+    const response = await fetch(`${BFF_HTTP_URL}/api/stock/${symbol}/profile`);
+    if (!response.ok) {
+      console.warn(`Failed to fetch profile for ${symbol}: ${response.status}`);
+      return null;
+    }
+    const responseData = await response.json();
 
-  const news: NewsArticle[] = [];
-  const now = Date.now();
+    // Backend returns { ticker, profile: {...}, timestamp } or { error: ... }
+    if (responseData.error) {
+      console.warn(`Profile error for ${symbol}: ${responseData.error}`);
+      return null;
+    }
 
-  for (let i = 0; i < count; i++) {
-    const headlineTemplate = headlines[Math.floor(Math.random() * headlines.length)];
-    const publishedAt = new Date(now - (i * 3600000) - Math.random() * 7200000); // Hours ago with randomness
-    const isNew = i < Math.floor(count * 0.3); // 30% of articles are "new"
-
-    news.push({
-      id: `${symbol}-news-${i}`,
-      title: `${symbol} ${headlineTemplate}`,
-      source: sources[Math.floor(Math.random() * sources.length)],
-      publishedAt: publishedAt.toISOString(),
-      url: `https://news.example.com/${symbol.toLowerCase()}-${i}`,
-      summary: `Latest developments regarding ${symbol}. This article provides in-depth analysis of the company's recent announcements and their potential impact on the stock price and market position.`,
-      isNew,
-    });
+    return responseData.profile as StockFundamentals;
+  } catch (error) {
+    console.error(`Error fetching profile for ${symbol}:`, error);
+    return null;
   }
-
-  return news;
 };
 
-// Generate mock fundamental data
-const generateFundamentals = (symbol: string): StockFundamentals => {
-  const companies: Record<string, Partial<StockFundamentals>> = {
-    'AAPL': { companyName: 'Apple Inc.', country: 'United States', sector: 'Technology', industry: 'Consumer Electronics', ceo: 'Tim Cook', ipoDate: 1976 },
-    'TSLA': { companyName: 'Tesla, Inc.', country: 'United States', sector: 'Automotive', industry: 'Electric Vehicles', ceo: 'Elon Musk', ipoDate: 2003 },
-    'NVDA': { companyName: 'NVIDIA Corporation', country: 'United States', sector: 'Technology', industry: 'Semiconductors', ceo: 'Jensen Huang', ipoDate: 1993 },
-    'MSFT': { companyName: 'Microsoft Corporation', country: 'United States', sector: 'Technology', industry: 'Software', ceo: 'Satya Nadella', ipoDate: 1975 },
-    'GOOGL': { companyName: 'Alphabet Inc.', country: 'United States', sector: 'Technology', industry: 'Internet Services', ceo: 'Sundar Pichai', ipoDate: 1998 },
-    'AMZN': { companyName: 'Amazon.com, Inc.', country: 'United States', sector: 'Consumer Cyclical', industry: 'E-Commerce', ceo: 'Andy Jassy', ipoDate: 1994 },
-    'META': { companyName: 'Meta Platforms, Inc.', country: 'United States', sector: 'Technology', industry: 'Social Media', ceo: 'Mark Zuckerberg', ipoDate: 2004 },
-    'AMD': { companyName: 'Advanced Micro Devices', country: 'United States', sector: 'Technology', industry: 'Semiconductors', ceo: 'Lisa Su', ipoDate: 1969 },
-  };
+// Fetch stock news from backend
+const fetchStockNews = async (symbol: string, limit: number = 10, refresh: boolean = false): Promise<NewsArticle[]> => {
+  try {
+    const url = `${BFF_HTTP_URL}/api/stock/${symbol}/news?limit=${limit}${refresh ? '&refresh=true' : ''}`;
+    const response = await fetch(url);
+    if (!response.ok) {
+      console.warn(`Failed to fetch news for ${symbol}: ${response.status}`);
+      return [];
+    }
+    const responseData = await response.json();
 
-  const baseData = companies[symbol] || {
-    companyName: `${symbol} Corporation`,
-    country: 'United States',
-    sector: 'Technology',
-    industry: 'Software',
-    ceo: 'John Doe',
-    ipoDate: 2000,
-  };
+    // Backend returns { ticker, news: [...], count, queued, timestamp }
+    const articles: BackendNewsArticle[] = responseData.news || [];
 
-  return {
-    symbol,
-    companyName: baseData.companyName!,
-    country: baseData.country!,
-    sector: baseData.sector!,
-    industry: baseData.industry!,
-    floatShares: Math.random() * 5000000000 + 1000000000,
-    sharesOutstanding: Math.random() * 6000000000 + 1000000000,
-    marketCap: Math.random() * 2000000000000 + 100000000000,
-    peRatio: Math.random() * 50 + 10,
-    eps: Math.random() * 20 + 1,
-    dividend: Math.random() * 5,
-    dividendYield: Math.random() * 3,
-    beta: Math.random() * 2 + 0.5,
-    fiftyTwoWeekHigh: Math.random() * 300 + 100,
-    fiftyTwoWeekLow: Math.random() * 100 + 20,
-    avgVolume: Math.random() * 100000000 + 10000000,
-    ipoDate: baseData.ipoDate!,
-    employees: Math.floor(Math.random() * 150000 + 10000),
-    ceo: baseData.ceo!,
-    website: `www.${symbol.toLowerCase()}.com`,
-    description: `${baseData.companyName} is a leading company in the ${baseData.industry} industry, operating primarily in ${baseData.country}. The company focuses on innovation and growth in the ${baseData.sector} sector.`,
-  };
+    // Transform backend format to frontend NewsArticle format
+    return articles.map((article, index) => ({
+      id: `${symbol}-news-${index}`,
+      title: article.title,
+      source: article.sources,
+      publishedAt: article.published_time,
+      url: article.url,
+      summary: article.text || '',
+      isNew: false, // Could be determined by comparing with last fetch timestamp
+    }));
+  } catch (error) {
+    console.error(`Error fetching news for ${symbol}:`, error);
+    return [];
+  }
 };
 
 const formatNumber = (num: number, decimals = 2): string => {
@@ -145,7 +122,10 @@ const formatVolume = (vol: number): string => {
 };
 
 const formatTimestampET = (isoDate: string): string => {
+  if (!isoDate) return '-';
   const date = new Date(isoDate);
+  // Check for invalid date
+  if (isNaN(date.getTime())) return isoDate || '-';
   // Format to America/New_York timezone
   const formatted = date.toLocaleString('en-US', {
     timeZone: 'America/New_York',
@@ -166,22 +146,46 @@ const AVAILABLE_SYMBOLS = [
 ];
 
 export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChange }: ModuleProps) {
-  const [symbol, setSymbol] = useState(selectedSymbol || 'AAPL');
+  // Get first ticker from entities map as fallback default (stable selector - avoids infinite loop)
+  const firstTicker = useMarketDataStore((state) => {
+    // Get first entity by iterating the map - this is stable because we only extract a string
+    const entries = Array.from(state.entities.entries());
+    if (entries.length === 0) return '';
+    // Sort by rank to get the top gainer
+    entries.sort((a, b) => (a[1].rank ?? 999) - (b[1].rank ?? 999));
+    return entries[0]?.[0] ?? '';
+  });
+
+  const [symbol, setSymbol] = useState(selectedSymbol || '');
   const [fundamentals, setFundamentals] = useState<StockFundamentals | null>(null);
   const [news, setNews] = useState<NewsArticle[]>([]);
   const [newsCount, setNewsCount] = useState('10');
-  const [isLoadingNews, setIsLoadingNews] = useState(false);
+  // Per-ticker loading state maps
+  const [loadingNewsFor, setLoadingNewsFor] = useState<string | null>(null);
+  const [loadingProfileFor, setLoadingProfileFor] = useState<string | null>(null);
+  const [profileError, setProfileError] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<StockDetailView>(settings?.stockDetail?.view || 'fundamentals');
+
+  // Cache refs to avoid re-fetching data for the same ticker
+  const profileCache = useRef<Map<string, StockFundamentals>>(new Map());
+  const newsCache = useRef<Map<string, NewsArticle[]>>(new Map());
+
+  // Check if current ticker is loading
+  const isLoadingNews = loadingNewsFor === symbol;
+  const isLoadingProfile = loadingProfileFor === symbol;
 
   // Backend timestamp for stock detail domain
   const backendTimestamp = useBackendTimestamp('stock-detail');
 
-  // Update symbol when selectedSymbol changes from sync
+  // Update symbol when selectedSymbol changes from sync, or use first ticker if symbol is empty
   useEffect(() => {
     if (selectedSymbol && selectedSymbol !== symbol) {
       setSymbol(selectedSymbol);
+    } else if (!symbol && firstTicker) {
+      // Auto-select first ticker from rank data when no symbol is set
+      setSymbol(firstTicker);
     }
-  }, [selectedSymbol]);
+  }, [selectedSymbol, firstTicker]);
 
   // Update view from settings
   useEffect(() => {
@@ -190,51 +194,156 @@ export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChan
     }
   }, [settings?.stockDetail?.view]);
 
-  // Load fundamentals when symbol changes
+  // Load fundamentals from backend when symbol changes (with caching)
   useEffect(() => {
-    const data = generateFundamentals(symbol);
-    setFundamentals(data);
-  }, [symbol]);
+    if (!symbol) return; // Skip if no symbol selected yet
 
-  // Auto-load news when symbol changes (only if on news view)
-  useEffect(() => {
-    if (activeView === 'news') {
-      fetchNews();
+    // Check WebSocket-pushed cache first (from static_update stream)
+    const wsCache = getCachedProfile(symbol);
+    if (wsCache) {
+      setFundamentals(wsCache as StockFundamentals);
+      profileCache.current.set(symbol, wsCache as StockFundamentals);
+      setProfileError(null);
+      return;
     }
+
+    // Check local cache (from previous API fetches)
+    const cached = profileCache.current.get(symbol);
+    if (cached) {
+      setFundamentals(cached);
+      setProfileError(null);
+      return;
+    }
+
+    const loadProfile = async () => {
+      const fetchingSymbol = symbol; // Capture symbol at start
+      setLoadingProfileFor(fetchingSymbol);
+      setProfileError(null);
+
+      const data = await fetchStockProfile(fetchingSymbol);
+      if (data) {
+        profileCache.current.set(fetchingSymbol, data); // Local cache
+        setCachedProfile(fetchingSymbol, data); // Global persistent cache
+        setFundamentals(data);
+
+        // Also update RankList store with static data from profile
+        patchStaticData(fetchingSymbol, {
+          float: typeof data.float === 'number' ? data.float : undefined,
+          marketCap: typeof data.marketCap === 'number' ? data.marketCap : undefined,
+        });
+      } else {
+        setProfileError(`No profile data available for ${fetchingSymbol}`);
+        setFundamentals(null);
+      }
+      // Only clear loading if still loading this symbol
+      setLoadingProfileFor(prev => prev === fetchingSymbol ? null : prev);
+    };
+
+    loadProfile();
   }, [symbol]);
 
-  const fetchNews = () => {
-    setIsLoadingNews(true);
+  // Load news from cache or fetch when switching to news view
+  useEffect(() => {
+    if (!symbol) return;
+    if (activeView !== 'news') return;
 
-    // Simulate API call delay
-    setTimeout(() => {
-      const count = parseInt(newsCount) || 10;
-      const clampedCount = Math.min(Math.max(count, 1), 50); // Limit between 1 and 50
-      const articles = generateMockNews(symbol, clampedCount);
-      setNews(articles);
-      setIsLoadingNews(false);
-    }, 500);
-  };
+    // Helper to normalize news format (handle both old and new cache formats)
+    const normalizeNews = (articles: any[]): NewsArticle[] => {
+      return articles.map((article, index) => ({
+        id: article.id || `${symbol}-news-${index}`,
+        title: article.title || '',
+        source: article.source || article.sources || '',
+        // Handle both publishedAt and published_time field names
+        publishedAt: article.publishedAt || article.published_time || '',
+        url: article.url || '',
+        summary: article.summary || article.text || '',
+        isNew: article.isNew || false,
+      }));
+    };
+
+    // Check WebSocket push cache first (most recent)
+    const wsNews = getCachedNews(symbol);
+    if (wsNews && wsNews.length > 0) {
+      setNews(normalizeNews(wsNews));
+      return;
+    }
+
+    // Check local cache (from previous API fetches)
+    const cached = newsCache.current.get(symbol);
+    if (cached) {
+      setNews(cached);
+      return;
+    }
+
+    // No cache - fetch news
+    handleFetchNews(false);
+  }, [symbol, activeView]);
+
+  const handleFetchNews = useCallback(async (refresh: boolean = false) => {
+    if (!symbol) return;
+    const fetchingSymbol = symbol; // Capture symbol at start
+    setLoadingNewsFor(fetchingSymbol);
+    const count = parseInt(newsCount) || 10;
+    const clampedCount = Math.min(Math.max(count, 1), 50);
+    const articles = await fetchStockNews(fetchingSymbol, clampedCount, refresh);
+    newsCache.current.set(fetchingSymbol, articles); // Local cache
+    setCachedNews(fetchingSymbol, articles); // Global persistent cache
+    setNews(articles);
+
+    // Also update RankList store with hasNews status
+    patchStaticData(fetchingSymbol, {
+      hasNews: articles.length > 0,
+    });
+
+    // Only clear loading if still loading this symbol
+    setLoadingNewsFor(prev => prev === fetchingSymbol ? null : prev);
+  }, [symbol, newsCount]);
 
   const handleViewChange = (view: StockDetailView) => {
     setActiveView(view);
     onSettingsChange?.({ stockDetail: { view } });
-
-    // Auto-fetch news when switching to news view if not already loaded
-    if (view === 'news' && news.length === 0) {
-      fetchNews();
-    }
+    // Note: useEffect handles auto-fetch on view change with cache check
   };
 
   const handleSymbolChange = (newSymbol: string) => {
     setSymbol(newSymbol);
-    onSymbolSelect?.(newSymbol);
   };
 
-  if (!fundamentals) {
+  // Loading state
+  if (isLoadingProfile) {
     return (
       <div className="h-full flex items-center justify-center bg-zinc-900 text-gray-500">
-        Loading...
+        <RefreshCw className="w-5 h-5 animate-spin mr-2" />
+        Loading {symbol}...
+      </div>
+    );
+  }
+
+  // Error state - show message but allow symbol change
+  if (profileError || !fundamentals) {
+    return (
+      <div className="h-full flex flex-col bg-zinc-900">
+        {/* Header with search */}
+        <div className="border-b border-zinc-800 p-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-gray-400">
+              <AlertCircle className="w-5 h-5 text-yellow-500" />
+              <span>{profileError || 'No data available'}</span>
+            </div>
+            <div className="flex-shrink-0" style={{ width: '180px' }}>
+              <SymbolSearch
+                value={symbol}
+                onChange={handleSymbolChange}
+                availableSymbols={AVAILABLE_SYMBOLS}
+                placeholder="Symbol..."
+                useConfirmButton={true}
+              />
+            </div>
+          </div>
+        </div>
+        <div className="flex-1 flex items-center justify-center text-gray-500">
+          <p>Static data will appear once the ticker is processed by the backend</p>
+        </div>
       </div>
     );
   }
@@ -290,15 +399,15 @@ export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChan
                 </div>
                 <div>
                   <div className="text-gray-500 text-xs">ipoDate</div>
-                  <div>{fundamentals.ipoDate}</div>
+                  <div>{fundamentals.ipoDate || '-'}</div>
                 </div>
                 <div>
                   <div className="text-gray-500 text-xs">CEO</div>
-                  <div>{fundamentals.ceo}</div>
+                  <div>{fundamentals.ceo || '-'}</div>
                 </div>
                 <div>
                   <div className="text-gray-500 text-xs">Employees</div>
-                  <div>{formatNumber(fundamentals.employees, 0)}</div>
+                  <div>{fundamentals.fullTimeEmployees ? formatNumber(Number(fundamentals.fullTimeEmployees), 0) : '-'}</div>
                 </div>
               </div>
             </div>
@@ -312,27 +421,27 @@ export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChan
               <div className="grid grid-cols-2 gap-3 text-sm">
                 <div>
                   <div className="text-gray-500 text-xs">Market Cap</div>
-                  <div>{formatLargeNumber(fundamentals.marketCap)}</div>
+                  <div>{fundamentals.marketCap ? formatLargeNumber(Number(fundamentals.marketCap)) : '-'}</div>
                 </div>
                 <div>
-                  <div className="text-gray-500 text-xs">Shares Outstanding</div>
-                  <div>{formatVolume(fundamentals.sharesOutstanding)}</div>
+                  <div className="text-gray-500 text-xs">Exchange</div>
+                  <div>{fundamentals.exchange || '-'}</div>
                 </div>
                 <div>
                   <div className="text-gray-500 text-xs">Float Shares</div>
-                  <div>{formatVolume(fundamentals.floatShares)}</div>
+                  <div>{fundamentals.float ? formatVolume(Number(fundamentals.float)) : '-'}</div>
                 </div>
                 <div>
                   <div className="text-gray-500 text-xs">Avg Volume</div>
-                  <div>{formatVolume(fundamentals.avgVolume)}</div>
+                  <div>{fundamentals.averageVolume ? formatVolume(Number(fundamentals.averageVolume)) : '-'}</div>
                 </div>
                 <div>
-                  <div className="text-gray-500 text-xs">52W High</div>
-                  <div>${formatNumber(fundamentals.fiftyTwoWeekHigh)}</div>
+                  <div className="text-gray-500 text-xs">52W Range</div>
+                  <div>{fundamentals.range || '-'}</div>
                 </div>
                 <div>
-                  <div className="text-gray-500 text-xs">52W Low</div>
-                  <div>${formatNumber(fundamentals.fiftyTwoWeekLow)}</div>
+                  <div className="text-gray-500 text-xs">Location</div>
+                  <div>{[fundamentals.city, fundamentals.state].filter(Boolean).join(', ') || '-'}</div>
                 </div>
               </div>
             </div>
@@ -372,13 +481,47 @@ export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChan
                   className="w-24 px-3 py-1.5 bg-zinc-800 border border-zinc-700 text-sm focus:outline-none focus:border-zinc-600"
                 />
                 <button
-                  onClick={fetchNews}
+                  onClick={() => handleFetchNews(false)}
                   disabled={isLoadingNews}
                   className="flex items-center gap-2 px-4 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:bg-zinc-700 disabled:cursor-not-allowed transition-colors text-sm"
                 >
-                  <RefreshCw className={`w-4 h-4 ${isLoadingNews ? 'animate-spin' : ''}`} />
+                  {isLoadingNews ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <RefreshCw className="w-4 h-4" />
+                  )}
                   {isLoadingNews ? 'Loading...' : 'Fetch News'}
                 </button>
+                <button
+                  onClick={() => handleFetchNews(true)}
+                  disabled={isLoadingNews}
+                  className="flex items-center gap-2 px-3 py-1.5 bg-orange-600 hover:bg-orange-700 disabled:bg-zinc-700 disabled:cursor-not-allowed transition-colors text-sm"
+                  title="Trigger backend to refresh news from sources"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                  Refresh
+                </button>
+                {/* Data source indicator */}
+                {(() => {
+                  const statusInfo = getDataStatus(symbol);
+                  const newsStatus = statusInfo?.news;
+                  if (newsStatus === 'loading' || newsStatus === 'pending') {
+                    return (
+                      <span className="text-xs text-yellow-500 flex items-center gap-1" title="Fetching from backend...">
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                        Fetching...
+                      </span>
+                    );
+                  }
+                  if (newsStatus === 'ready') {
+                    return (
+                      <span className="text-xs text-green-500" title="Data from WebSocket push cache">
+                        ● Cached
+                      </span>
+                    );
+                  }
+                  return null;
+                })()}
               </div>
             </div>
 

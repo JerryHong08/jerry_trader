@@ -30,6 +30,185 @@ const BFF_WS_URL = BFF_HTTP_URL.replace(/^http/, 'ws');
 // Generate unique client ID
 const CLIENT_ID = `gridtrader_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
+// LocalStorage keys for cache persistence
+const PROFILE_CACHE_KEY = 'gridtrader_profile_cache';
+const NEWS_CACHE_KEY = 'gridtrader_news_cache';
+const DATA_STATUS_KEY = 'gridtrader_data_status';
+
+// Helper functions for localStorage persistence
+function loadMapFromStorage<T>(key: string): Map<string, T> {
+  try {
+    const stored = localStorage.getItem(key);
+    if (stored) {
+      const parsed = JSON.parse(stored);
+      return new Map(Object.entries(parsed));
+    }
+  } catch (e) {
+    console.warn(`Failed to load ${key} from localStorage:`, e);
+  }
+  return new Map();
+}
+
+function saveMapToStorage<T>(key: string, map: Map<string, T>) {
+  try {
+    const obj = Object.fromEntries(map);
+    localStorage.setItem(key, JSON.stringify(obj));
+  } catch (e) {
+    console.warn(`Failed to save ${key} to localStorage:`, e);
+  }
+}
+
+// Static profile cache - populated by static_update messages from BFF
+// Used by StockDetail to avoid re-fetching profile data
+// Persisted to localStorage across page refreshes
+const staticProfileCache = loadMapFromStorage<Record<string, any>>(PROFILE_CACHE_KEY);
+
+// Static news cache - populated by static_update messages from BFF
+// Persisted to localStorage across page refreshes
+const staticNewsCache = loadMapFromStorage<any[]>(NEWS_CACHE_KEY);
+
+// Data status tracking - which symbols have been loaded
+// 'pending' = queued for fetch, 'loading' = being fetched, 'ready' = data available
+export type DataStatus = 'pending' | 'loading' | 'ready' | 'none';
+const dataStatusMap = loadMapFromStorage<{ profile: DataStatus; news: DataStatus }>(DATA_STATUS_KEY);
+
+/**
+ * Get cached profile data for a symbol (from static_update stream or API fetch)
+ */
+export function getCachedProfile(symbol: string): Record<string, any> | undefined {
+  return staticProfileCache.get(symbol);
+}
+
+/**
+ * Set cached profile data for a symbol (from API fetch)
+ * Also persists to localStorage
+ */
+export function setCachedProfile(symbol: string, profile: Record<string, any>) {
+  staticProfileCache.set(symbol, profile);
+  saveMapToStorage(PROFILE_CACHE_KEY, staticProfileCache);
+  setDataStatus(symbol, 'profile', 'ready');
+}
+
+/**
+ * Get cached news data for a symbol (from static_update stream or API fetch)
+ */
+export function getCachedNews(symbol: string): any[] | undefined {
+  return staticNewsCache.get(symbol);
+}
+
+/**
+ * Set cached news data for a symbol (from API fetch)
+ * Also persists to localStorage
+ */
+export function setCachedNews(symbol: string, news: any[]) {
+  staticNewsCache.set(symbol, news);
+  saveMapToStorage(NEWS_CACHE_KEY, staticNewsCache);
+  setDataStatus(symbol, 'news', 'ready');
+}
+
+/**
+ * Check if profile is cached for a symbol
+ */
+export function hasProfileCache(symbol: string): boolean {
+  return staticProfileCache.has(symbol);
+}
+
+/**
+ * Check if news is cached for a symbol
+ */
+export function hasNewsCache(symbol: string): boolean {
+  return staticNewsCache.has(symbol);
+}
+
+/**
+ * Get data status for a symbol
+ */
+export function getDataStatus(symbol: string): { profile: DataStatus; news: DataStatus } {
+  return dataStatusMap.get(symbol) || { profile: 'none', news: 'none' };
+}
+
+/**
+ * Update data status for a symbol
+ */
+export function setDataStatus(symbol: string, type: 'profile' | 'news', status: DataStatus) {
+  const current = dataStatusMap.get(symbol) || { profile: 'none', news: 'none' };
+  current[type] = status;
+  dataStatusMap.set(symbol, current);
+  saveMapToStorage(DATA_STATUS_KEY, dataStatusMap);
+}
+
+// Flag to track if caches have been reloaded to store
+let cacheReloadedToStore = false;
+
+/**
+ * Clear all cached data (profile, news, status)
+ * Call this from settings to manually reset caches
+ */
+export function clearAllCaches() {
+  staticProfileCache.clear();
+  staticNewsCache.clear();
+  dataStatusMap.clear();
+  localStorage.removeItem(PROFILE_CACHE_KEY);
+  localStorage.removeItem(NEWS_CACHE_KEY);
+  localStorage.removeItem(DATA_STATUS_KEY);
+  // Reset the reload flag so cache can be reloaded on next page load
+  cacheReloadedToStore = false;
+  console.log('[WebSocket] All caches cleared');
+}
+
+/**
+ * Get cache statistics for display in settings
+ */
+export function getCacheStats(): { profiles: number; news: number; total: number } {
+  return {
+    profiles: staticProfileCache.size,
+    news: staticNewsCache.size,
+    total: staticProfileCache.size + staticNewsCache.size,
+  };
+}
+
+/**
+ * Reload cached static data into the marketDataStore on startup.
+ * This ensures RankList columns (float, marketCap, hasNews) show cached values after page refresh.
+ */
+export function reloadCachedStaticDataToStore() {
+  const store = useMarketDataStore.getState();
+  let patchedCount = 0;
+
+  // Iterate over cached profiles and patch static data into store
+  staticProfileCache.forEach((profile, symbol) => {
+    const staticData: Record<string, any> = {};
+
+    // Extract static fields from profile
+    if (profile.float !== undefined) {
+      staticData.float = typeof profile.float === 'number' ? profile.float : parseFloat(profile.float) || null;
+    }
+    if (profile.marketCap !== undefined) {
+      staticData.marketCap = typeof profile.marketCap === 'number' ? profile.marketCap : parseFloat(profile.marketCap) || null;
+    }
+    if (profile.country !== undefined) {
+      staticData.country = profile.country;
+    }
+    if (profile.sector !== undefined) {
+      staticData.sector = profile.sector;
+    }
+
+    if (Object.keys(staticData).length > 0) {
+      store.patchStaticData(symbol, staticData);
+      patchedCount++;
+    }
+  });
+
+  // Also patch hasNews from news cache
+  staticNewsCache.forEach((news, symbol) => {
+    store.patchStaticData(symbol, { hasNews: news.length > 0 });
+  });
+
+  if (patchedCount > 0 || staticNewsCache.size > 0) {
+    console.log(`[WebSocket] Reloaded ${patchedCount} profiles and ${staticNewsCache.size} news caches into store`);
+  }
+}
+
 // ============================================================================
 // Re-export types from store for backwards compatibility
 // ============================================================================
@@ -168,6 +347,31 @@ function handleMessage(message: WebSocketMessage) {
       }
       break;
 
+    case 'static_update':
+      // Patch static data only (preserves snapshot and state data)
+      // message.summary: { marketCap, float, hasNews, country, sector } - for RankList
+      // message.profile: full profile data - for StockDetail cache
+      // message.news: news articles array - for StockDetail news cache
+      if (message.symbol) {
+        // Patch summary data to entities (for RankList)
+        if (message.summary) {
+          store.patchStaticData(message.symbol, message.summary);
+        }
+        // Cache profile data for StockDetail (persisted to localStorage)
+        if (message.profile && Object.keys(message.profile).length > 0) {
+          staticProfileCache.set(message.symbol, message.profile);
+          saveMapToStorage(PROFILE_CACHE_KEY, staticProfileCache);
+          setDataStatus(message.symbol, 'profile', 'ready');
+        }
+        // Cache news data for StockDetail (persisted to localStorage)
+        if (message.news && message.news.length > 0) {
+          staticNewsCache.set(message.symbol, message.news);
+          saveMapToStorage(NEWS_CACHE_KEY, staticNewsCache);
+          setDataStatus(message.symbol, 'news', 'ready');
+        }
+      }
+      break;
+
     case 'stock_detail':
       // Stock detail responses are handled by registered handlers
       const handler = stockDetailHandlers.get(message.ticker);
@@ -299,6 +503,13 @@ export function useWebSocketConnection(): ConnectionStatus {
   const status = useMarketDataStore((s) => s.connectionStatus);
 
   useEffect(() => {
+    // Reload cached static data into store on first mount (before WebSocket connects)
+    // This ensures RankList shows cached float/marketCap/hasNews immediately
+    if (!cacheReloadedToStore) {
+      cacheReloadedToStore = true;
+      reloadCachedStaticDataToStore();
+    }
+
     // Initialize WebSocket connection
     getWebSocket();
   }, []);

@@ -28,12 +28,31 @@ const SNAPSHOT_FIELDS = [
   'volume',
   'relativeVolume5min',
   'relativeVolumeDaily',
+  'vwap',
+] as const;
+
+// Fields that come from static data (patched on static_update)
+// These are low-frequency, cached facts - NEVER overwritten by snapshot
+const STATIC_FIELDS = [
+  'marketCap',
+  'float',
+  'hasNews',
+  'country',
+  'sector',
 ] as const;
 
 // Entity type with optional state until state event arrives
+// Also includes static fields that may be undefined until static data arrives
 export type RankEntity = Omit<RankItem, 'state'> & {
   state?: TickerState;
+  stateReason?: string;
   rank?: number;
+  // Static fields (may be undefined until fetched)
+  marketCap?: number;
+  float?: number;
+  hasNews?: boolean;
+  country?: string;
+  sector?: string;
 };
 
 // Lightweight Charts data format from backend
@@ -88,6 +107,13 @@ interface MarketDataState {
    * Only updates state and stateReason fields.
    */
   patchStateChange: (symbol: string, state: TickerState, stateReason?: string) => void;
+
+  /**
+   * Patch static data from static_update event.
+   * Only updates static fields (marketCap, float, hasNews, country, sector).
+   * These NEVER overwrite snapshot or state fields.
+   */
+  patchStaticData: (symbol: string, data: Partial<RankEntity>) => void;
 
   /**
    * Set chart series data from overview_chart_update.
@@ -166,28 +192,40 @@ export const useMarketDataStore = create<MarketDataState>()(
 
           const existing = newEntities.get(item.symbol);
           if (existing) {
-            // Merge only snapshot fields onto existing entity, preserving state
+            // Merge snapshot fields onto existing entity, preserving state
             const patched: RankEntity = { ...existing };
             SNAPSHOT_FIELDS.forEach((field) => {
               if (field in item) {
                 (patched as any)[field] = (item as any)[field];
               }
             });
+            // Also merge static fields if included (from BFF's merged response)
+            // Only set if not undefined (null means "not available", undefined means "not included")
+            STATIC_FIELDS.forEach((field) => {
+              if (field in item && (item as any)[field] !== undefined) {
+                (patched as any)[field] = (item as any)[field];
+              }
+            });
             newEntities.set(item.symbol, patched);
           } else {
-            // New entity - initialize with snapshot fields, state will be undefined
+            // New entity - initialize with snapshot fields
+            // Static fields may come from BFF's merged response
             const newEntity: RankEntity = {
               symbol: item.symbol,
               price: item.price ?? 0,
               change: item.change ?? 0,
               changePercent: item.changePercent ?? 0,
               volume: item.volume ?? 0,
-              marketCap: 0, // Static field, will be set by other source
-              vwap: item.vwap ?? 0, // Snapshotdata field
-              float: 0, // Static field
+              vwap: item.vwap ?? 0,
               relativeVolumeDaily: item.relativeVolumeDaily ?? 0,
               relativeVolume5min: item.relativeVolume5min ?? 0,
               rank: item.rank,
+              // Static fields from BFF merge (may be undefined if not yet fetched)
+              marketCap: (item as any).marketCap,
+              float: (item as any).float,
+              hasNews: (item as any).hasNews,
+              country: (item as any).country,
+              sector: (item as any).sector,
               // state is intentionally undefined until state event arrives
             };
             newEntities.set(item.symbol, newEntity);
@@ -228,6 +266,44 @@ export const useMarketDataStore = create<MarketDataState>()(
             relativeVolume5min: 0,
             state,
             stateReason: stateReason ?? '',
+          });
+        }
+
+        return { entities: newEntities };
+      });
+    },
+
+    patchStaticData: (symbol, data) => {
+      set((prevState) => {
+        const newEntities = new Map(prevState.entities);
+        const existing = newEntities.get(symbol);
+
+        if (existing) {
+          // Patch static fields only, preserving snapshot and state fields
+          const patched: RankEntity = { ...existing };
+          STATIC_FIELDS.forEach((field) => {
+            if (field in data && data[field as keyof typeof data] !== undefined) {
+              (patched as any)[field] = data[field as keyof typeof data];
+            }
+          });
+          newEntities.set(symbol, patched);
+        } else {
+          // Create minimal entity with static data (snapshot/state will fill in later)
+          newEntities.set(symbol, {
+            symbol,
+            price: 0,
+            change: 0,
+            changePercent: 0,
+            volume: 0,
+            vwap: 0,
+            relativeVolumeDaily: 0,
+            relativeVolume5min: 0,
+            // Set static fields from data
+            marketCap: data.marketCap,
+            float: data.float,
+            hasNews: data.hasNews,
+            country: data.country,
+            sector: data.sector,
           });
         }
 

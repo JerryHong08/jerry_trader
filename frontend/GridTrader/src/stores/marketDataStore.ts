@@ -53,6 +53,12 @@ export type RankEntity = Omit<RankItem, 'state'> & {
   hasNews?: boolean;
   country?: string;
   sector?: string;
+  // Version tracking for static data (per domain)
+  _staticVersions?: {
+    summary?: number;
+    profile?: number;
+    news?: number;
+  };
 };
 
 // Lightweight Charts data format from backend
@@ -112,8 +118,9 @@ interface MarketDataState {
    * Patch static data from static_update event.
    * Only updates static fields (marketCap, float, hasNews, country, sector).
    * These NEVER overwrite snapshot or state fields.
+   * Optional version parameter tracks the update version for the domain.
    */
-  patchStaticData: (symbol: string, data: Partial<RankEntity>) => void;
+  patchStaticData: (symbol: string, data: Partial<RankEntity>, version?: number) => void;
 
   /**
    * Set chart series data from overview_chart_update.
@@ -273,7 +280,7 @@ export const useMarketDataStore = create<MarketDataState>()(
       });
     },
 
-    patchStaticData: (symbol, data) => {
+    patchStaticData: (symbol, data, version) => {
       set((prevState) => {
         const newEntities = new Map(prevState.entities);
         const existing = newEntities.get(symbol);
@@ -286,10 +293,23 @@ export const useMarketDataStore = create<MarketDataState>()(
               (patched as any)[field] = data[field as keyof typeof data];
             }
           });
+          // Track version if provided
+          if (version !== undefined) {
+            if (!patched._staticVersions) {
+              patched._staticVersions = {};
+            }
+            // Determine domain from data fields
+            if ('marketCap' in data || 'float' in data || 'country' in data || 'sector' in data) {
+              patched._staticVersions.summary = version;
+            }
+            if ('hasNews' in data) {
+              patched._staticVersions.news = version;
+            }
+          }
           newEntities.set(symbol, patched);
         } else {
           // Create minimal entity with static data (snapshot/state will fill in later)
-          newEntities.set(symbol, {
+          const newEntity: RankEntity = {
             symbol,
             price: 0,
             change: 0,
@@ -304,7 +324,18 @@ export const useMarketDataStore = create<MarketDataState>()(
             hasNews: data.hasNews,
             country: data.country,
             sector: data.sector,
-          });
+          };
+          // Track version if provided
+          if (version !== undefined) {
+            newEntity._staticVersions = {};
+            if ('marketCap' in data || 'float' in data || 'country' in data || 'sector' in data) {
+              newEntity._staticVersions.summary = version;
+            }
+            if ('hasNews' in data) {
+              newEntity._staticVersions.news = version;
+            }
+          }
+          newEntities.set(symbol, newEntity);
         }
 
         return { entities: newEntities };

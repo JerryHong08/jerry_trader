@@ -103,6 +103,19 @@ def get_asset_overview_data(asset):
 
 splits_data = get_asset_overview_data(asset="splits")
 
+
+from pathlib import Path
+
+PROMPT_DIR = Path(__file__).resolve().parents[0] / "llmContext"
+
+
+def load_prompt(name: str) -> str:
+    path = PROMPT_DIR / name
+    if not path.exists():
+        raise FileNotFoundError(f"Prompt not found: {path}")
+    return path.read_text(encoding="utf-8")
+
+
 if __name__ == "__main__":
     with pl.Config(tbl_rows=50, tbl_cols=20):
         asset = "splits"

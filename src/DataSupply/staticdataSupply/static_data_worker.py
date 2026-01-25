@@ -76,6 +76,9 @@ class StaticDataWorker:
     NEWS_ITEM_PREFIX = "news:item"
     UPDATE_STREAM = "static_update_stream"
 
+    # Version tracking keys (for monotonic versioning per symbol/domain)
+    VERSION_KEY_PREFIX = "static:version"  # static:version:{symbol}:{domain} -> INTEGER
+
     # Summary fields (for RankList - lightweight)
     SUMMARY_FIELDS = [
         "marketCap",
@@ -301,6 +304,34 @@ class StaticDataWorker:
         """Remove symbol from news processing set after successful completion."""
         self.r.srem(self.NEWS_PROCESSING_SET, symbol)
 
+    def _increment_version(self, symbol: str, domain: str) -> int:
+        """
+        Atomically increment and return the version for a (symbol, domain) pair.
+
+        Uses Redis INCR for atomic monotonic versioning.
+        Version key: static:version:{symbol}:{domain}
+
+        Args:
+            symbol: Stock ticker symbol
+            domain: Static data domain (summary, profile, news)
+
+        Returns:
+            New version number (1-indexed, monotonically increasing)
+        """
+        version_key = f"{self.VERSION_KEY_PREFIX}:{symbol}:{domain}"
+        return self.r.incr(version_key)
+
+    def _get_version(self, symbol: str, domain: str) -> int:
+        """
+        Get current version for a (symbol, domain) pair without incrementing.
+
+        Returns:
+            Current version number, or 0 if not set
+        """
+        version_key = f"{self.VERSION_KEY_PREFIX}:{symbol}:{domain}"
+        val = self.r.get(version_key)
+        return int(val) if val else 0
+
     async def _process_news_only(self, symbol: str):
         """
         Process news-only refetch for a symbol.
@@ -329,16 +360,26 @@ class StaticDataWorker:
         self.r.hset(summary_key, "hasNews", "1" if has_news else "0")
         self.r.hset(summary_key, "lastUpdated", timestamp.isoformat())
 
-        # Emit notification
+        # Emit versioned notification for news and summary domains
+        domains = ["summary", "news"]
+        versions = {}
+        for domain in domains:
+            versions[domain] = self._increment_version(symbol, domain)
+
         self.r.xadd(
             self.UPDATE_STREAM,
             {
                 "symbol": symbol,
-                "fields_updated": json.dumps(["hasNews", "news"]),
+                "update_type": "static",
+                "domains": json.dumps(domains),
+                "version": json.dumps(versions),
                 "timestamp": timestamp.isoformat(),
             },
         )
-        logger.info(f"Emitted news-only update for {symbol}: hasNews={has_news}")
+        logger.info(
+            f"Emitted versioned news-only update for {symbol}: "
+            f"hasNews={has_news}, versions={versions}"
+        )
 
     async def _process_symbol(self, symbol: str):
         """
@@ -460,17 +501,36 @@ class StaticDataWorker:
             self.r.hset(profile_key, mapping=string_profile)
             logger.debug(f"Cached profile for {symbol}: {list(string_profile.keys())}")
 
-        # 6. Emit notification to stream
-        if fields_updated:
+        # 6. Emit versioned notification to stream
+        # Determine which domains were updated
+        domains = []
+        if summary_data:
+            domains.append("summary")
+        if profile_data:
+            domains.append("profile")
+        if has_news or any(f in fields_updated for f in ["hasNews"]):
+            domains.append("news")
+
+        if domains:
+            # Increment version for each updated domain
+            versions = {}
+            for domain in domains:
+                versions[domain] = self._increment_version(symbol, domain)
+
             self.r.xadd(
                 self.UPDATE_STREAM,
                 {
                     "symbol": symbol,
-                    "fields_updated": json.dumps(fields_updated),
+                    "update_type": "static",
+                    "domains": json.dumps(domains),
+                    "version": json.dumps(versions),
                     "timestamp": timestamp_str,
                 },
             )
-            logger.info(f"Emitted static update for {symbol}: {fields_updated}")
+            logger.info(
+                f"Emitted versioned static update for {symbol}: "
+                f"domains={domains}, versions={versions}"
+            )
 
     async def _fetch_news_merged(self, symbol: str):
         """
@@ -572,7 +632,9 @@ class StaticDataWorker:
         # Classify news using LLM (via NewsClassificator)
         for article in recent_articles[:3]:  # Check top 3 recent articles
             try:
-                result = await self.news_classificator.classify_news(symbol, article)
+                result, reasoning_content = await self.news_classificator.classify_news(
+                    symbol, article
+                )
                 if result.is_catalyst:
                     logger.info(
                         f"Found good recent news for {symbol}: {article.title}"

@@ -1,0 +1,36 @@
+The user will provide a news json data for one ticker. Please analyze the news article and output them in JSON format.
+here is the analyze instruction:
+remember that my strategy is focus on US pre-market session ticker news momentum and only take day trading, not a typical long term investment analysis for news.
+so sometimes even the news is not good for long term, but enough for a short term day trading hype or catalyst, you should also classify it as YES, but warning me the risk in the Explanation filed of you json respone.
+based on the api fetched result,somes the full content will be N/A you can only analyze the title, which I will show you an example below, analyze the news article and determine if it represents a potential short term catalyst that could drive the stock price up, and response with a JSON format.
+
+Classification: "YES" or "NO", YES if this is catalyst news,"NO" if this is neutral,irrelevant or even negative news.
+Score: the highest is 10/10, the lowest is 0/10, the higher the score, the more confidence you are that this is a catalyst news.
+Explanation: briefly explain why you classify it as YES or NO, especially if there is any risk for short term trading. any important detail should be mentioned here in your own words.
+
+EXAMPLE INPUT:
+
+Ticker: "CHRS"
+Title: "Coherus Oncology Publishes Preclinical And Clinical Biomarker Research In Molecular Cancer Therapeutics Describing The High Selectivity, Picomolar Binding Affinity And Significant Effector Mediated Killing Of CCR8+ Cells Of Its Investigational Anti-CCR8 Monoclonal Antibody;"
+Content: ""<p>Coherus Oncology, Inc. (NASDAQ:<a class="ticker" href="https://www.benzinga.com/quote/CHRS">CHRS</a>) today announced compelling six-year overall survival (OS) follow-up results from the Phase 3 JUPITER-02 trial evaluating LOQTORZI (toripalimab-tpzi) plus chemotherapy in recurrent or metastatic nasopharyngeal carcinoma (RM-NPC). The findings reveal a striking and durable survival advantage that underscores the urgent clinical need to incorporate LOQTORZI with chemotherapy as first-line treatment.</p><p>In this exploratory post-hoc analysis, patients receiving LOQTORZI plus gemcitabine and cisplatin achieved a median OS of 64.8 months, nearly double that of chemotherapy alone (33.7 months), representing a 31-month improvement and an observed 38% reduction in risk of death (HR 0.62; 95% CI, 0.45–0.85). These results, presented at ESMO Asia 2025, signal a step change in cancer patient survival, reinforcing LOQTORZI's role in transforming outcomes for people living with RM-NPC.</p><p>JUPITER-02 is a randomized, double-blind, placebo-controlled Phase 3 study evaluating LOQTORZI with chemotherapy in first-line RM-NPC, and this long-term follow-up provides additional context for the previously reported survival outcomes.</p><p><strong>A Meaningful Shift for Patients Who Need It Most</strong></p><p>RM-NPC is an aggressive cancer, and long-term survival with standard chemotherapy can be limited for many patients. The multi-year survival observed in the LOQTORZI arm suggests a potential for meaningful clinical benefit, which may translate into longer survival for patients who typically face a challenging prognosis.</p><p>"The new 6-year overall survival follow up data gives us even greater confidence to use toripalimab in patients with NPC that is recurrent or metastatic," said Victoria Villaflor, MD, Professor and Director, Head and Neck Oncology Program, Division of Hematology-Oncology, Department of Medicine, UC Irvine School of Medicine.</p><p>For many patients, the difference between 33 months and nearly 65 months represents the possibility of more time with family and more milestones. This meaningful extension highlights why oncologists may consider adding LOQTORZI to chemotherapy upfront, as delaying or omitting a therapy associated with improved survival outcomes could reduce a patient's opportunity to achieve longer-term benefit.</p>"
+
+EXAMPLE JSON OUTPUT:
+{"Classification": "Yes", "Score": "7/10", "Explanation": "good long term survival data, and also can be seen as short term trading catalyst."}
+
+EXAMPLE INPUT:
+
+Ticker: "MOVE"
+Title: "Nvidia GPU Deal Sends This Stock Soaring Over 114% After-Hours: Here's What Happened"
+Content: "N/A"
+
+EXAMPLE JSON OUTPUT:
+{"Classification": "No", "Score": "0/10", "Explanation": "it's only a market explanation, no specific catalyst news for the ticker."}
+
+EXAMPLE INPUT:
+
+Ticker: "BURU"
+Title: "Nuburu Announced That It Has Secured Operating Control Of Orbit S.r.l., A Revenue-generating Software-as-a-service Company Focused On Operational Resilience, Risk Intelligence, And Mission-critical Decision Support"
+Content: "N/A"
+
+EXAMPLE JSON OUTPUT:
+{"Classification": "Yes", "Score": "7/10", "Explanation": "good partnership news, but the company is still in early stage with no revenue yet, so there is risk for short term trading."}

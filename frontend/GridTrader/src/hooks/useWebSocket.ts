@@ -34,6 +34,10 @@ const CLIENT_ID = `gridtrader_${Date.now()}_${Math.random().toString(36).substr(
 const PROFILE_CACHE_KEY = 'gridtrader_profile_cache';
 const NEWS_CACHE_KEY = 'gridtrader_news_cache';
 const DATA_STATUS_KEY = 'gridtrader_data_status';
+const VERSION_CACHE_KEY = 'gridtrader_version_cache';
+
+// Version tracking type: symbol -> domain -> version
+export type VersionCache = Record<string, Record<string, number>>;
 
 // Helper functions for localStorage persistence
 function loadMapFromStorage<T>(key: string): Map<string, T> {
@@ -58,6 +62,26 @@ function saveMapToStorage<T>(key: string, map: Map<string, T>) {
   }
 }
 
+function loadVersionCacheFromStorage(): VersionCache {
+  try {
+    const stored = localStorage.getItem(VERSION_CACHE_KEY);
+    if (stored) {
+      return JSON.parse(stored);
+    }
+  } catch (e) {
+    console.warn('Failed to load version cache from localStorage:', e);
+  }
+  return {};
+}
+
+function saveVersionCacheToStorage(cache: VersionCache) {
+  try {
+    localStorage.setItem(VERSION_CACHE_KEY, JSON.stringify(cache));
+  } catch (e) {
+    console.warn('Failed to save version cache to localStorage:', e);
+  }
+}
+
 // Static profile cache - populated by static_update messages from BFF
 // Used by StockDetail to avoid re-fetching profile data
 // Persisted to localStorage across page refreshes
@@ -71,6 +95,9 @@ const staticNewsCache = loadMapFromStorage<any[]>(NEWS_CACHE_KEY);
 // 'pending' = queued for fetch, 'loading' = being fetched, 'ready' = data available
 export type DataStatus = 'pending' | 'loading' | 'ready' | 'none';
 const dataStatusMap = loadMapFromStorage<{ profile: DataStatus; news: DataStatus }>(DATA_STATUS_KEY);
+
+// Version cache - tracks version per (symbol, domain) for stale update detection
+let versionCache: VersionCache = loadVersionCacheFromStorage();
 
 /**
  * Get cached profile data for a symbol (from static_update stream or API fetch)
@@ -137,20 +164,61 @@ export function setDataStatus(symbol: string, type: 'profile' | 'news', status: 
   saveMapToStorage(DATA_STATUS_KEY, dataStatusMap);
 }
 
+/**
+ * Get cached version for a (symbol, domain) pair
+ */
+export function getCachedVersion(symbol: string, domain: string): number {
+  return versionCache[symbol]?.[domain] ?? 0;
+}
+
+/**
+ * Check if an incoming version is newer than cached version
+ * Returns true if incoming version is newer and should be applied
+ */
+export function isVersionNewer(symbol: string, domain: string, incomingVersion: number): boolean {
+  const cachedVersion = getCachedVersion(symbol, domain);
+  return incomingVersion > cachedVersion;
+}
+
+/**
+ * Update cached version for a (symbol, domain) pair
+ * Only updates if incoming version is actually newer
+ */
+export function updateCachedVersion(symbol: string, domain: string, version: number): boolean {
+  if (!isVersionNewer(symbol, domain, version)) {
+    return false; // Stale update, don't apply
+  }
+  if (!versionCache[symbol]) {
+    versionCache[symbol] = {};
+  }
+  versionCache[symbol][domain] = version;
+  saveVersionCacheToStorage(versionCache);
+  return true;
+}
+
+/**
+ * Get all cached versions for a symbol
+ */
+export function getSymbolVersions(symbol: string): Record<string, number> {
+  return versionCache[symbol] ?? {};
+}
+
 // Flag to track if caches have been reloaded to store
 let cacheReloadedToStore = false;
 
 /**
- * Clear all cached data (profile, news, status)
+ * Clear all cached data (profile, news, status, versions)
  * Call this from settings to manually reset caches
  */
 export function clearAllCaches() {
   staticProfileCache.clear();
   staticNewsCache.clear();
   dataStatusMap.clear();
+  versionCache = {};
   localStorage.removeItem(PROFILE_CACHE_KEY);
   localStorage.removeItem(NEWS_CACHE_KEY);
   localStorage.removeItem(DATA_STATUS_KEY);
+  localStorage.removeItem(VERSION_CACHE_KEY);
   // Reset the reload flag so cache can be reloaded on next page load
   cacheReloadedToStore = false;
   console.log('[WebSocket] All caches cleared');
@@ -159,10 +227,12 @@ export function clearAllCaches() {
 /**
  * Get cache statistics for display in settings
  */
-export function getCacheStats(): { profiles: number; news: number; total: number } {
+export function getCacheStats(): { profiles: number; news: number; versions: number; total: number } {
+  const versionCount = Object.keys(versionCache).length;
   return {
     profiles: staticProfileCache.size,
     news: staticNewsCache.size,
+    versions: versionCount,
     total: staticProfileCache.size + staticNewsCache.size,
   };
 }
@@ -349,25 +419,70 @@ function handleMessage(message: WebSocketMessage) {
 
     case 'static_update':
       // Patch static data only (preserves snapshot and state data)
-      // message.summary: { marketCap, float, hasNews, country, sector } - for RankList
-      // message.profile: full profile data - for StockDetail cache
-      // message.news: news articles array - for StockDetail news cache
+      // Versioned schema (v2):
+      // - message.domains: ['summary', 'profile', 'news'] - which domains are included
+      // - message.version: { summary: 3, profile: 2, news: 12 } - version per domain
+      // - message.summary: { marketCap, float, hasNews, country, sector } - for RankList
+      // - message.profile: full profile data - for StockDetail cache
+      // - message.news: news articles array - for StockDetail news cache
       if (message.symbol) {
-        // Patch summary data to entities (for RankList)
-        if (message.summary) {
-          store.patchStaticData(message.symbol, message.summary);
+        const symbol = message.symbol;
+        const domains: string[] = message.domains || [];
+        const versions: Record<string, number> = message.version || {};
+
+        // Process summary domain with version check
+        if (domains.includes('summary') && message.summary) {
+          const summaryVersion = versions.summary ?? 0;
+          if (updateCachedVersion(symbol, 'summary', summaryVersion)) {
+            store.patchStaticData(symbol, message.summary, summaryVersion);
+          } else {
+            console.debug(`[WebSocket] Skipping stale summary update for ${symbol}: v${summaryVersion}`);
+          }
         }
-        // Cache profile data for StockDetail (persisted to localStorage)
-        if (message.profile && Object.keys(message.profile).length > 0) {
-          staticProfileCache.set(message.symbol, message.profile);
-          saveMapToStorage(PROFILE_CACHE_KEY, staticProfileCache);
-          setDataStatus(message.symbol, 'profile', 'ready');
+
+        // Process profile domain with version check
+        if (domains.includes('profile') && message.profile && Object.keys(message.profile).length > 0) {
+          const profileVersion = versions.profile ?? 0;
+          if (updateCachedVersion(symbol, 'profile', profileVersion)) {
+            staticProfileCache.set(symbol, { ...message.profile, _version: profileVersion });
+            saveMapToStorage(PROFILE_CACHE_KEY, staticProfileCache);
+            setDataStatus(symbol, 'profile', 'ready');
+          } else {
+            console.debug(`[WebSocket] Skipping stale profile update for ${symbol}: v${profileVersion}`);
+          }
         }
-        // Cache news data for StockDetail (persisted to localStorage)
-        if (message.news && message.news.length > 0) {
-          staticNewsCache.set(message.symbol, message.news);
-          saveMapToStorage(NEWS_CACHE_KEY, staticNewsCache);
-          setDataStatus(message.symbol, 'news', 'ready');
+
+        // Process news domain with version check
+        if (domains.includes('news') && message.news) {
+          const newsVersion = versions.news ?? 0;
+          if (updateCachedVersion(symbol, 'news', newsVersion)) {
+            // Store news with version metadata
+            const newsWithVersion = message.news.map((n: any) => ({ ...n, _version: newsVersion }));
+            staticNewsCache.set(symbol, newsWithVersion);
+            saveMapToStorage(NEWS_CACHE_KEY, staticNewsCache);
+            setDataStatus(symbol, 'news', 'ready');
+            // Also update hasNews in store
+            store.patchStaticData(symbol, { hasNews: message.news.length > 0 }, newsVersion);
+          } else {
+            console.debug(`[WebSocket] Skipping stale news update for ${symbol}: v${newsVersion}`);
+          }
+        }
+
+        // Fallback for legacy format (no domains array)
+        if (domains.length === 0) {
+          if (message.summary) {
+            store.patchStaticData(symbol, message.summary);
+          }
+          if (message.profile && Object.keys(message.profile).length > 0) {
+            staticProfileCache.set(symbol, message.profile);
+            saveMapToStorage(PROFILE_CACHE_KEY, staticProfileCache);
+            setDataStatus(symbol, 'profile', 'ready');
+          }
+          if (message.news && message.news.length > 0) {
+            staticNewsCache.set(symbol, message.news);
+            saveMapToStorage(NEWS_CACHE_KEY, staticNewsCache);
+            setDataStatus(symbol, 'news', 'ready');
+          }
         }
       }
       break;

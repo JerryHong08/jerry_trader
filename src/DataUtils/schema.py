@@ -210,7 +210,7 @@ class NewsArticle(BaseModel):
             symbol=symbol,
             published_time=published_time,
             title=data.get("title", ""),
-            text=None,  # Moomoo doesn't provide body
+            text=data.get("text", ""),
             url=data.get("url", ""),
             sources=data.get("sources", "Moomoo"),
         )

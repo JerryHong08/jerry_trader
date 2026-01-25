@@ -26,7 +26,7 @@ dependencies = [
     "httpx[socks] (>=0.28.1,<0.29.0)",
     "bs4 (>=0.0.2,<0.0.3)",
     "databento (>=0.68.2,<0.69.0)",
-    "openai (>=2.15.0,<3.0.0)"
+    "openai (>=2.15.0,<3.0.0)",
 ]
 
 [tool.poetry]

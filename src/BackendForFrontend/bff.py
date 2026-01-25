@@ -168,6 +168,11 @@ class GridTraderBFF:
         self.STATIC_PENDING_SET = "static:pending"
         self.NEWS_PENDING_SET = "static:pending:news"  # News-only refetch
 
+        # Version tracking for static updates (symbol -> domain -> last_applied_version)
+        # Used to ignore stale updates with version <= last_applied_version
+        self._applied_versions: Dict[str, Dict[str, int]] = {}
+        self.VERSION_KEY_PREFIX = "static:version"  # Must match static_data_worker
+
         # Initialize chart data manager
         self.chart_manager = GridTraderChartDataManager(
             replay_date=replay_date,
@@ -769,8 +774,20 @@ class GridTraderBFF:
         Static updates are low-frequency, patch-only updates for:
         - Summary: marketCap, float, country, sector, hasNews (for RankList)
         - Profile: full company profile (for StockDetail caching)
+        - News: news articles (for StockDetail news cache)
 
-        These NEVER overwrite snapshot or state data.
+        Stream message schema (v2 - versioned):
+        {
+            "symbol": "XPON",
+            "update_type": "static",
+            "domains": ["summary", "profile", "news"],
+            "version": {"summary": 3, "profile": 2, "news": 12},
+            "timestamp": "2026-01-25T10:30:00-05:00"
+        }
+
+        Version rules:
+        - BFF ignores updates with version <= last_applied_version for each domain
+        - Frontend receives version alongside data to cache with version
         """
         logger.info("Starting async static stream listener...")
 
@@ -802,47 +819,88 @@ class GridTraderBFF:
                     for stream_name, message_list in messages:
                         for message_id, message_data in message_list:
                             symbol = message_data.get("symbol")
+                            if not symbol:
+                                self.r.xack(
+                                    self.STATIC_UPDATE_STREAM,
+                                    "gridtrader_bff_static_consumers",
+                                    message_id,
+                                )
+                                continue
 
-                            # Read the static summary data (for RankList)
-                            summary_key = f"{self.STATIC_SUMMARY_PREFIX}:{symbol}"
-                            summary_data = self.r.hgetall(summary_key)
+                            # Parse versioned schema
+                            update_type = message_data.get("update_type", "static")
+                            domains_json = message_data.get("domains", "[]")
+                            version_json = message_data.get("version", "{}")
+                            timestamp = message_data.get("timestamp")
 
-                            # Read the full profile data (for StockDetail caching)
-                            profile_key = f"{self.STATIC_PROFILE_PREFIX}:{symbol}"
-                            profile_data = self.r.hgetall(profile_key)
+                            try:
+                                domains = json.loads(domains_json)
+                                versions = json.loads(version_json)
+                            except json.JSONDecodeError:
+                                # Fallback for legacy format (fields_updated)
+                                fields_updated = message_data.get(
+                                    "fields_updated", "[]"
+                                )
+                                try:
+                                    fields = json.loads(fields_updated)
+                                except json.JSONDecodeError:
+                                    fields = []
+                                # Infer domains from legacy fields
+                                domains = []
+                                if any(
+                                    f in fields
+                                    for f in [
+                                        "marketCap",
+                                        "float",
+                                        "country",
+                                        "sector",
+                                        "hasNews",
+                                    ]
+                                ):
+                                    domains.append("summary")
+                                if "news" in fields or "hasNews" in fields:
+                                    domains.append("news")
+                                versions = {}  # No version tracking for legacy
 
-                            # Read news data (for StockDetail caching)
-                            news_ticker_key = f"{self.NEWS_TICKER_PREFIX}:{symbol}"
-                            news_ids = self.r.zrevrange(
-                                news_ticker_key, 0, 9
-                            )  # Top 10 news
-                            news_articles = []
-                            for idx, news_id in enumerate(news_ids):
-                                item_key = f"{self.NEWS_ITEM_PREFIX}:{news_id}"
-                                article = self.r.hgetall(item_key)
-                                if article:
-                                    # Transform to frontend format (consistent with REST API)
-                                    news_articles.append(
-                                        {
-                                            "id": f"{symbol}-news-{idx}",
-                                            "title": article.get("title", ""),
-                                            "source": article.get("sources", ""),
-                                            "publishedAt": article.get(
-                                                "published_time", ""
-                                            ),
-                                            "url": article.get("url", ""),
-                                            "summary": (
-                                                article.get("text", "")[:500]
-                                                if article.get("text")
-                                                else ""
-                                            ),
-                                            "isNew": False,
-                                        }
+                            # Check version freshness - skip stale updates
+                            if symbol not in self._applied_versions:
+                                self._applied_versions[symbol] = {}
+
+                            domains_to_process = []
+                            for domain in domains:
+                                incoming_version = versions.get(domain, 0)
+                                last_applied = self._applied_versions[symbol].get(
+                                    domain, 0
+                                )
+
+                                if incoming_version > last_applied:
+                                    domains_to_process.append(domain)
+                                    self._applied_versions[symbol][
+                                        domain
+                                    ] = incoming_version
+                                else:
+                                    logger.debug(
+                                        f"Skipping stale {domain} update for {symbol}: "
+                                        f"v{incoming_version} <= v{last_applied}"
                                     )
 
-                            if summary_data or profile_data or news_articles:
-                                # Parse summary data
-                                summary_parsed = {}
+                            if not domains_to_process:
+                                # All domains are stale, skip this message
+                                self.r.xack(
+                                    self.STATIC_UPDATE_STREAM,
+                                    "gridtrader_bff_static_consumers",
+                                    message_id,
+                                )
+                                continue
+
+                            # Read data for non-stale domains
+                            summary_parsed = {}
+                            profile_parsed = {}
+                            news_articles = []
+
+                            if "summary" in domains_to_process:
+                                summary_key = f"{self.STATIC_SUMMARY_PREFIX}:{symbol}"
+                                summary_data = self.r.hgetall(summary_key)
                                 for field, value in (summary_data or {}).items():
                                     if field in ["marketCap", "float"]:
                                         try:
@@ -853,12 +911,10 @@ class GridTraderBFF:
                                         summary_parsed[field] = value == "1"
                                     else:
                                         summary_parsed[field] = value
-                                logger.debug(
-                                    f"Static summary for {symbol}: {summary_parsed}"
-                                )
 
-                                # Parse profile data (for StockDetail caching)
-                                profile_parsed = {}
+                            if "profile" in domains_to_process:
+                                profile_key = f"{self.STATIC_PROFILE_PREFIX}:{symbol}"
+                                profile_data = self.r.hgetall(profile_key)
                                 for field, value in (profile_data or {}).items():
                                     if field in [
                                         "marketCap",
@@ -873,19 +929,65 @@ class GridTraderBFF:
                                     else:
                                         profile_parsed[field] = value
 
+                            if "news" in domains_to_process:
+                                news_ticker_key = f"{self.NEWS_TICKER_PREFIX}:{symbol}"
+                                news_ids = self.r.zrevrange(news_ticker_key, 0, 9)
+                                for idx, news_id in enumerate(news_ids):
+                                    item_key = f"{self.NEWS_ITEM_PREFIX}:{news_id}"
+                                    article = self.r.hgetall(item_key)
+                                    if article:
+                                        news_articles.append(
+                                            {
+                                                "id": f"{symbol}-news-{idx}",
+                                                "title": article.get("title", ""),
+                                                "source": article.get("sources", ""),
+                                                "publishedAt": article.get(
+                                                    "published_time", ""
+                                                ),
+                                                "url": article.get("url", ""),
+                                                "summary": (
+                                                    article.get("text", "")[:500]
+                                                    if article.get("text")
+                                                    else ""
+                                                ),
+                                                "isNew": False,
+                                            }
+                                        )
+
+                            if summary_parsed or profile_parsed or news_articles:
+                                # Build version info for processed domains only
+                                processed_versions = {
+                                    domain: versions.get(domain, 0)
+                                    for domain in domains_to_process
+                                }
+
                                 # Broadcast to all connected clients
                                 static_update = {
                                     "type": "static_update",
                                     "symbol": symbol,
-                                    "summary": summary_parsed,  # For RankList
-                                    "profile": profile_parsed,  # For StockDetail cache
-                                    "news": news_articles,  # For StockDetail news cache
-                                    "timestamp": message_data.get("timestamp"),
+                                    "domains": domains_to_process,
+                                    "version": processed_versions,
+                                    "summary": (
+                                        summary_parsed
+                                        if "summary" in domains_to_process
+                                        else None
+                                    ),
+                                    "profile": (
+                                        profile_parsed
+                                        if "profile" in domains_to_process
+                                        else None
+                                    ),
+                                    "news": (
+                                        news_articles
+                                        if "news" in domains_to_process
+                                        else None
+                                    ),
+                                    "timestamp": timestamp,
                                 }
 
                                 logger.info(
-                                    f"Static update: {symbol} - summary={list(summary_parsed.keys())}, "
-                                    f"profile={len(profile_parsed)} fields, news={len(news_articles)} articles"
+                                    f"Static update: {symbol} - domains={domains_to_process}, "
+                                    f"versions={processed_versions}"
                                 )
 
                                 for client_id in self.manager.active_connections:

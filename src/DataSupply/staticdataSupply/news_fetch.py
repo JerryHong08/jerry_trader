@@ -113,13 +113,13 @@ class NewsPersistence:
             return 0
 
         insert_sql = """
-        INSERT INTO news_events (news_id, symbol, published_at, fetched_at, source, title, summary, raw_json)
+        INSERT INTO news_events (news_id, symbol, published_at, fetched_at, source, title, summary, url)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (news_id) DO UPDATE SET
             fetched_at = EXCLUDED.fetched_at,
             title = EXCLUDED.title,
             summary = EXCLUDED.summary,
-            raw_json = EXCLUDED.raw_json
+            url = EXCLUDED.url
         """
 
         now = datetime.now(ZoneInfo("America/New_York"))
@@ -128,12 +128,6 @@ class NewsPersistence:
         for article in articles:
             # Generate stable news ID from URL
             news_id = hashlib.md5(article.url.encode()).hexdigest()[:16]
-
-            raw_json = {
-                "url": article.url,
-                "sources": article.sources,
-                "text": article.text if article.text else None,
-            }
 
             rows.append(
                 (
@@ -144,7 +138,7 @@ class NewsPersistence:
                     article.sources,
                     article.title,
                     article.text if article.text else None,
-                    json.dumps(raw_json),
+                    article.url,
                 )
             )
 
@@ -176,7 +170,7 @@ class NewsPersistence:
             return []
 
         select_sql = """
-        SELECT news_id, symbol, published_at, fetched_at, source, title, summary, raw_json
+        SELECT news_id, symbol, published_at, fetched_at, source, title, summary, url
         FROM news_events
         WHERE symbol = %s
         ORDER BY published_at DESC
@@ -193,11 +187,6 @@ class NewsPersistence:
 
                 articles = []
                 for row in rows:
-                    # raw_json is already a dict (psycopg auto-deserializes JSONB)
-                    raw_json = row[7] if row[7] else {}
-                    if isinstance(raw_json, str):
-                        raw_json = json.loads(raw_json)
-
                     articles.append(
                         {
                             "news_id": row[0],
@@ -207,7 +196,7 @@ class NewsPersistence:
                             "sources": row[4],
                             "title": row[5],
                             "text": row[6],
-                            "url": raw_json.get("url") if raw_json else None,
+                            "url": row[7],
                         }
                     )
                 return articles
@@ -238,6 +227,7 @@ class MoomooStockResolver:
         self.search_api = "/api/headfoot-search"
         self.news_api = "/quote-api/quote-v2/get-news-list"
         self.token_generator = MoomooQuoteToken()
+        self.waf_token = os.getenv("MOOMOO_WAF_TOKEN", "")
 
     def search_stock(
         self, symbol: str, lang: str = "en-us", site: str = "us"
@@ -416,6 +406,12 @@ class MoomooStockResolver:
                     articles = []
                     for item in news_data.get("list", []):
                         try:
+                            url = item.get("url", "")
+                            logger.debug(f"Fetching content for URL: {url}")
+                            if url:
+                                summary = self.fetch_content(url)
+                                item["text"] = summary
+
                             article = NewsArticle.from_momo_web_response(
                                 symbol.upper(), item
                             )
@@ -439,6 +435,68 @@ class MoomooStockResolver:
             logger.error(f"News request failed for {symbol}: {e}")
 
         return None
+
+    def fetch_content(self, url: str, timeout: int = 10) -> Optional[str]:
+        """
+        Fetch article content from a Moomoo news URL.
+
+        Args:
+            url: Article URL
+            timeout: Request timeout in seconds
+
+        Returns:
+            Article content text or None if fetch fails
+
+        Note:
+            - Handles URL transformation for news.moomoo.com/flash/ URLs
+            - Removes 'Read more' suffix from content
+        """
+        import httpx
+        from lxml import html
+
+        # Handle URL transformation: news.moomoo.com/flash -> www.moomoo.com/news/flash
+        if url.startswith("https://news.moomoo.com/flash/"):
+            url = url.replace(
+                "https://news.moomoo.com/flash/", "https://www.moomoo.com/news/flash/"
+            )
+            logger.debug(f"Transformed URL to: {url}")
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:146.0) Gecko/20100101 Firefox/146.0",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Sec-GPC": "1",
+            "Upgrade-Insecure-Requests": "1",
+            "Cache-Control": "no-cache",
+            "Cookie": f"wafToken={self.waf_token}; locale=en-us",
+        }
+
+        try:
+            resp = httpx.get(url, headers=headers, timeout=timeout)
+            resp.raise_for_status()
+
+            tree = html.fromstring(resp.text)
+            # Use XPath instead of cssselect to avoid additional dependency
+            content_divs = tree.xpath(
+                "//div[contains(@class, 'inner') and contains(@class, 'origin_content')]"
+            )
+
+            if not content_divs:
+                logger.warning(f"Could not find content div for URL: {url}")
+                return None
+
+            # Extract all text from the div and its descendants (mimics 'pup * text{}')
+            full_text = content_divs[0].text_content().strip()
+
+            # Remove 'Read more' at the end if present
+            if full_text.endswith("Read more"):
+                full_text = full_text[:-9].strip()
+
+            return full_text
+
+        except Exception as e:
+            logger.error(f"Failed to fetch content from {url}: {e}")
+            return None
 
 
 class API_NewsFetchers:
@@ -595,3 +653,45 @@ class API_NewsFetchers:
         except Exception as e:
             logger.error(f"Failed to fetch news for {symbol}: {e}")
             raise
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Fetch stock news articles")
+    parser.add_argument(
+        "--ticker", type=str, required=True, help="Stock ticker symbol (e.g., AAPL)"
+    )
+    parser.add_argument(
+        "--provider",
+        type=str,
+        choices=["momo", "fmp", "benzinga"],
+        default="momo",
+        help="News provider to fetch from",
+    )
+    parser.add_argument(
+        "--limit", type=int, default=5, help="Number of news articles to fetch"
+    )
+    parser.add_argument(
+        "--fetch-content", action="store_true", help="Fetch full article content"
+    )
+
+    args = parser.parse_args()
+    if args.provider == "fmp":
+        fetcher = API_NewsFetchers()
+        articles = fetcher.fetch_news_fmp(args.ticker, limit=args.limit)
+    elif args.provider == "benzinga":
+        fetcher = API_NewsFetchers()
+        articles = fetcher.fetch_news_benzinga(args.ticker, page_size=args.limit)
+    else:
+        fetcher = MoomooStockResolver()
+        articles = fetcher.get_news_momo(args.ticker, pageSize=args.limit)
+        # if args.fetch_content:
+        for i, article in enumerate(articles):
+            #         content = fetcher.fetch_content(article.url)
+            #         article.text = content
+            logger.debug(
+                f"Fetched content for article {i}: {article.text}\n"
+                f"url: {article.url}\n"
+                f"{'-'*40}\n"
+            )

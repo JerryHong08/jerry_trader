@@ -23,6 +23,7 @@ from typing import Optional
 from BackendForFrontend.bff import GridTraderBFF
 from ComputeEngine.snapshotProcessor import SnapshotProcessor
 from ComputeEngine.stateEngine import StateEngine
+from DataSupply.staticdataSupply.news_worker import NewsWorker
 from DataSupply.staticdataSupply.static_data_worker import StaticDataWorker
 from utils.logger import setup_logger
 
@@ -36,7 +37,8 @@ class GridTraderBackendStarter:
     Services:
     - SnapshotProcessor: Receives data, processes, stores to InfluxDB and Redis
     - StateEngine: Computes ticker states and writes to state stream
-    - StaticDataWorker: Fetches static data (fundamentals, float, news) for subscribed tickers
+    - StaticDataWorker: Fetches static data (fundamentals, float) for subscribed tickers
+    - NewsWorker: Fetches and caches news data for subscribed tickers
     - GridTraderBFF: Backend For Frontend (FastAPI + WebSocket server)
     """
 
@@ -61,7 +63,9 @@ class GridTraderBackendStarter:
         self._running = False
         self._services = []
         self._static_worker_task = None
+        self._news_worker_task = None
         self._event_loop = None
+        self._news_event_loop = None
 
         # Initialize services
         self._init_services()
@@ -116,10 +120,18 @@ class GridTraderBackendStarter:
             replay_date=self.replay_date,
             poll_interval=1.0,
             batch_size=5,
+        )
+        self._services.append(("StaticDataWorker", self.static_worker))
+
+        # Initialize NewsWorker
+        self.news_worker = NewsWorker(
+            replay_date=self.replay_date,
+            poll_interval=1.0,
+            batch_size=5,
             news_limit=5,
             news_recency_hours=24.0,
         )
-        self._services.append(("StaticDataWorker", self.static_worker))
+        self._services.append(("NewsWorker", self.news_worker))
 
         logger.info(f"Initialized {len(self._services)} services")
 
@@ -147,6 +159,13 @@ class GridTraderBackendStarter:
         if self._static_worker_task:
             self._static_worker_task.cancel()
 
+        if hasattr(self, "news_worker") and self.news_worker:
+            self.news_worker.stop()
+            logger.info("NewsWorker stopped")
+
+        if self._news_worker_task:
+            self._news_worker_task.cancel()
+
         if hasattr(self, "bff") and self.bff:
             self.bff.cleanup()
 
@@ -171,6 +190,25 @@ class GridTraderBackendStarter:
         thread.start()
         return thread
 
+    def _start_news_worker_in_thread(self):
+        """Start news worker in a separate thread with its own event loop."""
+
+        def run_news_worker():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            self._news_event_loop = loop
+            try:
+                self._news_worker_task = loop.create_task(self.news_worker.start())
+                loop.run_until_complete(self._news_worker_task)
+            except asyncio.CancelledError:
+                pass
+            finally:
+                loop.close()
+
+        thread = Thread(target=run_news_worker, daemon=True)
+        thread.start()
+        return thread
+
     def run(self, debug: bool = False):
         """Run all backend services."""
         logger.info("=" * 70)
@@ -189,12 +227,16 @@ class GridTraderBackendStarter:
         logger.info("SnapshotProcessor started")
 
         # Start StateEngine (it creates its own thread internally)
-        self.state_engine.start()
+        # self.state_engine.start()
         logger.info("StateEngine started")
 
         # Start StaticDataWorker (async, runs in separate thread)
         self._start_static_worker_in_thread()
         logger.info("StaticDataWorker started")
+
+        # Start NewsWorker (async, runs in separate thread)
+        self._start_news_worker_in_thread()
+        logger.info("NewsWorker started")
 
         # Run BFF in the main thread (blocking)
         if self.bff:

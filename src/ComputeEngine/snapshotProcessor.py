@@ -569,6 +569,7 @@ class SnapshotProcessor:
 
     # Redis key for static data pending queue
     STATIC_PENDING_SET = "static:pending"
+    NEWS_PENDING_SET = "static:pending:news"  # News-only refetch
 
     def _update_subscription_set(
         self, current_top_n: pl.DataFrame, timestamp: datetime
@@ -590,6 +591,7 @@ class SnapshotProcessor:
                 new_subscriptions.append(ticker)
                 # Queue for static data fetch (fundamentals, float, news)
                 self.r.sadd(self.STATIC_PENDING_SET, ticker)
+                self.r.sadd(self.NEWS_PENDING_SET, ticker)
                 logger.debug(
                     f"_update_subscription_set - New subscription: {ticker} at {timestamp}"
                 )

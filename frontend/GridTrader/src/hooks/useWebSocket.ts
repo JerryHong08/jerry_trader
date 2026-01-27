@@ -11,7 +11,7 @@
  */
 
 import { useEffect, useCallback, useState, useMemo } from 'react';
-import type { RankItem, TickerState } from '../types';
+import type { RankItem, TickerState, NewsArticle } from '../types';
 import {
   useMarketDataStore,
   type LWSeriesData,
@@ -36,7 +36,7 @@ const NEWS_CACHE_KEY = 'gridtrader_news_cache';
 const DATA_STATUS_KEY = 'gridtrader_data_status';
 const VERSION_CACHE_KEY = 'gridtrader_version_cache';
 
-// Version tracking type: symbol -> domain -> version
+// Version tracking type: symbol -> domain -> version (summary/profile)
 export type VersionCache = Record<string, Record<string, number>>;
 
 // Helper functions for localStorage persistence
@@ -87,7 +87,7 @@ function saveVersionCacheToStorage(cache: VersionCache) {
 // Persisted to localStorage across page refreshes
 const staticProfileCache = loadMapFromStorage<Record<string, any>>(PROFILE_CACHE_KEY);
 
-// Static news cache - populated by static_update messages from BFF
+// Static news cache - populated by news_article messages from BFF
 // Persisted to localStorage across page refreshes
 const staticNewsCache = loadMapFromStorage<any[]>(NEWS_CACHE_KEY);
 
@@ -342,6 +342,15 @@ const stockDetailHandlers = new Map<
   }
 >();
 
+// News update subscribers
+type NewsUpdatePayload = { symbol: string; article: NewsArticle; articles: NewsArticle[] };
+const newsUpdateHandlers = new Set<(payload: NewsUpdatePayload) => void>();
+
+export function subscribeNewsUpdates(handler: (payload: NewsUpdatePayload) => void) {
+  newsUpdateHandlers.add(handler);
+  return () => newsUpdateHandlers.delete(handler);
+}
+
 function registerStockDetailHandler(
   ticker: string,
   handlers: { onDetail: (data: any) => void; onError: (data: any) => void }
@@ -420,11 +429,11 @@ function handleMessage(message: WebSocketMessage) {
     case 'static_update':
       // Patch static data only (preserves snapshot and state data)
       // Versioned schema (v2):
-      // - message.domains: ['summary', 'profile', 'news'] - which domains are included
-      // - message.version: { summary: 3, profile: 2, news: 12 } - version per domain
+      // - message.domains: ['summary', 'profile'] - which domains are included
+      // - message.version: { summary: 3, profile: 2 } - version per domain
       // - message.summary: { marketCap, float, hasNews, country, sector } - for RankList
       // - message.profile: full profile data - for StockDetail cache
-      // - message.news: news articles array - for StockDetail news cache
+      // Note: News updates are now delivered via 'news_article' messages.
       if (message.symbol) {
         const symbol = message.symbol;
         const domains: string[] = message.domains || [];
@@ -452,22 +461,6 @@ function handleMessage(message: WebSocketMessage) {
           }
         }
 
-        // Process news domain with version check
-        if (domains.includes('news') && message.news) {
-          const newsVersion = versions.news ?? 0;
-          if (updateCachedVersion(symbol, 'news', newsVersion)) {
-            // Store news with version metadata
-            const newsWithVersion = message.news.map((n: any) => ({ ...n, _version: newsVersion }));
-            staticNewsCache.set(symbol, newsWithVersion);
-            saveMapToStorage(NEWS_CACHE_KEY, staticNewsCache);
-            setDataStatus(symbol, 'news', 'ready');
-            // Also update hasNews in store
-            store.patchStaticData(symbol, { hasNews: message.news.length > 0 }, newsVersion);
-          } else {
-            console.debug(`[WebSocket] Skipping stale news update for ${symbol}: v${newsVersion}`);
-          }
-        }
-
         // Fallback for legacy format (no domains array)
         if (domains.length === 0) {
           if (message.summary) {
@@ -478,11 +471,41 @@ function handleMessage(message: WebSocketMessage) {
             saveMapToStorage(PROFILE_CACHE_KEY, staticProfileCache);
             setDataStatus(symbol, 'profile', 'ready');
           }
-          if (message.news && message.news.length > 0) {
-            staticNewsCache.set(symbol, message.news);
-            saveMapToStorage(NEWS_CACHE_KEY, staticNewsCache);
-            setDataStatus(symbol, 'news', 'ready');
-          }
+        }
+      }
+      break;
+
+    case 'news_article':
+      if (message.symbol && message.article) {
+        const symbol = message.symbol as string;
+        const incoming = message.article as Record<string, any>;
+
+        const article: NewsArticle = {
+          id: incoming.id || `${symbol}-news-${Date.now()}`,
+          title: incoming.title || '',
+          source: incoming.source || incoming.sources || '',
+          publishedAt: incoming.publishedAt || incoming.published_time || '',
+          url: incoming.url || '',
+          summary: incoming.summary || incoming.text || '',
+          isNew: true,
+        };
+
+        const existing = (staticNewsCache.get(symbol) || []) as NewsArticle[];
+        const hasDuplicate = existing.some(
+          (item) => item.id === article.id || (article.url && item.url === article.url)
+        );
+
+        if (!hasDuplicate) {
+          const normalizedExisting = existing.map((item) => ({ ...item, isNew: false }));
+          const updated = [article, ...normalizedExisting].slice(0, 50);
+          staticNewsCache.set(symbol, updated);
+          saveMapToStorage(NEWS_CACHE_KEY, staticNewsCache);
+          setDataStatus(symbol, 'news', 'ready');
+          store.patchStaticData(symbol, { hasNews: true });
+
+          newsUpdateHandlers.forEach((handler) => {
+            handler({ symbol, article, articles: updated });
+          });
         }
       }
       break;

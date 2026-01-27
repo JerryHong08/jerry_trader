@@ -4,7 +4,7 @@ import type { ModuleProps, NewsArticle, StockDetailView } from '../types';
 import { SymbolSearch } from './common/SymbolSearch';
 import { useBackendTimestamp } from '../hooks/useBackendTimestamps';
 import { useMarketDataStore } from '../stores/marketDataStore';
-import { getCachedProfile, getCachedNews, getDataStatus, setCachedProfile, setCachedNews } from '../hooks/useWebSocket';
+import { getCachedProfile, getCachedNews, setCachedProfile, setCachedNews, setDataStatus, subscribeNewsUpdates } from '../hooks/useWebSocket';
 
 // Get patchStaticData action for updating RankList when profile is fetched
 const patchStaticData = (symbol: string, data: { float?: number; marketCap?: number; hasNews?: boolean }) => {
@@ -73,13 +73,17 @@ const fetchStockProfile = async (symbol: string): Promise<StockFundamentals | nu
 };
 
 // Fetch stock news from backend
-const fetchStockNews = async (symbol: string, limit: number = 10, refresh: boolean = false): Promise<NewsArticle[]> => {
+const fetchStockNews = async (
+  symbol: string,
+  limit: number = 10,
+  refresh: boolean = false
+): Promise<{ articles: NewsArticle[]; queued: boolean }> => {
   try {
     const url = `${BFF_HTTP_URL}/api/stock/${symbol}/news?limit=${limit}${refresh ? '&refresh=true' : ''}`;
     const response = await fetch(url);
     if (!response.ok) {
       console.warn(`Failed to fetch news for ${symbol}: ${response.status}`);
-      return [];
+      return { articles: [], queued: false };
     }
     const responseData = await response.json();
 
@@ -87,7 +91,7 @@ const fetchStockNews = async (symbol: string, limit: number = 10, refresh: boole
     const articles: BackendNewsArticle[] = responseData.news || [];
 
     // Transform backend format to frontend NewsArticle format
-    return articles.map((article, index) => ({
+    const mapped = articles.map((article, index) => ({
       id: `${symbol}-news-${index}`,
       title: article.title,
       source: article.sources,
@@ -96,9 +100,11 @@ const fetchStockNews = async (symbol: string, limit: number = 10, refresh: boole
       summary: article.text || '',
       isNew: false, // Could be determined by comparing with last fetch timestamp
     }));
+
+    return { articles: mapped, queued: Boolean(responseData.queued) };
   } catch (error) {
     console.error(`Error fetching news for ${symbol}:`, error);
-    return [];
+    return { articles: [], queued: false };
   }
 };
 
@@ -247,6 +253,7 @@ export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChan
     if (!symbol) return;
     if (activeView !== 'news') return;
 
+
     // Helper to normalize news format (handle both old and new cache formats)
     const normalizeNews = (articles: any[]): NewsArticle[] => {
       return articles.map((article, index) => ({
@@ -279,21 +286,49 @@ export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChan
     handleFetchNews(false);
   }, [symbol, activeView]);
 
+  // Subscribe to real-time news article updates
+  useEffect(() => {
+    if (!symbol) return;
+
+    const unsubscribe = subscribeNewsUpdates(({ symbol: updateSymbol, articles }) => {
+      if (updateSymbol !== symbol) return;
+
+      newsCache.current.set(updateSymbol, articles);
+      if (activeView === 'news') {
+        setNews(articles);
+      }
+      setLoadingNewsFor(prev => (prev === updateSymbol ? null : prev));
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [symbol, activeView]);
+
   const handleFetchNews = useCallback(async (refresh: boolean = false) => {
     if (!symbol) return;
     const fetchingSymbol = symbol; // Capture symbol at start
     setLoadingNewsFor(fetchingSymbol);
+    setDataStatus(fetchingSymbol, 'news', refresh ? 'pending' : 'loading');
     const count = parseInt(newsCount) || 10;
     const clampedCount = Math.min(Math.max(count, 1), 50);
-    const articles = await fetchStockNews(fetchingSymbol, clampedCount, refresh);
-    newsCache.current.set(fetchingSymbol, articles); // Local cache
-    setCachedNews(fetchingSymbol, articles); // Global persistent cache
-    setNews(articles);
+    const { articles, queued } = await fetchStockNews(fetchingSymbol, clampedCount, refresh);
+    if (!refresh) {
+      newsCache.current.set(fetchingSymbol, articles); // Local cache
+      setCachedNews(fetchingSymbol, articles); // Global persistent cache
+      setNews(articles);
+      setDataStatus(fetchingSymbol, 'news', queued ? 'pending' : 'ready');
+    } else {
+      // Refresh is async-only now; backend queues fetch and returns no articles
+      setDataStatus(fetchingSymbol, 'news', 'pending');
+    }
 
-    // Also update RankList store with hasNews status
-    patchStaticData(fetchingSymbol, {
-      hasNews: articles.length > 0,
-    });
+    // Also update RankList store with hasNews status (avoid overwriting on async refresh)
+    if (!refresh && !queued) {
+      patchStaticData(fetchingSymbol, {
+        hasNews: articles.length > 0,
+      });
+    }
 
     // Only clear loading if still loading this symbol
     setLoadingNewsFor(prev => prev === fetchingSymbol ? null : prev);
@@ -490,38 +525,17 @@ export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChan
                   ) : (
                     <RefreshCw className="w-4 h-4" />
                   )}
-                  {isLoadingNews ? 'Loading...' : 'Fetch News'}
+                  {isLoadingNews ? 'Loading...' : 'Request News'}
                 </button>
                 <button
                   onClick={() => handleFetchNews(true)}
                   disabled={isLoadingNews}
-                  className="flex items-center gap-2 px-3 py-1.5 bg-orange-600 hover:bg-orange-700 disabled:bg-zinc-700 disabled:cursor-not-allowed transition-colors text-sm"
-                  title="Trigger backend to refresh news from sources"
+                  className="flex items-center gap-2 px-4 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:bg-zinc-700 disabled:cursor-not-allowed transition-colors text-sm"
+                  title="Trigger backend to refresh news asynchronously"
                 >
                   <RefreshCw className="w-4 h-4" />
-                  Refresh
+                  Refresh Feed
                 </button>
-                {/* Data source indicator */}
-                {(() => {
-                  const statusInfo = getDataStatus(symbol);
-                  const newsStatus = statusInfo?.news;
-                  if (newsStatus === 'loading' || newsStatus === 'pending') {
-                    return (
-                      <span className="text-xs text-yellow-500 flex items-center gap-1" title="Fetching from backend...">
-                        <Loader2 className="w-3 h-3 animate-spin" />
-                        Fetching...
-                      </span>
-                    );
-                  }
-                  if (newsStatus === 'ready') {
-                    return (
-                      <span className="text-xs text-green-500" title="Data from WebSocket push cache">
-                        ● Cached
-                      </span>
-                    );
-                  }
-                  return null;
-                })()}
               </div>
             </div>
 
@@ -529,7 +543,7 @@ export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChan
             <div className="space-y-3">
               {news.length === 0 && !isLoadingNews && (
                 <div className="text-center text-gray-500 text-sm py-8">
-                  Click "Fetch News" to load articles
+                  Click "Request News" to queue a fetch and stream results
                 </div>
               )}
 

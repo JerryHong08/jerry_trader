@@ -1,16 +1,20 @@
 """
 Docstring for DataSupply.snapshotDataSupply.news_fetch
 News Fetch module to get latest news from different providers.
+
+- Async methods: get_news_momo_async(), fetch_news_benzinga_async() - for streaming
 """
 
+import asyncio
 import hashlib
 import json
 import os
 import time
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import AsyncGenerator, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
+import httpx
 import psycopg
 import requests
 from dotenv import load_dotenv
@@ -42,7 +46,7 @@ class NewsPersistence:
             source TEXT,
             title TEXT NOT NULL,
             summary TEXT,
-            raw_json JSONB
+            url TEXT
         )
     """
 
@@ -78,7 +82,7 @@ class NewsPersistence:
             source TEXT,
             title TEXT NOT NULL,
             summary TEXT,
-            raw_json JSONB
+            url TEXT
         );
 
         CREATE INDEX IF NOT EXISTS idx_news_events_symbol ON news_events(symbol);
@@ -115,11 +119,7 @@ class NewsPersistence:
         insert_sql = """
         INSERT INTO news_events (news_id, symbol, published_at, fetched_at, source, title, summary, url)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (news_id) DO UPDATE SET
-            fetched_at = EXCLUDED.fetched_at,
-            title = EXCLUDED.title,
-            summary = EXCLUDED.summary,
-            url = EXCLUDED.url
+        ON CONFLICT (news_id) DO NOTHING
         """
 
         now = datetime.now(ZoneInfo("America/New_York"))
@@ -203,18 +203,6 @@ class NewsPersistence:
         except Exception as e:
             logger.error(f"Failed to get news articles for {symbol}: {e}")
             return []
-
-
-# Global persistence instance
-_news_persistence: Optional[NewsPersistence] = None
-
-
-def get_news_persistence() -> NewsPersistence:
-    """Get or create the global news persistence instance."""
-    global _news_persistence
-    if _news_persistence is None:
-        _news_persistence = NewsPersistence()
-    return _news_persistence
 
 
 class MoomooStockResolver:
@@ -338,25 +326,37 @@ class MoomooStockResolver:
 
         return None
 
-    def get_news_momo(
-        self, symbol: str, pageSize: int = 6, **kwargs
-    ) -> Optional[List[NewsArticle]]:
+    # ============================================================================
+    # Async Methods for Streaming
+    # ============================================================================
+
+    async def get_news_momo_async(
+        self,
+        symbol: str,
+        pageSize: int = 6,
+        content_limiter=None,
+        **kwargs,
+    ) -> AsyncGenerator[NewsArticle, None]:
         """
-        Get news for a stock
+        Async generator that yields Moomoo news articles one by one.
+
+        First fetches the news list, then yields each article.
+        Content is fetched separately with rate limiting.
 
         Args:
             symbol: Stock symbol
             pageSize: Number of news items
+            content_limiter: Optional AsyncRateLimiter for content fetching
             **kwargs: Additional parameters for news API
 
-        Returns:
-            List of NewsArticle objects or None
+        Yields:
+            NewsArticle objects one at a time
         """
-        # 1. Get stock info
-        stock_info = self.get_stock_info(symbol)
+        # 1. Get stock info (sync call, can be cached in future)
+        stock_info = await asyncio.to_thread(self.get_stock_info, symbol)
         if not stock_info:
             logger.error(f"Could not find stock info for {symbol}")
-            return None
+            return
 
         # 2. Prepare parameters for news API
         params = {
@@ -367,7 +367,6 @@ class MoomooStockResolver:
             "pageSize": pageSize,
         }
 
-        # Add optional timestamp
         if "_" in kwargs:
             params["_"] = kwargs["_"]
         else:
@@ -375,7 +374,6 @@ class MoomooStockResolver:
 
         # 3. Generate quote-token
         quote_token = self.token_generator.generate_quote_token(params)
-        logger.debug(f"Generated quote-token for {symbol}: {quote_token}")
 
         # 4. Prepare headers
         headers = {
@@ -384,61 +382,58 @@ class MoomooStockResolver:
             "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "accept": "application/json, text/plain, */*",
             "accept-language": "en-US,en;q=0.9",
-            "sec-ch-ua": '"Chromium";v="142", "Google Chrome";v="142"',
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
-            "sec-fetch-dest": "empty",
-            "sec-fetch-mode": "cors",
-            "sec-fetch-site": "same-origin",
         }
 
-        # 5. Make the request
+        # 5. Fetch news list asynchronously
         try:
             url = self.base_url + self.news_api
-            response = requests.get(url, params=params, headers=headers, timeout=10)
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    url, params=params, headers=headers, timeout=10
+                )
 
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("code") == 0:
-                    news_data = data.get("data", {})
-
-                    # Transform into NewsArticle objects
-                    articles = []
-                    for item in news_data.get("list", []):
-                        try:
-                            url = item.get("url", "")
-                            logger.debug(f"Fetching content for URL: {url}")
-                            if url:
-                                summary = self.fetch_content(url)
-                                item["text"] = summary
-
-                            article = NewsArticle.from_momo_web_response(
-                                symbol.upper(), item
-                            )
-                            articles.append(article)
-                        except Exception as e:
-                            logger.error(
-                                f"Parse news data error: {e}, raw data: {item}"
-                            )
-                            continue
-
-                    logger.info(
-                        f"Successfully fetched {len(articles)} news articles from Moomoo"
-                    )
-                    return articles
-                else:
-                    logger.error(f"News API error: {data.get('message')}")
-            else:
+            if response.status_code != 200:
                 logger.error(f"HTTP {response.status_code}: {response.text[:200]}")
+                return
+
+            data = response.json()
+            if data.get("code") != 0:
+                logger.error(f"News API error: {data.get('message')}")
+                return
+
+            news_data = data.get("data", {})
+            news_list = news_data.get("list", [])
+
+            logger.info(f"Fetched {len(news_list)} news items from Moomoo for {symbol}")
+
+            # 6. Yield each article, fetching content individually
+            for item in news_list:
+                try:
+                    article_url = item.get("url", "")
+
+                    # Fetch content with rate limiting if available
+                    if article_url:
+                        if content_limiter:
+                            async with content_limiter:
+                                content = await self._fetch_content_async(article_url)
+                        else:
+                            content = await self._fetch_content_async(article_url)
+                        item["text"] = content
+
+                    article = NewsArticle.from_momo_web_response(symbol.upper(), item)
+                    yield article
+
+                except Exception as e:
+                    logger.error(f"Parse news data error: {e}, raw data: {item}")
+                    continue
 
         except Exception as e:
             logger.error(f"News request failed for {symbol}: {e}")
+            raise
 
-        return None
-
-    def fetch_content(self, url: str, timeout: int = 10) -> Optional[str]:
+    async def _fetch_content_async(self, url: str, timeout: int = 10) -> Optional[str]:
         """
-        Fetch article content from a Moomoo news URL.
+        Async version of fetch_content.
 
         Args:
             url: Article URL
@@ -446,20 +441,17 @@ class MoomooStockResolver:
 
         Returns:
             Article content text or None if fetch fails
-
-        Note:
-            - Handles URL transformation for news.moomoo.com/flash/ URLs
-            - Removes 'Read more' suffix from content
         """
-        import httpx
         from lxml import html
 
-        # Handle URL transformation: news.moomoo.com/flash -> www.moomoo.com/news/flash
+        # Handle URL transformation
         if url.startswith("https://news.moomoo.com/flash/"):
             url = url.replace(
                 "https://news.moomoo.com/flash/", "https://www.moomoo.com/news/flash/"
             )
-            logger.debug(f"Transformed URL to: {url}")
+            logger.debug(
+                f"Transformed URL from news.moomoo.com/flash to www.moomoo.com/news/flash."
+            )
 
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:146.0) Gecko/20100101 Firefox/146.0",
@@ -472,11 +464,11 @@ class MoomooStockResolver:
         }
 
         try:
-            resp = httpx.get(url, headers=headers, timeout=timeout)
-            resp.raise_for_status()
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(url, headers=headers, timeout=timeout)
+                resp.raise_for_status()
 
             tree = html.fromstring(resp.text)
-            # Use XPath instead of cssselect to avoid additional dependency
             content_divs = tree.xpath(
                 "//div[contains(@class, 'inner') and contains(@class, 'origin_content')]"
             )
@@ -485,12 +477,14 @@ class MoomooStockResolver:
                 logger.warning(f"Could not find content div for URL: {url}")
                 return None
 
-            # Extract all text from the div and its descendants (mimics 'pup * text{}')
             full_text = content_divs[0].text_content().strip()
 
-            # Remove 'Read more' at the end if present
             if full_text.endswith("Read more"):
                 full_text = full_text[:-9].strip()
+
+            logger.info(
+                f"_fetch_content_async - Successfully fetched moomoo article content"
+            )
 
             return full_text
 
@@ -564,15 +558,20 @@ class API_NewsFetchers:
             logger.error(f"Failed to fetch news for {symbol}: {e}")
             raise
 
-    def fetch_news_benzinga(
+    # ============================================================================
+    # Async Methods for Streaming
+    # ============================================================================
+
+    async def fetch_news_benzinga_async(
         self,
         symbol: str,
         page_size: int = 5,
         display_output: str = "full",
         timeout: int = 10,
-    ) -> List[NewsArticle]:
+    ) -> AsyncGenerator[NewsArticle, None]:
         """
         Fetch News from Benzinga API
+        Async generator that yields Benzinga news articles one by one.
 
         Args:
             symbol: Stock symbol (e.g., 'AAPL')
@@ -580,14 +579,18 @@ class API_NewsFetchers:
             display_output: 'full' or 'headline' (default: 'full')
             timeout: Connection timeout in seconds
 
-        Returns:
-            List of NewsArticle objects
+
+        Yields:
+            NewsArticle objects one at a time
 
         Example (in curl):
             curl --request GET \
             --url 'https://api.benzinga.com/api/v2/news?token={BENZINGA_API_KEY}&pageSize=5&displayOutput=full&tickers=AAPL' \
             --header 'accept: application/json'
         """
+        headers = {
+            "Accept": "application/json",
+        }
         if not self.BENZINGA_API_KEY:
             logger.error("BENZINGA_API_KEY not found in environment variables")
             raise ValueError("BENZINGA_API_KEY is required")
@@ -601,17 +604,20 @@ class API_NewsFetchers:
 
         try:
             logger.info(
-                f"Start fetching {symbol} news data using Benzinga API, page_size={page_size}"
+                f"Start fetching {symbol} news data using Benzinga API (async), page_size={page_size}"
             )
 
-            response = self.session.get(
-                self.BENZINGA_BASE_URL, params=params, timeout=timeout
-            )
-            response.raise_for_status()
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    self.BENZINGA_BASE_URL,
+                    params=params,
+                    headers=headers,
+                    timeout=timeout,
+                )
+                response.raise_for_status()
 
-            data = response.json()
+            data = json.loads(response.text)
 
-            # Check if response is a list
             if not isinstance(data, list):
                 logger.error(f"Unexpected API response format: {type(data)}")
                 raise ValueError(
@@ -621,37 +627,35 @@ class API_NewsFetchers:
             # Check if any results were returned
             if len(data) == 0:
                 logger.warning(f"No news found for {symbol}")
-                return []
+                return
 
-            # Transform into NewsArticle objects
-            articles = []
+            logger.info(f"Fetched {len(data)} news items from Benzinga for {symbol}")
+
+            # Yield each article
             for item in data:
                 try:
                     article = NewsArticle.from_benzinga_api_response(
                         symbol.upper(), item
                     )
-                    articles.append(article)
+                    yield article
                 except Exception as e:
                     logger.error(f"Parse news data error: {e}, raw data: {item}")
                     continue
 
-            logger.info(
-                f"Successfully fetched {len(articles)} news articles from Benzinga"
-            )
-            return articles
-
-        except requests.exceptions.Timeout:
+        except httpx.TimeoutException:
             logger.error(f"Request timeout for {symbol} after {timeout}s")
             raise
-        except requests.exceptions.HTTPError as e:
+        except httpx.HTTPStatusError as e:
             logger.error(f"HTTP error fetching news for {symbol}: {e}")
-            if response.status_code == 401:
+            if e.response.status_code == 401:
                 logger.error(
                     "Invalid Benzinga API token. Please check BENZINGA_API_KEY"
                 )
             raise
         except Exception as e:
-            logger.error(f"Failed to fetch news for {symbol}: {e}")
+            logger.error(
+                f"fetch_news_benzinga_async - Failed to fetch news for {symbol}: {e}"
+            )
             raise
 
 
@@ -682,10 +686,10 @@ if __name__ == "__main__":
         articles = fetcher.fetch_news_fmp(args.ticker, limit=args.limit)
     elif args.provider == "benzinga":
         fetcher = API_NewsFetchers()
-        articles = fetcher.fetch_news_benzinga(args.ticker, page_size=args.limit)
+        articles = fetcher.fetch_news_benzinga_async(args.ticker, page_size=args.limit)
     else:
         fetcher = MoomooStockResolver()
-        articles = fetcher.get_news_momo(args.ticker, pageSize=args.limit)
+        articles = fetcher.get_news_momo_async(args.ticker, pageSize=args.limit)
         # if args.fetch_content:
         for i, article in enumerate(articles):
             #         content = fetcher.fetch_content(article.url)

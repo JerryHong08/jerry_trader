@@ -159,6 +159,9 @@ class GridTraderBFF:
         self.SNAPSHOT_STREAM_NAME = f"market_snapshot_processed:{self.date_suffix}"
         self.STATE_STREAM_NAME = f"movers_state:{self.date_suffix}"
         self.STATIC_UPDATE_STREAM = "static_update_stream"
+        self.NEWS_ARTICLE_STREAM = (
+            "news_article_stream"  # New - per-article notifications
+        )
         self.STATIC_SUMMARY_PREFIX = "static:ticker:summary"
         self.STATIC_PROFILE_PREFIX = "static:ticker:profile"
         self.NEWS_TICKER_PREFIX = "news:ticker"
@@ -171,7 +174,9 @@ class GridTraderBFF:
         # Version tracking for static updates (symbol -> domain -> last_applied_version)
         # Used to ignore stale updates with version <= last_applied_version
         self._applied_versions: Dict[str, Dict[str, int]] = {}
-        self.VERSION_KEY_PREFIX = "static:version"  # Must match static_data_worker
+        self.VERSION_KEY_PREFIX = (
+            f"static:version:{self.date_suffix}"  # Must match static_data_worker
+        )
 
         # Initialize chart data manager
         self.chart_manager = GridTraderChartDataManager(
@@ -187,6 +192,7 @@ class GridTraderBFF:
         self._snapshot_task = None
         self._state_task = None
         self._static_task = None
+        self._article_task = None  # New - article stream listener
 
         # Create FastAPI app with lifespan
         @asynccontextmanager
@@ -202,6 +208,9 @@ class GridTraderBFF:
                 )
             self._state_task = asyncio.create_task(self._state_stream_listener())
             self._static_task = asyncio.create_task(self._static_stream_listener())
+            self._article_task = asyncio.create_task(
+                self._article_stream_listener()
+            )  # New
 
             yield
 
@@ -214,6 +223,8 @@ class GridTraderBFF:
                 self._state_task.cancel()
             if self._static_task:
                 self._static_task.cancel()
+            if self._article_task:
+                self._article_task.cancel()
             self.cleanup()
 
         self.app = FastAPI(
@@ -382,6 +393,14 @@ class GridTraderBFF:
                     f"News refresh requested for {ticker_upper}, queued for news fetch"
                 )
 
+                return {
+                    "ticker": ticker_upper,
+                    "news": [],
+                    "count": 0,
+                    "queued": True,  # Refresh is always async
+                    "timestamp": datetime.now().isoformat(),
+                }
+
             # Get news IDs sorted by timestamp (most recent first)
             news_ids = self.r.zrevrange(ticker_key, 0, limit - 1)
 
@@ -393,7 +412,7 @@ class GridTraderBFF:
                     articles.append(article)
 
             # If no news found, queue for news-only fetch (not full static)
-            if not articles and not refresh:
+            if not articles:
                 self.r.sadd(self.NEWS_PENDING_SET, ticker_upper)
                 logger.info(f"News not found for {ticker_upper}, queued for news fetch")
 
@@ -401,8 +420,7 @@ class GridTraderBFF:
                 "ticker": ticker_upper,
                 "news": articles,
                 "count": len(articles),
-                "queued": refresh
-                or len(articles) == 0,  # Indicates if fetch is pending
+                "queued": len(articles) == 0,  # Indicates if fetch is pending
                 "timestamp": datetime.now().isoformat(),
             }
 
@@ -1009,6 +1027,98 @@ class GridTraderBFF:
                 break
             except Exception as e:
                 logger.error(f"Static stream listener error: {e}")
+                await asyncio.sleep(5)
+
+    async def _article_stream_listener(self):
+        """
+        Listen to news_article_stream for real-time article broadcasts.
+
+        Each article is broadcast immediately to all connected WebSocket clients.
+        This provides real-time news updates as articles are fetched and processed.
+        """
+        logger.info("Starting article stream listener...")
+
+        # Create consumer group
+        try:
+            self.r.xgroup_create(
+                self.NEWS_ARTICLE_STREAM,
+                "gridtrader_bff_article_consumers",
+                id="0",
+                mkstream=True,
+            )
+        except redis.exceptions.ResponseError as e:
+            if "BUSYGROUP" not in str(e):
+                raise
+
+        consumer_name = f"gridtrader_article_{datetime.now().timestamp()}"
+
+        while self._running:
+            try:
+                messages = self.r.xreadgroup(
+                    "gridtrader_bff_article_consumers",
+                    consumer_name,
+                    {self.NEWS_ARTICLE_STREAM: ">"},
+                    count=10,
+                    block=1000,
+                )
+
+                if messages:
+                    for stream_name, message_list in messages:
+                        for message_id, message_data in message_list:
+                            symbol = message_data.get("symbol")
+                            if not symbol:
+                                self.r.xack(
+                                    self.NEWS_ARTICLE_STREAM,
+                                    "gridtrader_bff_article_consumers",
+                                    message_id,
+                                )
+                                continue
+
+                            # Build article update message
+                            article_update = {
+                                "type": "news_article",
+                                "symbol": symbol,
+                                "article": {
+                                    "id": message_data.get("news_id"),
+                                    "title": message_data.get("title", ""),
+                                    "source": message_data.get("sources", ""),
+                                    "publishedAt": message_data.get(
+                                        "published_time", ""
+                                    ),
+                                    "url": message_data.get("url", ""),
+                                    "summary": (
+                                        message_data.get("text", "")[:500]
+                                        if message_data.get("text")
+                                        else ""
+                                    ),
+                                    "isNew": True,  # Mark as new for UI highlighting
+                                },
+                                "timestamp": message_data.get("timestamp"),
+                            }
+
+                            logger.debug(
+                                f"Broadcasting article: {symbol} - {article_update['article']['title'][:50]}"
+                            )
+
+                            # Broadcast to all connected clients
+                            for client_id in self.manager.active_connections:
+                                await self.manager.send_personal_message(
+                                    article_update, client_id
+                                )
+
+                            # Acknowledge
+                            self.r.xack(
+                                self.NEWS_ARTICLE_STREAM,
+                                "gridtrader_bff_article_consumers",
+                                message_id,
+                            )
+
+                await asyncio.sleep(0.01)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Article stream listener error: {e}")
                 await asyncio.sleep(5)
 
     def run(self, debug: bool = False):

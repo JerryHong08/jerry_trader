@@ -146,6 +146,14 @@ const formatTimestampET = (isoDate: string): string => {
   return `${formatted} ET`;
 };
 
+const sortNewsByPublishedAt = (articles: NewsArticle[]): NewsArticle[] => {
+  return [...articles].sort((a, b) => {
+    const aTime = Date.parse(a.publishedAt || '') || 0;
+    const bTime = Date.parse(b.publishedAt || '') || 0;
+    return bTime - aTime;
+  });
+};
+
 const AVAILABLE_SYMBOLS = [
   'AAPL', 'TSLA', 'NVDA', 'MSFT', 'GOOGL', 'AMZN', 'META', 'AMD',
   'NFLX', 'COIN', 'PLTR', 'RIVN', 'LCID', 'SOFI', 'BABA', 'NIO'
@@ -256,7 +264,7 @@ export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChan
 
     // Helper to normalize news format (handle both old and new cache formats)
     const normalizeNews = (articles: any[]): NewsArticle[] => {
-      return articles.map((article, index) => ({
+      const normalized = articles.map((article, index) => ({
         id: article.id || `${symbol}-news-${index}`,
         title: article.title || '',
         source: article.source || article.sources || '',
@@ -266,6 +274,7 @@ export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChan
         summary: article.summary || article.text || '',
         isNew: article.isNew || false,
       }));
+      return sortNewsByPublishedAt(normalized);
     };
 
     // Check WebSocket push cache first (most recent)
@@ -278,7 +287,7 @@ export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChan
     // Check local cache (from previous API fetches)
     const cached = newsCache.current.get(symbol);
     if (cached) {
-      setNews(cached);
+      setNews(sortNewsByPublishedAt(cached));
       return;
     }
 
@@ -293,9 +302,10 @@ export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChan
     const unsubscribe = subscribeNewsUpdates(({ symbol: updateSymbol, articles }) => {
       if (updateSymbol !== symbol) return;
 
-      newsCache.current.set(updateSymbol, articles);
+      const sortedArticles = sortNewsByPublishedAt(articles);
+      newsCache.current.set(updateSymbol, sortedArticles);
       if (activeView === 'news') {
-        setNews(articles);
+        setNews(sortedArticles);
       }
       setLoadingNewsFor(prev => (prev === updateSymbol ? null : prev));
     });
@@ -314,9 +324,10 @@ export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChan
     const clampedCount = Math.min(Math.max(count, 1), 50);
     const { articles, queued } = await fetchStockNews(fetchingSymbol, clampedCount, refresh);
     if (!refresh) {
-      newsCache.current.set(fetchingSymbol, articles); // Local cache
-      setCachedNews(fetchingSymbol, articles); // Global persistent cache
-      setNews(articles);
+      const sortedArticles = sortNewsByPublishedAt(articles);
+      newsCache.current.set(fetchingSymbol, sortedArticles); // Local cache
+      setCachedNews(fetchingSymbol, sortedArticles); // Global persistent cache
+      setNews(sortedArticles);
       setDataStatus(fetchingSymbol, 'news', queued ? 'pending' : 'ready');
     } else {
       // Refresh is async-only now; backend queues fetch and returns no articles
@@ -525,7 +536,7 @@ export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChan
                   ) : (
                     <RefreshCw className="w-4 h-4" />
                   )}
-                  {isLoadingNews ? 'Loading...' : 'Request News'}
+                  {isLoadingNews ? 'Loading...' : 'Request'}
                 </button>
                 <button
                   onClick={() => handleFetchNews(true)}
@@ -534,7 +545,7 @@ export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChan
                   title="Trigger backend to refresh news asynchronously"
                 >
                   <RefreshCw className="w-4 h-4" />
-                  Refresh Feed
+                  Refresh
                 </button>
               </div>
             </div>

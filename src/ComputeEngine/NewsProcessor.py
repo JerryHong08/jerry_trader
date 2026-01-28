@@ -43,8 +43,9 @@ class NewsClassificationResult:
 @dataclass
 class NewsTask:
     symbol: str
-    version: int
+    version: int = 0
     timestamp: Optional[str] = None
+    article: Optional[NewsArticle] = None
 
 
 class NewsProcessor:
@@ -72,7 +73,6 @@ class NewsProcessor:
                 "DEEPSEEK_API_KEY not set, news classification will be disabled"
             )
 
-        self.STATIC_UPDATE_STREAM = "static_update_stream"
         self.NEWS_ARTICLE_STREAM = (
             "news_article_stream"  # New - per-article notifications
         )
@@ -80,7 +80,7 @@ class NewsProcessor:
         self.NEWS_ITEM_PREFIX = "news:item"
         self.STATIC_SUMMARY_PREFIX = "static:ticker:summary"
 
-        self.system_prompt = load_prompt("news_processor_system_prompt.txt")
+        self.system_prompt = load_prompt("news_processor_prompt_v2.txt")
 
         self.r = redis.Redis(
             host=redis_host, port=redis_port, db=redis_db, decode_responses=True
@@ -92,7 +92,6 @@ class NewsProcessor:
         self._queue: asyncio.Queue[NewsTask] = asyncio.Queue(maxsize=queue_maxsize)
 
         self._running = False
-        self._listener_task: Optional[asyncio.Task] = None
         self._article_listener_task: Optional[asyncio.Task] = (
             None  # New - article stream listener
         )
@@ -122,7 +121,6 @@ class NewsProcessor:
             return
         self._running = True
 
-        # self._listener_task = asyncio.create_task(self._static_news_stream_listener())
         self._article_listener_task = asyncio.create_task(
             self._article_stream_listener()
         )  # New
@@ -151,7 +149,6 @@ class NewsProcessor:
         tasks = [
             t
             for t in [
-                self._listener_task,
                 self._article_listener_task,
                 self._monitor_task,
             ]
@@ -165,148 +162,10 @@ class NewsProcessor:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-        self._listener_task = None
         self._monitor_task = None
         self._worker_tasks = []
 
         logger.info("NewsProcessor stopped")
-
-    async def _static_news_stream_listener(self):
-        """Listen to static update stream specifically on news and write and notify news analysis (async).
-
-        Static updates are low-frequency, patch-only updates for:
-        - News: news articles (for StockDetail news cache)
-
-        Stream message schema (v2 - versioned):
-        {
-            "symbol": "XPON",
-            "update_type": "static",
-            "domains": ["news"],
-            "version": {"news": 12},
-            "timestamp": "2026-01-25T10:30:00-05:00"
-        }
-
-        Version rules:
-        - NewsProcessor only processes domains with "news" domain and version > last_applied_version
-
-        """
-        logger.info("Starting async static:news stream listener...")
-
-        # Create consumer group for NewsProcessor
-        try:
-            self.r.xgroup_create(
-                self.STATIC_UPDATE_STREAM,
-                "NewsProcessor_news_consumers",
-                id="0",
-                mkstream=True,
-            )
-        except redis.exceptions.ResponseError as e:
-            if "BUSYGROUP" not in str(e):
-                raise
-
-        consumer_name = f"NewsProcessor_news_{datetime.now().timestamp()}"
-
-        while self._running:
-            try:
-                messages = self.r.xreadgroup(
-                    "NewsProcessor_news_consumers",
-                    consumer_name,
-                    {self.STATIC_UPDATE_STREAM: ">"},
-                    count=10,
-                    block=2000,
-                )
-
-                if messages:
-                    for _, message_list in messages:
-                        for message_id, message_data in message_list:
-                            symbol = message_data.get("symbol")
-                            if not symbol:
-                                self.r.xack(
-                                    self.STATIC_UPDATE_STREAM,
-                                    "NewsProcessor_news_consumers",
-                                    message_id,
-                                )
-                                continue
-
-                            # Parse versioned schema
-                            update_type = message_data.get("update_type", "static")
-                            domains_json = message_data.get("domains", "[]")
-                            version_json = message_data.get("version", "{}")
-                            timestamp = message_data.get("timestamp")
-
-                            try:
-                                domains = json.loads(domains_json)
-                                versions = json.loads(version_json)
-                            except json.JSONDecodeError:
-                                # Fallback for legacy format (fields_updated)
-                                fields_updated = message_data.get(
-                                    "fields_updated", "[]"
-                                )
-                                try:
-                                    fields = json.loads(fields_updated)
-                                except json.JSONDecodeError:
-                                    fields = []
-                                # Infer domains from legacy fields
-                                domains = []
-                                if "news" in fields:
-                                    domains.append("news")
-                                versions = {}  # No version tracking for legacy
-
-                            # Only process news domain
-                            if "news" not in domains:
-                                self.r.xack(
-                                    self.STATIC_UPDATE_STREAM,
-                                    "NewsProcessor_news_consumers",
-                                    message_id,
-                                )
-                                continue
-
-                            if symbol not in self._applied_versions:
-                                self._applied_versions[symbol] = {}
-                            if symbol not in self._queued_versions:
-                                self._queued_versions[symbol] = {}
-
-                            incoming_version = int(versions.get("news", 0) or 0)
-                            last_applied = self._applied_versions[symbol].get("news", 0)
-                            last_queued = self._queued_versions[symbol].get("news", 0)
-
-                            if incoming_version <= max(last_applied, last_queued):
-                                self._stats["skipped"] += 1
-                                logger.debug(
-                                    f"Skipping stale/queued news update for {symbol}: "
-                                    f"v{incoming_version} <= v{max(last_applied, last_queued)}"
-                                )
-                                self.r.xack(
-                                    self.STATIC_UPDATE_STREAM,
-                                    "NewsProcessor_news_consumers",
-                                    message_id,
-                                )
-                                continue
-
-                            await self._enqueue_task(
-                                NewsTask(
-                                    symbol=symbol,
-                                    version=incoming_version,
-                                    timestamp=timestamp,
-                                )
-                            )
-                            self._queued_versions[symbol]["news"] = incoming_version
-
-                            # Acknowledge the message
-                            self.r.xack(
-                                self.STATIC_UPDATE_STREAM,
-                                "NewsProcessor_news_consumers",
-                                message_id,
-                            )
-
-                # Allow other tasks to run
-                await asyncio.sleep(0.01)
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Static stream listener error: {e}")
-                await asyncio.sleep(5)
 
     async def _article_stream_listener(self):
         """
@@ -376,26 +235,13 @@ class NewsProcessor:
                                 )
                                 continue
 
-                            # Classify immediately (real-time)
-                            result, reasoning = await self.classify_news(
-                                symbol,
-                                article,
-                                thinking_mode=False,
-                                current_time=message_data.get("timestamp"),
+                            await self._enqueue_task(
+                                NewsTask(
+                                    symbol=symbol,
+                                    article=article,
+                                    timestamp=message_data.get("timestamp"),
+                                )
                             )
-
-                            if result:
-                                logger.info(
-                                    f"Real-time article classification: {symbol} - "
-                                    f"{result.classification} score={result.score} "
-                                    f"title={article.title}"
-                                )
-                                if reasoning:
-                                    logger.debug(f"Reasoning: {reasoning}")
-                            else:
-                                logger.info(
-                                    f"Real-time classification failed for {symbol}: {article.title}"
-                                )
 
                             # Acknowledge the message
                             self.r.xack(
@@ -539,6 +385,34 @@ class NewsProcessor:
         logger.info(f"NewsProcessor worker-{worker_id} stopped")
 
     async def _process_task(self, task: NewsTask) -> None:
+        if task.article is not None:
+            result, reasoning = await self.classify_news(
+                task.symbol,
+                task.article,
+                thinking_mode=False,
+                current_time=task.timestamp,
+            )
+
+            if result:
+                logger.info(
+                    f"{'=' * 10}\n"
+                    f"{task.symbol} {'✅' if result.is_catalyst else '❌'} {result.score}\n"
+                    f"Title:{task.article.title}\n"
+                    f"Published Time: {task.article.published_time}\n"
+                    f"Current Time: {task.timestamp}\n"
+                    f"Explanation: {result.explanation}\n"
+                    f"Url: {task.article.url}\n"
+                    f"Content: {task.article.text[:200]}\n"
+                )
+                if reasoning:
+                    logger.debug(f"Reasoning: {reasoning}")
+                logger.info(f"{'=' * 10}\n")
+            else:
+                logger.info(
+                    f"Real-time classification failed for {task.symbol}: {task.article.title}"
+                )
+            return
+
         lock = self._get_symbol_lock(task.symbol)
         async with lock:
             articles = self._load_latest_articles(task.symbol, self.article_limit)
@@ -567,8 +441,10 @@ class NewsProcessor:
                     continue
 
                 logger.info(
-                    f"{task.symbol} news classified: {result.classification} "
-                    f"score={result.score} title={article.title}"
+                    f"{'=' * 10}\n"
+                    f"{task.symbol} {'✅' if result.is_catalyst else '❌'} {result.score}\n"
+                    f"title:{article.title}"
+                    f"explanation: {result.explanation} "
                 )
                 if reasoning:
                     logger.debug(f"Reasoning: {reasoning}")

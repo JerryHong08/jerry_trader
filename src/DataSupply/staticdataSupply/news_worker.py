@@ -515,7 +515,7 @@ class NewsWorker:
         - Replay mode: get current replay time from latest market snapshot data
         """
         if self.run_mode == "live":
-            return datetime.now(ZoneInfo("America/New_York"))
+            return datetime.now(ZoneInfo("America/New_York")).replace(microsecond=0)
 
         # Replay mode: get current time from latest market snapshot data
         try:
@@ -525,7 +525,9 @@ class NewsWorker:
                 message_id, message_data = current_snapshot_data[0]
                 current_replay_time = message_data.get("timestamp")
                 if current_replay_time:
-                    return datetime.fromisoformat(current_replay_time)
+                    return datetime.fromisoformat(current_replay_time).replace(
+                        microsecond=0
+                    )
 
         except Exception as e:
             logger.warning(f"Failed to get current time for {symbol}: {e}")

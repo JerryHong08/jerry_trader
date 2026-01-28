@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import time
 from datetime import datetime
 from typing import AsyncGenerator, Dict, List, Optional
@@ -469,18 +470,42 @@ class MoomooStockResolver:
                 resp.raise_for_status()
 
             tree = html.fromstring(resp.text)
-            content_divs = tree.xpath(
-                "//div[contains(@class, 'inner') and contains(@class, 'origin_content')]"
-            )
+            if url.startswith("https://www.moomoo.com/community/feed/"):
+                # | pup 'div.feed-detail div.rich-text-wrapper text{}' \
+                # | sed 's/&#39;/'\''/g; s/&quot;/"/g; s/&amp;/\&/g' \
+                # | tr -s ' ' \
+                # | sed '/^[[:space:]]*$/d; s/^[[:space:]]*//; s/[[:space:]]*$//' \
+                # | awk 'length($0) > 20 {print $0 "\n"}
+                content_divs = tree.xpath(
+                    "//div[contains(@class, 'feed-detail')]//div[contains(@class, 'rich-text-wrapper')]"
+                )
+                full_text = content_divs[0].text_content().strip()
 
-            if not content_divs:
-                logger.warning(f"Could not find content div for URL: {url}")
+                # Clean up HTML entities
+                full_text = full_text.replace("&#39;", "'")
+                full_text = full_text.replace("&quot;", '"')
+                full_text = full_text.replace("&amp;", "&")
+
+                # Remove extra whitespace and empty lines
+                full_text = re.sub(r" +", " ", full_text)  # Collapse multiple spaces
+                lines = [line.strip() for line in full_text.split("\n") if line.strip()]
+
+                # Keep only lines longer than 20 characters and join with newlines
+                lines = [line for line in lines if len(line) > 20]
+                full_text = "\n\n".join(lines)
+            else:
+                content_divs = tree.xpath(
+                    "//div[contains(@class, 'inner') and contains(@class, 'origin_content')]"  # | pup 'div.inner.origin_content * text{}'
+                )
+
+                full_text = content_divs[0].text_content().strip()
+
+                if full_text.endswith("Read more"):
+                    full_text = full_text[:-9].strip()
+
+            if not full_text:
+                logger.warning(f"Could not find content for URL: {url}")
                 return None
-
-            full_text = content_divs[0].text_content().strip()
-
-            if full_text.endswith("Read more"):
-                full_text = full_text[:-9].strip()
 
             logger.info(
                 f"_fetch_content_async - Successfully fetched moomoo article content"

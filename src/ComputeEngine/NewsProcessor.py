@@ -91,6 +91,8 @@ class NewsProcessor:
         self.monitor_interval = monitor_interval
         self._queue: asyncio.Queue[NewsTask] = asyncio.Queue(maxsize=queue_maxsize)
 
+        self.consumer_name = "NewsProcessor_article_consumers_mibuntu"
+        
         self._running = False
         self._article_listener_task: Optional[asyncio.Task] = (
             None  # New - article stream listener
@@ -180,7 +182,7 @@ class NewsProcessor:
         try:
             self.r.xgroup_create(
                 self.NEWS_ARTICLE_STREAM,
-                "NewsProcessor_article_consumers",
+                self.consumer_name,
                 id="0",
                 mkstream=True,
             )
@@ -193,7 +195,7 @@ class NewsProcessor:
         while self._running:
             try:
                 messages = self.r.xreadgroup(
-                    "NewsProcessor_article_consumers",
+                    self.consumer_name,
                     consumer_name,
                     {self.NEWS_ARTICLE_STREAM: ">"},
                     count=5,
@@ -207,7 +209,7 @@ class NewsProcessor:
                             if not symbol:
                                 self.r.xack(
                                     self.NEWS_ARTICLE_STREAM,
-                                    "NewsProcessor_article_consumers",
+                                    self.consumer_name,
                                     message_id,
                                 )
                                 continue
@@ -230,7 +232,7 @@ class NewsProcessor:
                                 )
                                 self.r.xack(
                                     self.NEWS_ARTICLE_STREAM,
-                                    "NewsProcessor_article_consumers",
+                                    self.consumer_name,
                                     message_id,
                                 )
                                 continue
@@ -246,7 +248,7 @@ class NewsProcessor:
                             # Acknowledge the message
                             self.r.xack(
                                 self.NEWS_ARTICLE_STREAM,
-                                "NewsProcessor_article_consumers",
+                                self.consumer_name,
                                 message_id,
                             )
 

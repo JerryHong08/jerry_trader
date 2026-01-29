@@ -54,11 +54,7 @@ class SnapshotProcessor:
         replay_date: Optional[str] = None,
         suffix_id: Optional[str] = None,
         load_history: Optional[str] = None,
-        on_snapshot_processed: Optional[callable] = None,
     ):
-        # Callback invoked after each snapshot is processed and written to InfluxDB
-        # Signature: on_snapshot_processed(result: Dict, is_historical: bool)
-        self._on_snapshot_processed = on_snapshot_processed
 
         self.run_mode = "replay" if replay_date else "live"
         self.db_date = (
@@ -403,12 +399,7 @@ class SnapshotProcessor:
             "new_subscriptions": new_subscriptions,
             "total_subscribed": len(all_subscribed),
         }
-
-        # Invoke callback after InfluxDB write is complete
-        # This ensures chart queries will see the latest data
-        if self._on_snapshot_processed:
-            self._on_snapshot_processed(result, is_historical)
-
+        
         return result
 
     def _prepare_data(self, df: pl.DataFrame) -> pl.DataFrame:

@@ -52,7 +52,9 @@ class NewsPersistence:
     """
 
     def __init__(self, database_url: Optional[str] = None):
-        self.database_url = database_url or os.getenv("DATABASE_URL")
+        
+        self.database_url = database_url
+        
         if not self.database_url:
             logger.warning("DATABASE_URL not set, news persistence disabled")
         else:

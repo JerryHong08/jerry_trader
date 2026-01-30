@@ -36,7 +36,8 @@ import asyncio
 import hashlib
 import json
 from datetime import datetime, timedelta
-from typing import AsyncGenerator, Dict, List, Optional, Set
+import os
+from typing import Any, AsyncGenerator, Dict, List, Optional, Set
 from zoneinfo import ZoneInfo
 
 import redis
@@ -47,8 +48,8 @@ from DataSupply.staticdataSupply.news_fetch import (
     NewsPersistence,
 )
 from utils.logger import setup_logger
-
-logger = setup_logger(__name__, log_to_file=True)
+import logging
+logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
 
 
 # ============================================================================
@@ -117,9 +118,6 @@ class NewsWorker:
 
     def __init__(
         self,
-        redis_host: str = "localhost",
-        redis_port: int = 6379,
-        redis_db: int = 0,
         poll_interval: float = 1.0,
         batch_size: int = 5,
         news_limit: int = 5,
@@ -132,19 +130,20 @@ class NewsWorker:
         benzinga_delay: float = 0.2,
         content_concurrent: int = 2,
         content_delay: float = 0.3,
+        # database config
+        redis_config: Optional[Dict[str, Any]] = None,
+        postgres_config: Optional[Dict[str, Any]] = None,
     ):
         """
         Initialize the news worker.
 
         Args:
-            redis_host: Redis host
-            redis_port: Redis port
-            redis_db: Redis database number
             poll_interval: How often to check for pending symbols (seconds)
             batch_size: Max symbols to process per batch
             news_limit: Number of news articles to fetch per ticker
             replay_date: Replay date (YYYYMMDD) for time reference, None for live mode
             news_recency_hours: Max age of news to be considered "recent" (default: 24 hours)
+            redis_config: Redis connection config dict with host, port, db keys
             moomoo_concurrent: Max concurrent Moomoo requests
             moomoo_delay: Delay between Moomoo requests (seconds)
             benzinga_concurrent: Max concurrent Benzinga requests
@@ -152,6 +151,17 @@ class NewsWorker:
             content_concurrent: Max concurrent content fetch requests
             content_delay: Delay between content fetch requests (seconds)
         """
+        # Parse redis config (with defaults)
+        redis_cfg = redis_config or {}
+        
+        redis_host = os.getenv(f"{redis_cfg.get("host")}")
+        if postgres_config:
+            self.postgres_url = os.getenv(f"{postgres_config.get("database_url")}")
+        # if postgres_config:
+        #     self.postgres_url = postgres_config.get("database_url")
+            
+        redis_port = redis_cfg.get("port", 6379)
+        redis_db = redis_cfg.get("db", 0)
         self.r = redis.Redis(
             host=redis_host, port=redis_port, db=redis_db, decode_responses=True
         )
@@ -183,7 +193,7 @@ class NewsWorker:
         # Initialize fetchers
         self.momo_news = MoomooStockResolver()
         self.api_news = API_NewsFetchers()
-        self.news_persistence = NewsPersistence()
+        self.news_persistence = NewsPersistence(self.postgres_url)
 
         self._running = False
         self._processed_count = 0

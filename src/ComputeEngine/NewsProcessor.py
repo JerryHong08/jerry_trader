@@ -12,7 +12,7 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import redis
 from dotenv import load_dotenv
@@ -23,9 +23,6 @@ from DataUtils.schema import NewsArticle
 from utils.logger import setup_logger
 
 import socket
-
-# Get hostname
-hostname = socket.gethostname().replace('-', '_').replace(' ', '_').replace('.', '_')
 
 logger = setup_logger(__name__, log_to_file=True)
 load_dotenv()
@@ -63,21 +60,25 @@ class NewsProcessor:
 
     def __init__(
         self,
-        redis_host: str = "localhost",
-        redis_port: int = 6379,
-        redis_db: int = 0,
         worker_count: int = 4,
         queue_maxsize: int = 200,
         article_limit: int = 10,
         monitor_interval: float = 10.0,
-        llm_model: str = 'deepseek',
-        thinking_mode: bool = False,
+        llm_config: Optional[Dict[str, Any]] = None,
+        redis_config: Optional[Dict[str, Any]] = None,
+        postgres_config: Optional[Dict[str, Any]] = None,
     ):
-        self.api_key = os.getenv("DEEPSEEK_API_KEY")
-        self.base_url = "https://api.deepseek.com"
-        # self.base_url = "https://api.moonshot.cn/v1"
-        self.thinking_mode = thinking_mode
+        self.active_model = llm_config.get("active_model", "deepseek") if llm_config else "deepseek"
+        
+        self.model_cfg = llm_config.get("models", {}).get(self.active_model, {}) if llm_config else {}
 
+        self.api_key = os.getenv(f"{self.model_cfg.get('api_key_env', '')}") if self.model_cfg else None
+        self.base_url = self.model_cfg.get("base_url", "https://api.deepseek.com") if llm_config else "https://api.deepseek.com"
+        self.thinking_mode = self.model_cfg.get("thinking_mode", False) if llm_config else False
+        self.news_processor_prompt = self.model_cfg.get("system_prompt", "news_processor_prompt_v2.txt") if self.model_cfg else "news_processor_prompt_v2.txt"
+        self.default_model = self.model_cfg.get("default_model", "deepseek-chat") if self.model_cfg else "deepseek-chat"
+        self.system_prompt = load_prompt(self.news_processor_prompt)
+        
         if not self.api_key:
             logger.warning(
                 "DEEPSEEK_API_KEY not set, news classification will be disabled"
@@ -90,13 +91,25 @@ class NewsProcessor:
         self.NEWS_ITEM_PREFIX = "news:item"
         self.STATIC_SUMMARY_PREFIX = "static:ticker:summary"
 
-        self.system_prompt = load_prompt("news_processor_prompt_v2.txt")
-        self.consumer_name = hostname
+        
+        self.consumer_name = f"consumer_{socket.gethostname()}_{self.active_model}"
+        
         logger.debug(f'__init__ - {self.consumer_name}')
         
+        # Parse redis config (with defaults)
+        redis_cfg = redis_config or {}
+        redis_host = os.getenv(f"{redis_cfg.get("host")}")
+        
+        redis_port = redis_cfg.get("port", 6379)
+        redis_db = redis_cfg.get("db", 0)
         self.r = redis.Redis(
             host=redis_host, port=redis_port, db=redis_db, decode_responses=True
         )
+
+        # Parse postgres config (optional)
+        self.postgres_url = None
+        if postgres_config:
+            self.postgres_url = postgres_config.get("database_url")
 
         self.worker_count = worker_count
         self.article_limit = article_limit
@@ -307,6 +320,7 @@ class NewsProcessor:
         if not self.api_key:
             logger.debug("LLM api_key missing; skipping classification")
             return None, ""
+                
         client = OpenAI(
             api_key=self.api_key,
             base_url=self.base_url,
@@ -321,7 +335,7 @@ class NewsProcessor:
         )
 
         response = client.chat.completions.create(
-            model="deepseek-chat",
+            model=self.default_model,
             messages=[
                 {"role": "system", "content": self.system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -409,7 +423,8 @@ class NewsProcessor:
 
             if result:
                 logger.info(
-                    f"{'=' * 10}\n"
+                    f"{'=' * 50}\n"
+                    f"model: {self.active_model}\n"
                     f"{task.symbol} {'✅' if result.is_catalyst else '❌'} {result.score}\n"
                     f"Title:{task.article.title}\n"
                     f"Published Time: {task.article.published_time}\n"
@@ -420,7 +435,7 @@ class NewsProcessor:
                 )
                 if reasoning:
                     logger.debug(f"Reasoning: {reasoning}")
-                logger.info(f"{'=' * 10}\n")
+                logger.info(f"{'=' * 50}\n")
             else:
                 logger.info(
                     f"Real-time classification failed for {task.symbol}: {task.article.title}"
@@ -453,15 +468,6 @@ class NewsProcessor:
                         f"Classification failed for {task.symbol}: {article.title}"
                     )
                     continue
-
-                logger.info(
-                    f"{'=' * 10}\n"
-                    f"{task.symbol} {'✅' if result.is_catalyst else '❌'} {result.score}\n"
-                    f"title:{article.title}"
-                    f"explanation: {result.explanation} "
-                )
-                if reasoning:
-                    logger.debug(f"Reasoning: {reasoning}")
 
                 # TODO: save result to persistent store
                 # Update summary hasNews field
@@ -502,7 +508,7 @@ class NewsProcessor:
         while self._running:
             try:
                 logger.info(
-                    "NewsProcessor monitor | "
+                    f"NewsProcessor monitor | {self.default_model} "
                     f"queue={self._queue.qsize()} active={self._active_workers} "
                     f"enqueued={self._stats['enqueued']} processed={self._stats['processed']} "
                     f"failed={self._stats['failed']} skipped={self._stats['skipped']}"

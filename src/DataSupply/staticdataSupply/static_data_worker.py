@@ -97,24 +97,26 @@ class StaticDataWorker:
 
     def __init__(
         self,
-        redis_host: str = "localhost",
-        redis_port: int = 6379,
-        redis_db: int = 0,
         poll_interval: float = 1.0,
         batch_size: int = 5,
         replay_date: Optional[str] = None,
+        redis_config: Optional[Dict[str, Any]] = None,
     ):
         """
         Initialize the static data worker.
 
         Args:
-            redis_host: Redis host
-            redis_port: Redis port
-            redis_db: Redis database number
             poll_interval: How often to check for pending symbols (seconds)
             batch_size: Max symbols to process per batch
             replay_date: Replay date (YYYYMMDD) for time reference, None for live mode
+            redis_config: Redis connection config dict with host, port, db keys
         """
+        # Parse redis config (with defaults)
+        redis_cfg = redis_config or {}
+        redis_host = os.getenv(f"{redis_cfg.get("host")}")
+        
+        redis_port = redis_cfg.get("port", 6379)
+        redis_db = redis_cfg.get("db", 0)
         self.r = redis.Redis(
             host=redis_host, port=redis_port, db=redis_db, decode_responses=True
         )

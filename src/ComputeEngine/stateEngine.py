@@ -19,7 +19,7 @@ import socket
 import time
 from datetime import datetime, timedelta
 from threading import Thread
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import influxdb_client
@@ -49,6 +49,7 @@ class StateEngine:
         self,
         replay_date: Optional[str] = None,
         suffix_id: Optional[str] = None,
+        redis_config: Optional[Dict[str, Any]] = None,
     ):
 
         self.run_mode = "replay" if replay_date else "live"
@@ -72,7 +73,12 @@ class StateEngine:
         self._query_api = self._influx_client.query_api()
 
         # ---------- Redis Configuration ----------
-        self.r = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
+        redis_cfg = redis_config or {}
+        redis_host = os.getenv(f"{redis_cfg.get("host")}")
+        
+        redis_port = redis_cfg.get("port", 6379)
+        redis_db = redis_cfg.get("db", 0)
+        self.r = redis.Redis(host=redis_host, port=redis_port, db=redis_db, decode_responses=True)
 
         # Input stream (from SnapshotProcessor)
         self.INPUT_STREAM_NAME = f"market_snapshot_processed:{self.db_date}"

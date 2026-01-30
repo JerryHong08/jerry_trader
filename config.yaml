@@ -1,0 +1,81 @@
+# config.yaml
+machines:
+  wsl2:
+    roles:
+      GridTraderBFF:
+        enabled: true
+        host: "0.0.0.0"
+        port: 5001
+        debug: false
+        redis: "redis-1a"
+      SnapshotProcessor:
+        enabled: true
+        redis: "redis-1-a"
+      StaticDataWorker:
+        enabled: true
+        poll_interval: 1.0
+        batch_size: 5
+        redis: "redis-1-a"
+
+  mibuntu:
+    roles:
+      NewsProcessor:
+        enabled: true
+        redis: "redis-1-b"
+        postgres: "postgres-1-b"
+      NewsWorker:
+        enabled: true
+        # enabled: false
+        poll_interval: 1.0
+        batch_size: 5
+        news_limit: 5
+        news_recency_hours: 24.0
+        redis: "redis-1-b"
+        postgres: "postgres-1-b"
+
+  oldman:
+    roles:
+      StateEngine:
+        enabled: true
+
+defaults:
+  replay_date: null
+  suffix_id: null
+  load_history: null
+  log_level: "DEBUG"
+  worker_count: 4
+  queue_maxsize: 200
+  monitor_interval: 10.0
+
+redis-1-a:
+  host: "LOCAL_MACHINE_IP"
+  port: 6379
+  db: 0
+
+redis-1-b:
+  host: "WSL2_MACHINE_IP"
+  port: 6379
+  db: 0
+
+postgres-1-a:
+  database_url_env: 'LOCAL_DATABASE_URL'
+
+postgres-1-b:
+  database_url_env: 'WSL2_DATABASE_URL'
+
+llm:
+  active_model: deepseek
+  models:
+    deepseek:
+      default_model: "deepseek-chat"
+      system_prompt: "news_processor_prompt_v2.txt"
+      base_url: "https://api.deepseek.com"
+      thinking_mode: false
+      api_key_env: "DEEPSEEK_API_KEY"
+    kimi:
+      # default_model: "kimi-k2-0905-preview"
+      default_model: "kimi-k2.5"
+      system_prompt: "news_processor_prompt_v2.txt"
+      base_url: "https://api.moonshot.cn/v1"
+      thinking_mode: false
+      api_key_env: "KIMI_API_KEY"

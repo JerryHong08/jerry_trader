@@ -56,6 +56,8 @@ class GridTraderChartDataManager:
         self,
         replay_date: Optional[str] = None,
         suffix_id: Optional[str] = None,
+        redis_config: Optional[Dict[str, Any]] = None,
+        infludxdb_config: Optional[Dict[str, Any]] = None,
     ):
         self._chart_data_dirty = True
         self._cached_chart_data_lw: Optional[Dict] = None
@@ -71,8 +73,14 @@ class GridTraderChartDataManager:
         self.db_id = f"{self.db_date}_{suffix_id}" if suffix_id else f"{self.db_date}"
 
         # ------- Redis Configuration -------
+        # Parse redis config (with defaults)
+        redis_cfg = redis_config or {}
+        redis_host = os.getenv(f"{redis_cfg.get("host")}")
+        redis_port = redis_cfg.get("port", 6379)
+        redis_db = redis_cfg.get("db", 0)
+
         self.redis_client = redis.Redis(
-            host="localhost", port=6379, db=0, decode_responses=True
+            host=redis_host, port=redis_port, db=redis_db, decode_responses=True
         )
 
         self.STREAM_NAME = f"market_snapshot_processed:{self.db_date}"

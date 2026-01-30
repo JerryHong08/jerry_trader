@@ -18,6 +18,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -136,19 +137,26 @@ class GridTraderBFF:
         port: int = 5001,
         replay_date: Optional[str] = None,
         suffix_id: Optional[str] = None,
-        use_callback: bool = False,
+        redis_config: Optional[Dict[str, Any]] = None,
     ):
         self.host = host
         self.port = port
         self.replay_date = replay_date
         self.suffix_id = suffix_id
-        self.use_callback = use_callback
 
+        # Parse redis config (with defaults)
+        redis_cfg = redis_config or {}
+
+        redis_host = os.getenv(f"{redis_cfg.get("host")}")
+        
+        redis_port = redis_cfg.get("port", 6379)
+        redis_db = redis_cfg.get("db", 0)
+        
         # Connection manager for WebSocket
         self.manager = ConnectionManager()
 
         # Redis connection
-        self.r = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
+        self.r = redis.Redis(host=redis_host, port=redis_port, db=redis_db, decode_responses=True)
 
         # Determine date suffix for stream names
         if replay_date:
@@ -182,6 +190,7 @@ class GridTraderBFF:
         self.chart_manager = GridTraderChartDataManager(
             replay_date=replay_date,
             suffix_id=suffix_id,
+            redis_config=redis_config,
         )
 
         # Chart settings (persistent for session)
@@ -202,10 +211,9 @@ class GridTraderBFF:
             self._running = True
 
             # Start background listeners
-            if not self.use_callback:
-                self._snapshot_task = asyncio.create_task(
-                    self._snapshot_stream_listener()
-                )
+            self._snapshot_task = asyncio.create_task(
+                self._snapshot_stream_listener()
+            )
             self._state_task = asyncio.create_task(self._state_stream_listener())
             self._static_task = asyncio.create_task(self._static_stream_listener())
             self._article_task = asyncio.create_task(
@@ -1152,32 +1160,6 @@ class GridTraderBFF:
             self.chart_manager.close()
         logger.info("GridTrader BFF resources cleaned up")
 
-    # ============ Callback Methods for Integration ============
-
-    async def on_snapshot_processed_async(self, result: dict, is_historical: bool):
-        """
-        Async callback invoked after each snapshot is processed.
-        Used when running with backendStarter in callback mode.
-        """
-        self.chart_manager.mark_dirty()
-
-        if self.manager.subscriptions["market_snapshot"]:
-            logger.debug("on_snapshot_processed_async: emitting updates")
-            await self._emit_rank_list_update()
-            await self._emit_overview_chart_update()
-
-    def on_snapshot_processed(self, result: dict, is_historical: bool):
-        """
-        Sync callback wrapper for compatibility with backendStarter.
-        Creates an event loop if needed to run the async callback.
-        """
-        self.chart_manager.mark_dirty()
-
-        # For sync context, we can't easily broadcast to websockets
-        # This is mainly used to mark data dirty; actual updates happen via stream listener
-        logger.debug(f"on_snapshot_processed (sync): marking data dirty")
-
-
 def main():
     """Main entry point for GridTrader BFF."""
     parser = argparse.ArgumentParser(
@@ -1192,7 +1174,7 @@ Examples:
     python -m src.BackendForFrontend.bff --replay-date 20260115 --suffix-id test
 
     # Custom host/port
-    python -m src.BackendForFrontend.bff --host 0.0.0.0 --port 8080
+    python -m src.BackendForFrontend.bff --host 0.0.0.0
         """,
     )
     parser.add_argument(

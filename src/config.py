@@ -101,7 +101,7 @@ def get_asset_overview_data(asset):
     return asset_data
 
 
-splits_data = get_asset_overview_data(asset="splits")
+# splits_data = get_asset_overview_data(asset="splits")
 
 
 from pathlib import Path
@@ -122,3 +122,4 @@ if __name__ == "__main__":
         all_asset = get_asset_overview_data(asset)
         print(all_asset.head())
         print(all_asset.filter(pl.col("ticker").is_in(["XTIA"])))
+

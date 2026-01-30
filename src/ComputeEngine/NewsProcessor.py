@@ -22,6 +22,11 @@ from config import load_prompt
 from DataUtils.schema import NewsArticle
 from utils.logger import setup_logger
 
+import socket
+
+# Get hostname
+hostname = socket.gethostname().replace('-', '_').replace(' ', '_').replace('.', '_')
+
 logger = setup_logger(__name__, log_to_file=True)
 load_dotenv()
 
@@ -43,6 +48,7 @@ class NewsClassificationResult:
 @dataclass
 class NewsTask:
     symbol: str
+    thinking_mode: bool
     version: int = 0
     timestamp: Optional[str] = None
     article: Optional[NewsArticle] = None
@@ -64,9 +70,13 @@ class NewsProcessor:
         queue_maxsize: int = 200,
         article_limit: int = 10,
         monitor_interval: float = 10.0,
+        llm_model: str = 'deepseek',
+        thinking_mode: bool = False,
     ):
         self.api_key = os.getenv("DEEPSEEK_API_KEY")
-        self.base_url = "https://api.deepseek.com/v1/chat/completions"
+        self.base_url = "https://api.deepseek.com"
+        # self.base_url = "https://api.moonshot.cn/v1"
+        self.thinking_mode = thinking_mode
 
         if not self.api_key:
             logger.warning(
@@ -74,14 +84,16 @@ class NewsProcessor:
             )
 
         self.NEWS_ARTICLE_STREAM = (
-            "news_article_stream"  # New - per-article notifications
+            "news_article_stream"  # per-article notifications
         )
         self.NEWS_TICKER_PREFIX = "news:ticker"
         self.NEWS_ITEM_PREFIX = "news:item"
         self.STATIC_SUMMARY_PREFIX = "static:ticker:summary"
 
         self.system_prompt = load_prompt("news_processor_prompt_v2.txt")
-
+        self.consumer_name = hostname
+        logger.debug(f'__init__ - {self.consumer_name}')
+        
         self.r = redis.Redis(
             host=redis_host, port=redis_port, db=redis_db, decode_responses=True
         )
@@ -91,6 +103,7 @@ class NewsProcessor:
         self.monitor_interval = monitor_interval
         self._queue: asyncio.Queue[NewsTask] = asyncio.Queue(maxsize=queue_maxsize)
 
+        
         self._running = False
         self._article_listener_task: Optional[asyncio.Task] = (
             None  # New - article stream listener
@@ -180,7 +193,7 @@ class NewsProcessor:
         try:
             self.r.xgroup_create(
                 self.NEWS_ARTICLE_STREAM,
-                "NewsProcessor_article_consumers",
+                self.consumer_name,
                 id="0",
                 mkstream=True,
             )
@@ -193,7 +206,7 @@ class NewsProcessor:
         while self._running:
             try:
                 messages = self.r.xreadgroup(
-                    "NewsProcessor_article_consumers",
+                    self.consumer_name,
                     consumer_name,
                     {self.NEWS_ARTICLE_STREAM: ">"},
                     count=5,
@@ -207,7 +220,7 @@ class NewsProcessor:
                             if not symbol:
                                 self.r.xack(
                                     self.NEWS_ARTICLE_STREAM,
-                                    "NewsProcessor_article_consumers",
+                                    self.consumer_name,
                                     message_id,
                                 )
                                 continue
@@ -230,7 +243,7 @@ class NewsProcessor:
                                 )
                                 self.r.xack(
                                     self.NEWS_ARTICLE_STREAM,
-                                    "NewsProcessor_article_consumers",
+                                    self.consumer_name,
                                     message_id,
                                 )
                                 continue
@@ -238,6 +251,7 @@ class NewsProcessor:
                             await self._enqueue_task(
                                 NewsTask(
                                     symbol=symbol,
+                                    thinking_mode=self.thinking_mode,
                                     article=article,
                                     timestamp=message_data.get("timestamp"),
                                 )
@@ -246,7 +260,7 @@ class NewsProcessor:
                             # Acknowledge the message
                             self.r.xack(
                                 self.NEWS_ARTICLE_STREAM,
-                                "NewsProcessor_article_consumers",
+                                self.consumer_name,
                                 message_id,
                             )
 
@@ -295,7 +309,7 @@ class NewsProcessor:
             return None, ""
         client = OpenAI(
             api_key=self.api_key,
-            base_url="https://api.deepseek.com",
+            base_url=self.base_url,
         )
 
         user_prompt = (
@@ -313,7 +327,7 @@ class NewsProcessor:
                 {"role": "user", "content": user_prompt},
             ],
             response_format={"type": "json_object"},
-            extra_body={"thinking": {"type": "enabled"}} if thinking_mode else None,
+            extra_body={"thinking": {"type": "enabled"}} if thinking_mode else {"thinking": {"type": "disabled"}},
         )
 
         reasoning_content = (

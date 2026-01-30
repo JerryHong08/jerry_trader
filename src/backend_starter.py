@@ -1,8 +1,10 @@
 """
 GridTrader Backend Starter
 
-Starts all backend services for GridTrader: SnapshotProcessor, StateEngine,
-StaticDataWorker, and GridTrader BFF.
+Starts selected backend services for GridTrader based on working machine: 
+SnapshotProcessor, StaticDataWorker, GridTrader BFF. 
+StateEngine.
+NewsWorder, NewsProcessor.
 
 Usage:
     python -m src.BackendForFrontend.gridtrader_starter --replay-date 20260115 --suffix-id test
@@ -49,16 +51,12 @@ class GridTraderBackendStarter:
         load_history: Optional[str] = None,
         host: str = "localhost",
         port: int = 5001,
-        no_bff: bool = False,
-        use_callback: bool = False,  # Default to False - use Redis stream listener for proper async WebSocket broadcast
     ):
         self.replay_date = replay_date
         self.suffix_id = suffix_id
         self.load_history = load_history
         self.host = host
         self.port = port
-        self.no_bff = no_bff
-        self.use_callback = use_callback
 
         self._running = False
         self._services = []
@@ -78,33 +76,19 @@ class GridTraderBackendStarter:
         """Initialize all backend services."""
         logger.info("Initializing GridTrader backend services...")
 
-        if not self.no_bff:
-            self.bff = GridTraderBFF(
-                host=self.host,
-                port=self.port,
-                replay_date=self.replay_date,
-                suffix_id=self.suffix_id,
-                use_callback=self.use_callback,
-            )
-            self._services.append(("GridTraderBFF", self.bff))
-        else:
-            self.bff = None
-
-        # Create callback for SnapshotProcessor
-        def on_snapshot_processed(result: dict, is_historical: bool):
-            """Callback invoked after each snapshot is processed and written to InfluxDB."""
-            if self.bff is None:
-                return
-
-            # Use BFF's callback method
-            self.bff.on_snapshot_processed(result, is_historical)
+        self.bff = GridTraderBFF(
+            host=self.host,
+            port=self.port,
+            replay_date=self.replay_date,
+            suffix_id=self.suffix_id,
+        )
+        self._services.append(("GridTraderBFF", self.bff))
 
         # Initialize SnapshotProcessor
         self.processor = SnapshotProcessor(
             replay_date=self.replay_date,
             suffix_id=self.suffix_id,
             load_history=self.load_history,
-            on_snapshot_processed=on_snapshot_processed if self.use_callback else None,
         )
         self._services.append(("SnapshotProcessor", self.processor))
 
@@ -297,17 +281,7 @@ Examples:
         "--load-history",
         help="Load historical data from date (YYYYMMDD)",
     )
-    parser.add_argument(
-        "--no-bff",
-        action="store_true",
-        help="Run without BFF (headless mode)",
-    )
-    parser.add_argument(
-        "--use-callback",
-        action="store_true",
-        help="Use callback mode instead of Redis stream listener (not recommended for WebSocket updates)",
-    )
-
+    
     args = parser.parse_args()
 
     # Create and run backend
@@ -317,8 +291,6 @@ Examples:
         replay_date=args.replay_date,
         suffix_id=args.suffix_id,
         load_history=args.load_history,
-        no_bff=args.no_bff,
-        use_callback=args.use_callback,  # Default is False (use stream listener)
     )
 
     try:

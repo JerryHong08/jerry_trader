@@ -92,3 +92,4 @@ llm:
       base_url: "https://api.moonshot.cn/v1"
       thinking_mode: false
       api_key_env: "KIMI_API_KEY"
+

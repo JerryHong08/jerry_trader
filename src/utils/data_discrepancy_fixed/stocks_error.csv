@@ -1,0 +1,3 @@
+active,cik,composite_figi,currency_name,currency_symbol,base_currency_symbol,base_currency_name,delisted_utc,last_updated_utc,locale,market,name,primary_exchange,share_class_figi,ticker,type,source_feed,error_type
+false,0001326801,BBG000MM2P62,usd,,,,,2022-06-09T06:05:17.342280943Z,us,stocks,"Facebook, Inc. Class A Common Stock",XNAS,BBG001SQCQC5,FB,CS,,add
+false,0000820318,BBG000BLW102,usd,,,,,2022-09-07T06:05:17.341813953Z,us,stocks,II-VI Incorporated.,XNYS,BBG001S5S6N6,IIVI,CS,,add

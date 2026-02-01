@@ -75,7 +75,8 @@ class GridTraderChartDataManager:
         # ------- Redis Configuration -------
         # Parse redis config (with defaults)
         redis_cfg = redis_config or {}
-        redis_host = os.getenv(f"{redis_cfg.get("host")}")
+        redis_host_env = redis_cfg.get("host")
+        redis_host = os.getenv(f"{redis_host_env}") if redis_host_env else "localhost"
         redis_port = redis_cfg.get("port", 6379)
         redis_db = redis_cfg.get("db", 0)
 
@@ -91,7 +92,10 @@ class GridTraderChartDataManager:
         token = os.environ.get("INFLUXDB_TOKEN")
         self.org = "jerryhong"
         self.bucket = "jerrymmm"
-        url = "http://localhost:8086"
+        influx_url_env = (
+            infludxdb_config.get("influx_url_env") if infludxdb_config else None
+        )
+        url = os.getenv(influx_url_env) if influx_url_env else "http://localhost:8086"
 
         self._influx_client = influxdb_client.InfluxDBClient(
             url=url, token=token, org=self.org

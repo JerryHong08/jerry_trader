@@ -35,8 +35,9 @@ Design Principles:
 import asyncio
 import hashlib
 import json
-from datetime import datetime, timedelta
+import logging
 import os
+from datetime import datetime, timedelta
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set
 from zoneinfo import ZoneInfo
 
@@ -48,7 +49,7 @@ from DataSupply.staticdataSupply.news_fetch import (
     NewsPersistence,
 )
 from utils.logger import setup_logger
-import logging
+
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
 
 
@@ -153,13 +154,15 @@ class NewsWorker:
         """
         # Parse redis config (with defaults)
         redis_cfg = redis_config or {}
-        
-        redis_host = os.getenv(f"{redis_cfg.get("host")}")
+
+        host_ip_env = redis_cfg.get("host")
+        redis_host = os.getenv(f"{host_ip_env}")
         if postgres_config:
-            self.postgres_url = os.getenv(f"{postgres_config.get("database_url")}")
+            database_url_env = postgres_config.get("database_url_env")
+            self.postgres_url = os.getenv(f"{database_url_env}")
         # if postgres_config:
         #     self.postgres_url = postgres_config.get("database_url")
-            
+
         redis_port = redis_cfg.get("port", 6379)
         redis_db = redis_cfg.get("db", 0)
         self.r = redis.Redis(

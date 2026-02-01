@@ -1,13 +1,45 @@
 import os
+from pathlib import Path
 
 import polars as pl
+import yaml
 
 # ===================== data root =============================================
 blackdisk_data_dir = "/mnt/blackdisk/quant_data/polygon_data"
-nftsdisk_data_dir = "data/polygon_data"
-data_dir = blackdisk_data_dir
-lake_data_dir = "/mnt/blackdisk/quant_data/polygon_data/lake"
-raw_data_dir = "/mnt/blackdisk/quant_data/polygon_data/raw"
+oldman_data_dir = "/home/oldman/quant_data/polygon_data"
+
+
+def _get_data_dir_from_config() -> str:
+    """
+    Get data_dir based on machine role from machine_config.yaml.
+    Falls back to blackdisk_data_dir if config is not found.
+    """
+    config_path = Path(__file__).resolve().parents[2] / "machine_config.yaml"
+
+    if not config_path.exists():
+        return blackdisk_data_dir
+
+    try:
+        with open(config_path, "r") as f:
+            config = yaml.safe_load(f)
+
+        # Get role from environment variable or config
+        role = os.environ.get("MACHINE_ROLE", config["machine"]["role"])
+
+        if role == "server":
+            return config["server"]["data_dir"]
+        else:
+            return config["client"]["data_dir"]
+    except Exception:
+        return blackdisk_data_dir
+
+
+# =====================================================================
+data_dir = _get_data_dir_from_config()
+lake_data_dir = os.path.join(data_dir, "lake")
+raw_data_dir = os.path.join(data_dir, "raw")
+cache_dir = os.path.join(data_dir, "processed")
+low_volume_tickers_dir = os.path.join(cache_dir, "low_volume_tickers")
 
 # ==================== config of config =======================================
 asset_dir_config = {
@@ -22,7 +54,7 @@ splits_dir = os.path.join(data_dir, "raw/us_stocks_sip/splits")
 splits_error_file_copy = os.path.join(
     data_dir, "raw/us_stocks_sip/splits/splits_error.csv"
 )
-splits_error_file = "src/data_fetcher/data_discrepancy_fixed/splits_error.csv"
+splits_error_file = "src/utils/data_discrepancy_fixed/splits_error.csv"
 
 # ===================== float shares =====================
 float_shares_dir = os.path.join(data_dir, "raw/us_stocks_sip/float_shares")
@@ -30,9 +62,6 @@ float_shares_dir = os.path.join(data_dir, "raw/us_stocks_sip/float_shares")
 # ===================== all_asset_overview with error correction ==============
 all_tickers_dir = os.path.join(data_dir, "raw/us_stocks_sip/us_all_tickers")
 all_indices_dir = os.path.join(data_dir, "raw/us_indices/us_all_indices")
-
-# ===================== cache dir =============================================
-cache_dir = os.path.join(data_dir, "processed")
 
 # ===================== other data ============================================
 sppc_dir = "/mnt/blackdisk/quant_data/kaggle_data/sppc"
@@ -45,14 +74,22 @@ def get_asset_dir(asset):
 
     asset_dir = os.path.join(data_dir, asset_dir_config[asset][0])
     asset_error_file = os.path.join(
-        "src/data_fetcher/data_discrepancy_fixed", f"{asset}_error.csv"
+        "src/utils/data_discrepancy_fixed", f"{asset}_error.csv"
     )
     asset_error_file_copy = os.path.join(asset_dir, f"{asset}_error.csv")
 
     return asset_dir, asset_error_file, asset_error_file_copy
 
 
-def get_asset_overview_data(asset):
+def get_asset_overview_data(asset: str) -> pl.DataFrame:
+    """
+    Load asset overview data with error corrections applied.
+    Args:
+        asset str: 'splits', 'otc', 'stocks', 'indices'
+
+    Returns:
+        pl.DataFrame: Asset overview data with error corrections applied.
+    """
     asset_dir, asset_error_file, asset_error_file_copy = get_asset_dir(asset)
     # print(f"Loading {asset} data from {asset_dir}")
     try:
@@ -101,7 +138,7 @@ def get_asset_overview_data(asset):
     return asset_data
 
 
-# splits_data = get_asset_overview_data(asset="splits")
+splits_data = get_asset_overview_data(asset="splits")
 
 
 from pathlib import Path
@@ -122,4 +159,3 @@ if __name__ == "__main__":
         all_asset = get_asset_overview_data(asset)
         print(all_asset.head())
         print(all_asset.filter(pl.col("ticker").is_in(["XTIA"])))
-

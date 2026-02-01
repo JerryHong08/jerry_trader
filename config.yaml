@@ -63,6 +63,12 @@ postgres-1-a:
 postgres-1-b:
   database_url_env: 'WSL2_DATABASE_URL'
 
+influxdb-1-a:
+  influx_url_env: "LOCAL_INFLUXDB_URL"
+
+influxdb-1-b:
+  influx_url_env: "WSL2_INFLUXDB_URL"
+
 llm:
   active_model: deepseek
   models:

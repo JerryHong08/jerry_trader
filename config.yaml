@@ -7,7 +7,7 @@ machines:
         host: "0.0.0.0"
         port: 5001
         debug: false
-        redis: "redis-1a"
+        redis: "redis-1-a"
       SnapshotProcessor:
         enabled: true
         redis: "redis-1-a"
@@ -62,6 +62,19 @@ postgres-1-a:
 
 postgres-1-b:
   database_url_env: 'WSL2_DATABASE_URL'
+
+influxdb-1-a:
+  url_env: 'LOCAL_INFLUXDB_URL'
+  token_env: 'INFLUXDB_TOKEN'
+  org: 'jerryhong'
+  bucket: 'mmm'
+
+influxdb-1-b:
+  url_env: 'WSL2_INFLUXDB_URL'
+  token_env: 'INFLUXDB_TOKEN'
+  org: 'jerryhong'
+  bucket: 'mmm'
+
 
 llm:
   active_model: deepseek

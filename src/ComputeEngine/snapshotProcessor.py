@@ -26,10 +26,12 @@ from zoneinfo import ZoneInfo
 import influxdb_client
 import polars as pl
 import redis
+from dotenv import load_dotenv
 from influxdb_client.client.write_api import SYNCHRONOUS
 
+load_dotenv()
 from config import cache_dir
-from DataUtils.backtest_utils import get_common_stocks
+from DataUtils.data_utils import get_common_stocks
 from DataUtils.transforms import _parse_transfrom_timetamp
 from utils.logger import setup_logger
 
@@ -81,11 +83,14 @@ class SnapshotProcessor:
 
         # ---------- Redis Configuration ----------
         redis_cfg = redis_config or {}
-        redis_host = os.getenv(f"{redis_cfg.get("host")}")
-        
+        redis_host_env = redis_cfg.get("host")
+        redis_host = os.getenv(redis_host_env)
+
         redis_port = redis_cfg.get("port", 6379)
         redis_db = redis_cfg.get("db", 0)
-        self.r = redis.Redis(host=redis_host, port=redis_port, db=redis_db, decode_responses=True)
+        self.r = redis.Redis(
+            host=redis_host, port=redis_port, db=redis_db, decode_responses=True
+        )
 
         # Input stream (from collector)
         self.INPUT_STREAM_NAME = f"market_snapshot_stream:{self.db_date}"
@@ -405,7 +410,7 @@ class SnapshotProcessor:
             "new_subscriptions": new_subscriptions,
             "total_subscribed": len(all_subscribed),
         }
-        
+
         return result
 
     def _prepare_data(self, df: pl.DataFrame) -> pl.DataFrame:

@@ -1,8 +1,8 @@
 """
 GridTrader Backend Starter
 
-Starts selected backend services for GridTrader based on working machine: 
-SnapshotProcessor, StaticDataWorker, GridTrader BFF. 
+Starts selected backend services for GridTrader based on working machine:
+SnapshotProcessor, StaticDataWorker, GridTrader BFF.
 StateEngine.
 NewsWorker, NewsProcessor.
 
@@ -72,7 +72,7 @@ def set_nested_value(d: dict, key_path: str, value: Any) -> None:
         if key not in current:
             current[key] = {}
         current = current[key]
-    
+
     # Type coercion for common cases
     final_key = keys[-1]
     if isinstance(value, str):
@@ -91,7 +91,7 @@ def set_nested_value(d: dict, key_path: str, value: Any) -> None:
                     value = float(value)
                 except ValueError:
                     pass  # Keep as string
-    
+
     current[final_key] = value
 
 
@@ -106,7 +106,7 @@ def parse_override_args(unknown_args: list) -> Dict[str, Any]:
         arg = unknown_args[i]
         if arg.startswith("--"):
             key = arg[2:]  # Remove --
-            
+
             if "=" in key:
                 # Handle --key=value format
                 key, value = key.split("=", 1)
@@ -132,12 +132,12 @@ def build_runtime_config(
     1. Defaults from YAML
     2. Machine-specific config
     3. CLI overrides
-    
+
     Overrides can use dot notation:
     - "replay_date" or "defaults.replay_date" -> sets replay_date
     - "llm.active_model" -> sets llm.active_model
     - "roles.GridTraderBFF.port" -> sets role-specific param
-    
+
     Redis/Postgres references in roles are resolved to their actual configs.
     e.g., role.redis: "redis-1-a" -> resolves to yaml_cfg["redis-1-a"]
     """
@@ -146,44 +146,31 @@ def build_runtime_config(
         raise ValueError(f"Unknown machine '{machine}'. Available: {available}")
 
     machine_cfg = yaml_cfg["machines"][machine]
-    
+
     # Start with defaults (these become top-level in runtime config)
     runtime = copy.deepcopy(yaml_cfg.get("defaults", {}))
-    
+
     # Add LLM config
     runtime["llm"] = copy.deepcopy(yaml_cfg.get("llm", {}))
-    
+
     # Add enabled roles with their config, resolving redis/postgres references
     runtime["roles"] = {}
     for role_name, role_cfg in machine_cfg.get("roles", {}).items():
         if role_cfg.get("enabled", True):
             resolved_cfg = copy.deepcopy(role_cfg)
-            
-            # Resolve redis reference if present
-            redis_ref = role_cfg.get("redis")
-            if redis_ref and isinstance(redis_ref, str):
-                if redis_ref in yaml_cfg:
-                    resolved_cfg["redis"] = copy.deepcopy(yaml_cfg[redis_ref])
-                else:
-                    logger.warning(f"Redis config '{redis_ref}' not found for role {role_name}")
-            
-            # Resolve postgres reference if present
-            postgres_ref = role_cfg.get("postgres")
-            if postgres_ref and isinstance(postgres_ref, str):
-                if postgres_ref in yaml_cfg:
-                    resolved_cfg["postgres"] = copy.deepcopy(yaml_cfg[postgres_ref])
-                    # pg_cfg = yaml_cfg[postgres_ref]
-                    # resolved_cfg["postgres"] = {
-                    #     "database_url": os.getenv(
-                    #         pg_cfg.get("database_url_env", ""),
-                    #         ""
-                    #     )
-                    # }
-                else:
-                    logger.warning(f"Postgres config '{postgres_ref}' not found for role {role_name}")
-            
+
+            # Resolve database references (redis, postgres, influxdb)
+            for db_type in ["redis", "postgres", "influxdb"]:
+                db_ref = role_cfg.get(db_type)
+                if db_ref and isinstance(db_ref, str):
+                    if db_ref in yaml_cfg:
+                        resolved_cfg[db_type] = copy.deepcopy(yaml_cfg[db_ref])
+                    else:
+                        logger.warning(
+                            f"{db_type.capitalize()} config '{db_ref}' not found for role {role_name}"
+                        )
+
             runtime["roles"][role_name] = resolved_cfg
-    
     # Apply CLI overrides using dot notation
     # Support both "replay_date" and "defaults.replay_date" for convenience
     for key_path, value in overrides.items():
@@ -191,8 +178,31 @@ def build_runtime_config(
         if key_path.startswith("defaults."):
             key_path = key_path[9:]  # Remove "defaults."
         set_nested_value(runtime, key_path, value)
-    
+
+    # Normalize date fields to strings (YAML parses YYYYMMDD as int)
+    _normalize_date_fields(runtime)
+
     return runtime
+
+
+def _normalize_date_fields(config: dict) -> None:
+    """
+    Convert date fields from int to string format.
+    YAML interprets values like 20260115 as integers, but we need them as strings.
+    """
+    date_fields = ["replay_date", "load_history", "start_from", "rollback_to"]
+
+    for field in date_fields:
+        if field in config and config[field] is not None:
+            config[field] = str(config[field])
+
+    # Also check in roles for role-specific date fields
+    if "roles" in config:
+        for role_name, role_cfg in config["roles"].items():
+            if isinstance(role_cfg, dict):
+                for field in date_fields:
+                    if field in role_cfg and role_cfg[field] is not None:
+                        role_cfg[field] = str(role_cfg[field])
 
 
 class GridTraderBackendStarter:
@@ -211,26 +221,26 @@ class GridTraderBackendStarter:
     def __init__(self, config: dict):
         """
         Initialize backend starter with runtime config.
-        
+
         Args:
             config: Runtime configuration dict containing roles, defaults, etc.
         """
         self.config = config
         self.roles = config.get("roles", {})
-        
+
         # Extract common params from config
         self.replay_date = config.get("replay_date")
         self.suffix_id = config.get("suffix_id")
         self.load_history = config.get("load_history")
-        
+
         self._running = False
         self._services = []
         self._threads = []
-        
+
         # Setup signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
-        
+
         # Initialize only enabled services based on roles
         self._init_services()
 
@@ -238,10 +248,11 @@ class GridTraderBackendStarter:
         """Initialize backend services based on enabled roles."""
         logger.info("Initializing backend services based on machine roles...")
         logger.info(f"Enabled roles: {list(self.roles.keys())}")
-        
+
         # Lazy imports - only import what we need
         if "GridTraderBFF" in self.roles:
             from BackendForFrontend.bff import GridTraderBFF
+
             role_cfg = self.roles["GridTraderBFF"]
             self.bff = GridTraderBFF(
                 host=role_cfg.get("host", "localhost"),
@@ -249,6 +260,7 @@ class GridTraderBackendStarter:
                 replay_date=self.replay_date,
                 suffix_id=self.suffix_id,
                 redis_config=role_cfg.get("redis"),
+                influxdb_config=role_cfg.get("influxdb"),
             )
             self._services.append(("GridTraderBFF", self.bff))
         else:
@@ -256,6 +268,7 @@ class GridTraderBackendStarter:
 
         if "SnapshotProcessor" in self.roles:
             from ComputeEngine.snapshotProcessor import SnapshotProcessor
+
             role_cfg = self.roles["SnapshotProcessor"]
             self.processor = SnapshotProcessor(
                 replay_date=self.replay_date,
@@ -269,6 +282,7 @@ class GridTraderBackendStarter:
 
         if "StateEngine" in self.roles:
             from ComputeEngine.stateEngine import StateEngine
+
             role_cfg = self.roles["StateEngine"]
             self.state_engine = StateEngine(
                 replay_date=self.replay_date,
@@ -281,6 +295,7 @@ class GridTraderBackendStarter:
 
         if "StaticDataWorker" in self.roles:
             from DataSupply.staticdataSupply.static_data_worker import StaticDataWorker
+
             role_cfg = self.roles["StaticDataWorker"]
             self.static_worker = StaticDataWorker(
                 replay_date=self.replay_date,
@@ -294,6 +309,7 @@ class GridTraderBackendStarter:
 
         if "NewsWorker" in self.roles:
             from DataSupply.staticdataSupply.news_worker import NewsWorker
+
             role_cfg = self.roles["NewsWorker"]
             self.news_worker = NewsWorker(
                 replay_date=self.replay_date,
@@ -310,17 +326,48 @@ class GridTraderBackendStarter:
 
         if "NewsProcessor" in self.roles:
             from ComputeEngine.NewsProcessor import NewsProcessor
+
             role_cfg = self.roles["NewsProcessor"]
             llm_cfg = self.config.get("llm", {})
             self.news_processor = NewsProcessor(
                 # llm_model=active_model,
-                llm_config= llm_cfg,
+                llm_config=llm_cfg,
                 redis_config=role_cfg.get("redis"),
                 postgres_config=role_cfg.get("postgres"),
             )
             self._services.append(("NewsProcessor", self.news_processor))
         else:
             self.news_processor = None
+
+        if "Collector" in self.roles:
+            from DataSupply.snapshotDataSupply.collector import MarketsnapshotCollector
+
+            role_cfg = self.roles["Collector"]
+            self.collector = MarketsnapshotCollector(
+                limit=role_cfg.get("limit", "market_open"),
+            )
+            self._services.append(("Collector", self.collector))
+        else:
+            self.collector = None
+
+        if "Replayer" in self.roles:
+            from DataSupply.snapshotDataSupply.replayer import MarketSnapshotReplayer
+
+            role_cfg = self.roles["Replayer"]
+            self.replayer = MarketSnapshotReplayer(
+                replay_date=self.replay_date,
+                suffix_id=self.suffix_id,
+                speed=role_cfg.get("speed", 1.0),
+                file_format=role_cfg.get("format", "parquet"),
+                start_from=role_cfg.get("start_from"),
+                rollback_to=role_cfg.get("rollback_to"),
+                clear=role_cfg.get("clear", False),
+                redis_config=role_cfg.get("redis"),
+                influxdb_config=role_cfg.get("influxdb"),
+            )
+            self._services.append(("Replayer", self.replayer))
+        else:
+            self.replayer = None
 
         logger.info(f"Initialized {len(self._services)} services")
 
@@ -349,6 +396,10 @@ class GridTraderBackendStarter:
             self.news_worker.stop()
             logger.info("NewsWorker stopped")
 
+        if self.replayer:
+            self.replayer.stop()
+            logger.info("Replayer stopped")
+
         if self.bff:
             self.bff.cleanup()
 
@@ -356,6 +407,7 @@ class GridTraderBackendStarter:
 
     def _start_async_worker_in_thread(self, worker, name: str):
         """Start an async worker in a separate thread with its own event loop."""
+
         def run_worker():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -409,9 +461,27 @@ class GridTraderBackendStarter:
         # Start NewsProcessor if enabled
         if self.news_processor:
             # NewsProcessor might have its own start method
-            if hasattr(self.news_processor, 'start'):
+            if hasattr(self.news_processor, "start"):
                 self._start_async_worker_in_thread(self.news_processor, "NewsProcessor")
             logger.info("NewsProcessor started")
+
+        # Start Collector if enabled (runs in separate thread, blocking)
+        if self.collector:
+
+            def run_collector():
+                self.collector.run_collector_engine()
+
+            collector_thread = Thread(
+                target=run_collector, daemon=True, name="Collector"
+            )
+            collector_thread.start()
+            self._threads.append(collector_thread)
+            logger.info("Collector started")
+
+        # Start Replayer if enabled (async, runs in separate thread)
+        if self.replayer:
+            self._start_async_worker_in_thread(self.replayer, "Replayer")
+            logger.info("Replayer started")
 
         # Run BFF in the main thread (blocking) if enabled
         if self.bff:
@@ -425,6 +495,7 @@ class GridTraderBackendStarter:
             logger.info("No BFF - running in headless mode")
             while self._running:
                 time.sleep(1)
+
 
 def main():
     """Main entry point for GridTrader backend."""
@@ -466,7 +537,7 @@ Config override paths (dot notation):
     roles.<role>.<param>     - Role-specific parameters
         """,
     )
-    
+
     parser.add_argument(
         "--machine",
         required=True,
@@ -486,32 +557,33 @@ Config override paths (dot notation):
 
     # Parse known args, collect unknown for config overrides
     args, unknown = parser.parse_known_args()
-    
+
     # Parse unknown args as config overrides (dot notation)
     overrides = parse_override_args(unknown)
-    
+
     # Load YAML config
     try:
         yaml_cfg = load_yaml_config(args.config)
     except FileNotFoundError as e:
         logger.error(str(e))
         sys.exit(1)
-    
+
     # Build runtime config
     try:
         runtime_config = build_runtime_config(yaml_cfg, args.machine, overrides)
     except ValueError as e:
         logger.error(str(e))
         sys.exit(1)
-    
+
     # Log resolved config
     logger.info(f"Machine: {args.machine}")
     logger.info(f"Enabled roles: {list(runtime_config['roles'].keys())}")
     if overrides:
         logger.info(f"CLI overrides applied: {overrides}")
-    
+
     if args.dry_run:
         import json
+
         print("\n=== Resolved Runtime Config ===")
         print(json.dumps(runtime_config, indent=2, default=str))
         sys.exit(0)
@@ -524,6 +596,7 @@ Config override paths (dot notation):
     except Exception as e:
         logger.error(f"GridTrader backend error: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 

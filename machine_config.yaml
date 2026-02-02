@@ -7,7 +7,7 @@
 # Can be overridden by environment variable: MACHINE_ROLE=server|client
 
 machine:
-  role: "client"  # default role for this machine
+  role: "server"  # default role for this machine
 
 # Server connection settings (used when role=client)
 server:

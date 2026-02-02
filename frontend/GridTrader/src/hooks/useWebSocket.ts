@@ -24,6 +24,8 @@ const BFF_HTTP_URL =
     ? (import.meta.env.VITE_BFF_URL as string)
     : 'http://localhost:5001';
 
+console.debug('[WebSocket] Using BFF URL:', BFF_HTTP_URL);
+
 // Convert HTTP URL to WebSocket URL
 const BFF_WS_URL = BFF_HTTP_URL.replace(/^http/, 'ws');
 

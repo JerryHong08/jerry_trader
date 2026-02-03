@@ -16,7 +16,7 @@ server:
 
 # Client settings (used when role=client)
 client:
-  data_dir: "/home/mibuntu/quant_data/polygon_data"  # local data directory
+  data_dir: "/mnt/blackdisk/quant_data/polygon_data"  # local data directory
 
 # Directories to sync from server to client (relative to data_dir)
 # These are metadata/reference data that server fetches from APIs

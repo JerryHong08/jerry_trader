@@ -86,7 +86,7 @@ class MarketsnapshotCollector:
                 import requests
 
                 proxy = os.environ.get("HTTP_PROXY")
-                # logger.debug(f'fetch_snapshot_with_timeout - Using proxy: {proxy}')
+                logger.debug(f'fetch_snapshot_with_timeout - Using proxy: {proxy}')
                 proxies = {"http": proxy, "https": proxy} if proxy else None
 
                 url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"

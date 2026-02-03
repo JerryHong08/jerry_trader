@@ -154,20 +154,18 @@ class NewsWorker:
         """
         # Parse redis config (with defaults)
         redis_cfg = redis_config or {}
-
-        host_ip_env = redis_cfg.get("host")
-        redis_host = os.getenv(f"{host_ip_env}")
-        if postgres_config:
-            database_url_env = postgres_config.get("database_url_env")
-            self.postgres_url = os.getenv(f"{database_url_env}")
-        # if postgres_config:
-        #     self.postgres_url = postgres_config.get("database_url")
-
+        redis_host = redis_cfg.get("host", "127.0.0.1")
         redis_port = redis_cfg.get("port", 6379)
         redis_db = redis_cfg.get("db", 0)
         self.r = redis.Redis(
             host=redis_host, port=redis_port, db=redis_db, decode_responses=True
         )
+
+        # Parse postgres config
+        self.postgres_url = None
+        if postgres_config:
+            # URL is already built by backend_starter
+            self.postgres_url = postgres_config.get("url")
         self.poll_interval = poll_interval
         self.batch_size = batch_size
         self.news_limit = news_limit

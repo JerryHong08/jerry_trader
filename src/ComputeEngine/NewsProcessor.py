@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+import httpx
 import redis
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -25,6 +26,23 @@ from utils.logger import setup_logger
 
 logger = setup_logger(__name__, log_to_file=True)
 load_dotenv()
+
+
+def _get_openai_http_client() -> Optional[httpx.Client]:
+    """
+    Get an httpx client configured with proxy support for OpenAI.
+    
+    The OpenAI library uses httpx internally but doesn't handle SOCKS proxies
+    from environment variables by default. This provides a pre-configured client.
+    
+    Returns:
+        httpx.Client with proxy configured, or None if no proxy is set
+    """
+    proxy_url = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+    if proxy_url:
+        # logger.debug(f"Creating OpenAI http_client with proxy: {proxy_url}")
+        return httpx.Client(proxy=proxy_url)
+    return None
 
 
 @dataclass
@@ -342,9 +360,13 @@ class NewsProcessor:
             logger.debug("LLM api_key missing; skipping classification")
             return None, ""
 
+        # Get custom http_client with proxy support for SOCKS proxies
+        http_client = _get_openai_http_client()
+        
         client = OpenAI(
             api_key=self.api_key,
             base_url=self.base_url,
+            http_client=http_client,
         )
 
         user_prompt = (

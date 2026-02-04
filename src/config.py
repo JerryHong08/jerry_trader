@@ -14,7 +14,7 @@ def _get_data_dir_from_config() -> str:
     Get data_dir based on machine role from machine_config.yaml.
     Falls back to blackdisk_data_dir if config is not found.
     """
-    config_path = Path(__file__).resolve().parents[2] / "machine_config.yaml"
+    config_path = Path(__file__).resolve().parents[1] / "machine_config.yaml"
 
     if not config_path.exists():
         return blackdisk_data_dir

@@ -30,6 +30,31 @@ logger = setup_logger(__name__, log_to_file=True)
 
 
 # ============================================================================
+# Proxy Configuration Helper
+# ============================================================================
+
+def _get_httpx_client_kwargs() -> Dict:
+    """
+    Get httpx.AsyncClient kwargs with proxy support.
+    
+    Handles SOCKS proxies via HTTP_PROXY environment variable.
+    For SOCKS proxies, httpx[socks] must be installed.
+    
+    Returns:
+        Dict of kwargs to pass to httpx.AsyncClient()
+    """
+    proxy_url = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+    kwargs = {}
+    
+    if proxy_url:
+        # httpx uses 'proxy' (singular), not 'proxies'
+        kwargs["proxy"] = proxy_url
+        # logger.debug(f"Using proxy: {proxy_url}")
+    
+    return kwargs
+
+
+# ============================================================================
 # News Persistence Layer (PostgreSQL)
 # ============================================================================
 
@@ -243,7 +268,9 @@ class MoomooStockResolver:
 
         try:
             url = self.base_url + self.search_api
-            response = requests.get(url, params=params, headers=headers, timeout=10)
+            proxy_url = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+            proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+            response = requests.get(url, params=params, headers=headers, timeout=10, proxies=proxies)
 
             if response.status_code == 200:
                 data = response.json()
@@ -390,7 +417,8 @@ class MoomooStockResolver:
         # 5. Fetch news list asynchronously
         try:
             url = self.base_url + self.news_api
-            async with httpx.AsyncClient() as client:
+            client_kwargs = _get_httpx_client_kwargs()
+            async with httpx.AsyncClient(**client_kwargs) as client:
                 response = await client.get(
                     url, params=params, headers=headers, timeout=10
                 )
@@ -467,7 +495,8 @@ class MoomooStockResolver:
         }
 
         try:
-            async with httpx.AsyncClient() as client:
+            client_kwargs = _get_httpx_client_kwargs()
+            async with httpx.AsyncClient(**client_kwargs) as client:
                 resp = await client.get(url, headers=headers, timeout=timeout)
                 resp.raise_for_status()
 
@@ -535,6 +564,12 @@ class API_NewsFetchers:
                 "accept": "application/json",
             }
         )
+        
+        # Configure proxy if set
+        proxy_url = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+        if proxy_url:
+            self.session.proxies = {"http": proxy_url, "https": proxy_url}
+            # logger.debug(f"Session configured with proxy: {proxy_url}")
 
     def fetch_news_fmp(
         self, symbol: str, limit: int = 5, timeout: int = 5
@@ -634,7 +669,8 @@ class API_NewsFetchers:
                 f"Start fetching {symbol} news data using Benzinga API (async), page_size={page_size}"
             )
 
-            async with httpx.AsyncClient() as client:
+            client_kwargs = _get_httpx_client_kwargs()
+            async with httpx.AsyncClient(**client_kwargs) as client:
                 response = await client.get(
                     self.BENZINGA_BASE_URL,
                     params=params,
@@ -644,6 +680,7 @@ class API_NewsFetchers:
                 response.raise_for_status()
 
             data = json.loads(response.text)
+            # print(data)
 
             if not isinstance(data, list):
                 logger.error(f"Unexpected API response format: {type(data)}")
@@ -708,21 +745,32 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    if args.provider == "fmp":
-        fetcher = API_NewsFetchers()
-        articles = fetcher.fetch_news_fmp(args.ticker, limit=args.limit)
-    elif args.provider == "benzinga":
-        fetcher = API_NewsFetchers()
-        articles = fetcher.fetch_news_benzinga_async(args.ticker, page_size=args.limit)
-    else:
-        fetcher = MoomooStockResolver()
-        articles = fetcher.get_news_momo_async(args.ticker, pageSize=args.limit)
-        # if args.fetch_content:
-        for i, article in enumerate(articles):
-            #         content = fetcher.fetch_content(article.url)
-            #         article.text = content
-            logger.debug(
-                f"Fetched content for article {i}: {article.text}\n"
-                f"url: {article.url}\n"
-                f"{'-'*40}\n"
-            )
+
+    async def main():
+        if args.provider == "fmp":
+            fetcher = API_NewsFetchers()
+            articles = fetcher.fetch_news_fmp(args.ticker, limit=args.limit)
+            for i, article in enumerate(articles):
+                print(f"Article {i+1}: {article.title}")
+                print(f"  URL: {article.url}")
+                print(f"  Published: {article.published_time}")
+                print(f"  Text: {article.text if article.text else 'N/A'}...")
+                print("-" * 40)
+        elif args.provider == "benzinga":
+            fetcher = API_NewsFetchers()
+            async for article in fetcher.fetch_news_benzinga_async(args.ticker, page_size=args.limit):
+                print(f"Article: {article.title}")
+                print(f"  URL: {article.url}")
+                print(f"  Published: {article.published_time}")
+                print(f"  Text: {article.text if article.text else 'N/A'}...")
+                print("-" * 40)
+        else:
+            fetcher = MoomooStockResolver()
+            async for article in fetcher.get_news_momo_async(args.ticker, pageSize=args.limit):
+                print(f"Article: {article.title}")
+                print(f"  URL: {article.url}")
+                print(f"  Published: {article.published_time}")
+                print(f"  Text: {article.text if article.text else 'N/A'}...")
+                print("-" * 40)
+
+    asyncio.run(main())

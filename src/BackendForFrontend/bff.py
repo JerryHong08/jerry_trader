@@ -25,6 +25,10 @@ from datetime import datetime
 from threading import Thread
 from typing import Any, Dict, List, Optional, Set
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import redis
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -133,11 +137,12 @@ class GridTraderBFF:
 
     def __init__(
         self,
-        host: str = "localhost",
+        host: str = "0.0.0.0",
         port: int = 5001,
         replay_date: Optional[str] = None,
         suffix_id: Optional[str] = None,
         redis_config: Optional[Dict[str, Any]] = None,
+        influxdb_config: Optional[Dict[str, Any]] = None,
     ):
         self.host = host
         self.port = port
@@ -147,16 +152,18 @@ class GridTraderBFF:
         # Parse redis config (with defaults)
         redis_cfg = redis_config or {}
 
-        redis_host = os.getenv(f"{redis_cfg.get("host")}")
-        
+        redis_host_env = redis_cfg.get("host")
+        redis_host = os.getenv(redis_host_env) if redis_host_env else "localhost"
         redis_port = redis_cfg.get("port", 6379)
         redis_db = redis_cfg.get("db", 0)
-        
+
         # Connection manager for WebSocket
         self.manager = ConnectionManager()
 
         # Redis connection
-        self.r = redis.Redis(host=redis_host, port=redis_port, db=redis_db, decode_responses=True)
+        self.r = redis.Redis(
+            host=redis_host, port=redis_port, db=redis_db, decode_responses=True
+        )
 
         # Determine date suffix for stream names
         if replay_date:
@@ -191,6 +198,7 @@ class GridTraderBFF:
             replay_date=replay_date,
             suffix_id=suffix_id,
             redis_config=redis_config,
+            influxdb_config=influxdb_config,
         )
 
         # Chart settings (persistent for session)
@@ -211,9 +219,7 @@ class GridTraderBFF:
             self._running = True
 
             # Start background listeners
-            self._snapshot_task = asyncio.create_task(
-                self._snapshot_stream_listener()
-            )
+            self._snapshot_task = asyncio.create_task(self._snapshot_stream_listener())
             self._state_task = asyncio.create_task(self._state_stream_listener())
             self._static_task = asyncio.create_task(self._static_stream_listener())
             self._article_task = asyncio.create_task(
@@ -1159,6 +1165,7 @@ class GridTraderBFF:
         if self.chart_manager:
             self.chart_manager.close()
         logger.info("GridTrader BFF resources cleaned up")
+
 
 def main():
     """Main entry point for GridTrader BFF."""

@@ -7,15 +7,16 @@ machines:
         host: "0.0.0.0"
         port: 5001
         debug: false
-        redis: "redis-1-a"
+        redis: "redis-1-c"
+        influxdb: "influxdb-1-a"
       SnapshotProcessor:
         enabled: true
-        redis: "redis-1-a"
+        redis: "redis-1-c"
       StaticDataWorker:
         enabled: true
         poll_interval: 1.0
         batch_size: 5
-        redis: "redis-1-a"
+        redis: "redis-1-c"
 
   mibuntu:
     roles:
@@ -35,8 +36,21 @@ machines:
 
   oldman:
     roles:
-      StateEngine:
+      # StateEngine:
+      #   enabled: true
+      Collector:
         enabled: true
+        redis: "redis-1-a"
+        limit: "market_open"
+
+      Replayer:
+        enabled: false
+        speed: 1.0
+        format: "parquet"
+        rollback-to: null
+        clear: false
+        redis: "redis-1-a"
+        influxdb: "influxdb-1-a"
 
 defaults:
   replay_date: null
@@ -54,6 +68,11 @@ redis-1-a:
 
 redis-1-b:
   host: "WSL2_MACHINE_IP"
+  port: 6379
+  db: 0
+
+redis-1-c:
+  host: "OLDMAN_MACHINE_IP"
   port: 6379
   db: 0
 

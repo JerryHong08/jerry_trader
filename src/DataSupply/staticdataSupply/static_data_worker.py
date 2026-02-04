@@ -30,6 +30,10 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import redis
 
 from DataSupply.staticdataSupply.fundamentals_fetch import (
@@ -113,8 +117,9 @@ class StaticDataWorker:
         """
         # Parse redis config (with defaults)
         redis_cfg = redis_config or {}
-        redis_host = os.getenv(f"{redis_cfg.get("host")}")
-        
+        redis_host_env = redis_cfg.get("host")
+        redis_host = os.getenv(redis_host_env)
+
         redis_port = redis_cfg.get("port", 6379)
         redis_db = redis_cfg.get("db", 0)
         self.r = redis.Redis(

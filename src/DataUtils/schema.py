@@ -1,6 +1,8 @@
+import html
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -11,6 +13,19 @@ import polars as pl
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
+
+
+def _strip_html(text: Optional[str]) -> Optional[str]:
+    """Strip HTML tags and decode HTML entities from text."""
+    if not text:
+        return text
+    # Remove HTML tags
+    clean = re.sub(r"<[^>]+>", "", text)
+    # Decode HTML entities (&#8217; -> ', &amp; -> &, etc.)
+    clean = html.unescape(clean)
+    # Normalize whitespace
+    clean = re.sub(r"\s+", " ", clean).strip()
+    return clean
 
 
 # Snapshot data schema for Parquet optimization
@@ -227,11 +242,14 @@ class NewsArticle(BaseModel):
             logger.warning(f"Benzinga date parse error: {e}, using current time")
             published_time = datetime.now().astimezone(ZoneInfo("America/New_York"))
 
+        # Strip HTML tags from body content
+        body_text = _strip_html(data.get("body"))
+
         return cls(
             symbol=symbol,
             published_time=published_time,
             title=data.get("title", ""),
-            text=data.get("body"),
+            text=body_text,
             url=data.get("url", ""),
             sources=data.get("author", "Benzinga"),
         )

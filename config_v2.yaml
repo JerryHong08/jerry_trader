@@ -9,6 +9,7 @@ network:
   WSL2: "WSL2_MACHINE_IP"
   OLDMAN: "OLDMAN_MACHINE_IP"
   MIBUNTU: "MIBUNTU_MACHINE_IP"
+  OLDMAN_REMOTE: "OLDMAN_REMOTE_IP"
   LOCAL: null  # null = 127.0.0.1
 
 # =============================================================================
@@ -27,6 +28,7 @@ databases:
     postgres-a:
       # URL resolved from {MACHINE}_DATABASE_URL env var
       # e.g., postgres-a@WSL2 -> WSL2_DATABASE_URL
+    postgres-b:
 
   influxdb:
     influxdb-a:
@@ -42,26 +44,19 @@ databases:
 machines:
   wsl2:
     roles:
-      GridTraderBFF:
-        enabled: true
-        host: "0.0.0.0"
-        port: 5001
-        debug: false
-        redis: "redis-b@OLDMAN"
-        influxdb: "influxdb-b@OLDMAN"
       StateEngine:
         enabled: false
       FactorEngine:
         enabled: false
-        redis: "redis-b@OLDMAN"
-        influxdb: "influxdb-b@OLDMAN"
+        redis: "redis-b@OLDMAN_REMOTE"
+        influxdb: "influxdb-b@OLDMAN_REMOTE"
 
   mibuntu:
     roles:
       NewsProcessor:
         enabled: true
         redis: "redis-b@OLDMAN"
-        postgres: "postgres-a@WSL2"
+        postgres: "postgres-b@OLDMAN"
       NewsWorker:
         enabled: true
         poll_interval: 1.0
@@ -69,7 +64,7 @@ machines:
         news_limit: 5
         news_recency_hours: 24.0
         redis: "redis-b@OLDMAN"
-        postgres: "postgres-a@WSL2"
+        postgres: "postgres-b@OLDMAN"
 
   oldman:
     roles:
@@ -82,6 +77,16 @@ machines:
         poll_interval: 1.0
         batch_size: 5
         redis: "redis-b"
+  
+  grid_bff:
+    roles:
+      GridTraderBFF:
+        enabled: true
+        host: "0.0.0.0"
+        port: 5001
+        debug: false
+        redis: "redis-b"
+        influxdb: "influxdb-b"
 
   collector:
     roles:

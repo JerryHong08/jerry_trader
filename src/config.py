@@ -36,8 +36,8 @@ def _get_data_dir_from_config() -> str:
 
 
 # =====================================================================
-# data_dir = _get_data_dir_from_config()
-data_dir = oldman_data_dir
+data_dir = _get_data_dir_from_config()
+# data_dir = oldman_data_dir
 print(f"DEBUG: Current data root dir: {data_dir}")
 lake_data_dir = os.path.join(data_dir, "lake")
 raw_data_dir = os.path.join(data_dir, "raw")

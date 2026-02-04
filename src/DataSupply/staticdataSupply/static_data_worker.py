@@ -147,6 +147,7 @@ class StaticDataWorker:
 
         logger.info(
             f"StaticDataWorker initialized: mode={self.run_mode}, db_date={self.db_date}, "
+            f"db_host:{redis_host}."
             f"poll_interval={poll_interval}s, batch_size={batch_size}"
         )
 

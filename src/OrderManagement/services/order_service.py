@@ -59,6 +59,11 @@ class OrderService:
             req = OrderRequest(symbol="AAPL", action="BUY", quantity=100)
             order_id = order_service.place_order(req)
         """
+        # Log the request for debugging
+        logger.info(
+            f"place_order - Request: {req.symbol} {req.action} {req.quantity}, OutsideRth={req.OutsideRth}"
+        )
+
         # 转换为 IBKR Contract / Order（集中在 models 层）
         contract = contract_from_request(req)
         order = order_from_request(req)

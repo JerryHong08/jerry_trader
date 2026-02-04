@@ -102,15 +102,29 @@ export default function ChartPanel({ symbol, latestTrade }: ChartPanelProps) {
     if (!seriesRef.current || !latestTrade || latestTrade.symbol !== symbol) return
     if (typeof latestTrade.price !== 'number' || typeof latestTrade.timestamp !== 'number') return
 
-    const newPoint: LineData<Time> = {
-      time: Math.floor(latestTrade.timestamp / 1000) as Time,
-      value: latestTrade.price,
+    const newTime = Math.floor(latestTrade.timestamp / 1000) as Time
+
+    // Check if this is an exact duplicate (same time and value)
+    const lastPoint = dataRef.current[dataRef.current.length - 1]
+    if (lastPoint && lastPoint.time === newTime && lastPoint.value === latestTrade.price) {
+      return // Skip exact duplicate
     }
 
-    // Check if this is a new point (not a duplicate)
-    const lastPoint = dataRef.current[dataRef.current.length - 1]
-    if (lastPoint && lastPoint.time === newPoint.time && lastPoint.value === newPoint.value) {
-      return // Skip duplicate
+    // If same timestamp but different value, update the existing point instead of adding
+    if (lastPoint && lastPoint.time === newTime) {
+      // Update the last point's value (use latest price for that second)
+      lastPoint.value = latestTrade.price
+      try {
+        seriesRef.current.update(lastPoint)
+      } catch {
+        // Ignore update errors
+      }
+      return
+    }
+
+    const newPoint: LineData<Time> = {
+      time: newTime,
+      value: latestTrade.price,
     }
 
     // Use update for real-time data
@@ -124,9 +138,14 @@ export default function ChartPanel({ symbol, latestTrade }: ChartPanelProps) {
         seriesRef.current.setData(dataRef.current)
       }
     } catch {
-      // If update fails (e.g., out of order), fall back to setData
+      // If update fails (e.g., out of order), deduplicate and rebuild
       dataRef.current.push(newPoint)
-      dataRef.current.sort((a, b) => (a.time as number) - (b.time as number))
+      // Sort by time and deduplicate (keep last value for each timestamp)
+      const deduped = new Map<number, LineData<Time>>()
+      for (const pt of dataRef.current) {
+        deduped.set(pt.time as number, pt)
+      }
+      dataRef.current = Array.from(deduped.values()).sort((a, b) => (a.time as number) - (b.time as number))
       seriesRef.current.setData(dataRef.current)
     }
   }, [latestTrade, symbol])

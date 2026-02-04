@@ -219,8 +219,9 @@ def _resolve_db_reference(
         )
         return None
 
-    # Copy database template
-    resolved = copy.deepcopy(db_configs[db_name])
+    # Copy database template (handle None/empty entries in YAML)
+    template = db_configs[db_name]
+    resolved = copy.deepcopy(template) if template is not None else {}
 
     # Resolve host from network section
     network = yaml_cfg.get("network", {})
@@ -237,6 +238,7 @@ def _resolve_db_reference(
         # LOCAL = 127.0.0.1
         resolved["host"] = "127.0.0.1"
     else:
+        print(host_env_var)
         # Resolve from environment variable
         host_value = os.getenv(host_env_var)
         if host_value:

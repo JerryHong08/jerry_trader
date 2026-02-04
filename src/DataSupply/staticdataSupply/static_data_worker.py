@@ -117,9 +117,7 @@ class StaticDataWorker:
         """
         # Parse redis config (with defaults)
         redis_cfg = redis_config or {}
-        redis_host_env = redis_cfg.get("host")
-        redis_host = os.getenv(redis_host_env)
-
+        redis_host = redis_cfg.get("host", "127.0.0.1")
         redis_port = redis_cfg.get("port", 6379)
         redis_db = redis_cfg.get("db", 0)
         self.r = redis.Redis(

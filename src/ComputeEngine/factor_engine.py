@@ -137,7 +137,8 @@ class FactorManager:
             if replay_date
             else datetime.now(ZoneInfo("America/New_York")).strftime("%Y%m%d")
         )
-        self.db_id = self._derive_db_id(self.db_date, suffix_id)
+        self.db_id = f"{self.db_date}_{suffix_id}" if suffix_id else f"{self.db_date}"
+
         self.factor_set = os.getenv("FACTOR_SET", "belief_micro_v1")
 
         self.quote_window_sec = float(os.getenv("FACTOR_QUOTE_WINDOW_SEC", "0.2"))
@@ -223,16 +224,6 @@ class FactorManager:
         self.ws_loop = asyncio.new_event_loop()
         self.ws_thread = Thread(target=self._start_ws_loop, daemon=True)
         self.ws_thread.start()
-
-    @staticmethod
-    def _derive_db_id(db_date: Optional[str], override: Optional[str]) -> str:
-        if db_date and override:
-            return f"{db_date}_{override}"
-        if override:
-            return override
-        if db_date:
-            return db_date
-        return "na"
 
     def _start_ws_loop(self):
         """start WebSocket event loop"""

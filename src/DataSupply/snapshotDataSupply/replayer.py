@@ -102,8 +102,7 @@ class MarketSnapshotReplayer:
 
         # Parse redis config
         redis_cfg = redis_config or {}
-        host_ip_env = redis_cfg.get("host")
-        redis_host = os.getenv(host_ip_env) if host_ip_env else "localhost"
+        redis_host = redis_cfg.get("host", "127.0.0.1")
         redis_port = redis_cfg.get("port", 6379)
         redis_db = redis_cfg.get("db", 0)
         self.r = redis.Redis(

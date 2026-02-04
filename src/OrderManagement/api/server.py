@@ -124,7 +124,8 @@ async def lifespan(app: FastAPI):
 
     # 3. NOW connect to IB Gateway (services are ready to receive events)
     host = os.getenv("IB_GATEWAY_HOST", "127.0.0.1")
-    port = int(os.getenv("IB_GATEWAY_PORT", "4002"))
+    # port = int(os.getenv("IB_GATEWAY_PORT", "4002"))
+    port = int(os.getenv("IB_GATEWAY_PORT", "7497"))
     client_id = int(os.getenv("IB_CLIENT_ID", "1"))
 
     logger.info(f"📡 Connecting to IB Gateway at {host}:{port}...")

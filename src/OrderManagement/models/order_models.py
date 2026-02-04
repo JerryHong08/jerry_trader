@@ -3,9 +3,10 @@
 from dataclasses import asdict, dataclass
 from typing import Optional
 
+from pydantic import BaseModel, field_validator
 
-@dataclass
-class OrderRequest:
+
+class OrderRequest(BaseModel):
     """
     订单请求 - 用于创建新订单
 
@@ -33,6 +34,13 @@ class OrderRequest:
     OutsideRth: bool = True  # Outside of the regular hour
     reason: Optional[str] = None  # 用户备注/下单原因（用于审计/持久化/回放）
 
+    @field_validator("quantity", mode="before")
+    @classmethod
+    def validate_quantity(cls, v):
+        if v is None:
+            raise ValueError("quantity is required")
+        return int(v)
+
     def validate(self):
         """验证订单参数"""
         if self.order_type == "LMT" and self.limit_price is None:
@@ -41,7 +49,7 @@ class OrderRequest:
         if self.action not in ["BUY", "SELL"]:
             raise ValueError(f"Invalid action: {self.action}")
 
-        if self.quantity <= 0:
+        if self.quantity is None or self.quantity <= 0:
             raise ValueError(f"Invalid quantity: {self.quantity}")
 
 
@@ -80,7 +88,11 @@ class OrderState:
 
     def to_dict(self):
         """转换为字典格式"""
-        req = asdict(self.request)
+        req = (
+            self.request.model_dump()
+            if hasattr(self.request, "model_dump")
+            else asdict(self.request)
+        )
         result = {
             "order_id": self.order_id,
             "status": self.status,

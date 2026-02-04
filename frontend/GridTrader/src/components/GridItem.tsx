@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Resizable } from 're-resizable';
-import { GripVertical, X, Link, Unlink, ChevronDown } from 'lucide-react';
+import { GripVertical, X, Link, Unlink } from 'lucide-react';
 import { moduleRegistry } from '../config/moduleRegistry';
 import type { GridItemConfig } from '../types';
 
@@ -317,15 +317,18 @@ export function GridItem({
   };
 
   const viewModeConfig = getViewModeConfig();
-  const [showViewOptions, setShowViewOptions] = useState(false);
 
-  const handleViewChange = (value: string) => {
+  const handleViewToggle = () => {
+    const currentIndex = viewModeConfig.options.findIndex(opt => opt.value === viewModeConfig.currentView);
+    const nextIndex = (currentIndex + 1) % viewModeConfig.options.length;
+    const nextValue = viewModeConfig.options[nextIndex].value;
+
     if (item.moduleType === 'stock-detail') {
-      onUpdate({ settings: { ...item.settings, stockDetail: { view: value as any } } });
+      onUpdate({ settings: { ...item.settings, stockDetail: { view: nextValue as any } } });
     } else if (item.moduleType === 'order-management') {
-      onUpdate({ settings: { ...item.settings, orderManagement: { view: value as any } } });
-    } else if (item.moduleType === 'overview-chart' || item.moduleType === 'overview-chart') {
-      const focusMode = value === 'focus';
+      onUpdate({ settings: { ...item.settings, orderManagement: { view: nextValue as any } } });
+    } else if (item.moduleType === 'overview-chart') {
+      const focusMode = nextValue === 'focus';
       onUpdate({
         settings: {
           ...item.settings,
@@ -336,7 +339,6 @@ export function GridItem({
         }
       });
     }
-    setShowViewOptions(false);
   };
 
   // Available symbols for search
@@ -421,40 +423,15 @@ export function GridItem({
               />
             )}
             <span className="text-sm">{moduleConfig.name}</span>
-            {/* View Mode Button with Dropdown */}
+            {/* View Mode Toggle Button */}
             {viewModeConfig.hasViewMode && (
-              <div className="relative">
-                <button
-                  onClick={() => setShowViewOptions(!showViewOptions)}
-                  onMouseEnter={() => setShowViewOptions(true)}
-                  className="text-xs px-2 py-0.5 bg-zinc-700 hover:bg-zinc-600 transition-colors no-drag flex items-center gap-1"
-                  title="Switch view mode"
-                >
-                  {viewModeConfig.options.find(opt => opt.value === viewModeConfig.currentView)?.label}
-                  <ChevronDown className="w-3 h-3" />
-                </button>
-
-                {showViewOptions && (
-                  <div
-                    className="absolute left-0 top-full mt-1 bg-zinc-800 border border-zinc-700 shadow-xl z-50 min-w-[120px]"
-                    onMouseLeave={() => setShowViewOptions(false)}
-                  >
-                    <div className="p-1">
-                      {viewModeConfig.options.map((option) => (
-                        <button
-                          key={option.value}
-                          onClick={() => handleViewChange(option.value)}
-                          className={`w-full text-left px-2 py-1 hover:bg-zinc-700 text-xs ${
-                            viewModeConfig.currentView === option.value ? 'bg-blue-600' : ''
-                          }`}
-                        >
-                          {option.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
+              <button
+                onClick={handleViewToggle}
+                className="text-xs px-2 py-0.5 bg-zinc-700 hover:bg-zinc-600 transition-colors no-drag"
+                title="Click to switch view mode"
+              >
+                {viewModeConfig.options.find(opt => opt.value === viewModeConfig.currentView)?.label}
+              </button>
             )}
           </div>
 

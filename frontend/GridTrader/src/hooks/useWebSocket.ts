@@ -437,6 +437,8 @@ function handleMessage(message: WebSocketMessage) {
       // - message.profile: full profile data - for StockDetail cache
       // Note: News updates are now delivered via 'news_article' messages.
       if (message.symbol) {
+        // console.log('[WebSocket] Received static_update for', message.symbol, 'domains:', message.domains, 'versions:', message.version);
+        console.log('[WebSocket] Received static_update data:', message);
         const symbol = message.symbol;
         const domains: string[] = message.domains || [];
         const versions: Record<string, number> = message.version || {};

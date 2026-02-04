@@ -31,6 +31,10 @@ from pathlib import Path
 from threading import Thread
 from typing import Any, Dict, Optional
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import yaml
 
 from utils.logger import setup_logger
@@ -234,7 +238,7 @@ def _resolve_db_reference(
         resolved["host"] = "127.0.0.1"
     else:
         # Resolve from environment variable
-        host_value = os.environ.get(host_env_var)
+        host_value = os.getenv(host_env_var)
         if host_value:
             resolved["host"] = host_value
         else:
@@ -254,7 +258,7 @@ def _resolve_db_reference(
         database_url_env = f"{machine_name}_DATABASE_URL"
         resolved["database_url_env"] = database_url_env
         # Also resolve the actual URL for convenience
-        resolved["url"] = os.environ.get(database_url_env)
+        resolved["url"] = os.getenv(database_url_env)
 
     return resolved
 

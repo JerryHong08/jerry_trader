@@ -1,11 +1,27 @@
 import { useEffect, useRef } from 'react'
-import { createChart, ColorType, CandlestickSeries } from 'lightweight-charts'
-import type { IChartApi, CandlestickSeriesPartialOptions } from 'lightweight-charts'
+import { createChart, ColorType, LineSeries } from 'lightweight-charts'
+import type { IChartApi, ISeriesApi, LineData, Time } from 'lightweight-charts'
 
-export default function ChartPanel() {
+interface Trade {
+  symbol: string
+  price: number
+  size: number
+  timestamp: number
+}
+
+interface ChartPanelProps {
+  symbol: string | null
+  latestTrade: Trade | null
+}
+
+export default function ChartPanel({ symbol, latestTrade }: ChartPanelProps) {
   const chartContainerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
+  const seriesRef = useRef<ISeriesApi<'Line'> | null>(null)
+  const dataRef = useRef<LineData<Time>[]>([])
+  const currentSymbolRef = useRef<string | null>(null)
 
+  // Initialize chart
   useEffect(() => {
     if (!chartContainerRef.current) return
 
@@ -23,28 +39,30 @@ export default function ChartPanel() {
       },
       timeScale: {
         borderColor: '#485c7b',
+        timeVisible: true,
+        secondsVisible: true,
+      },
+      rightPriceScale: {
+        borderColor: '#485c7b',
+      },
+      crosshair: {
+        mode: 0,
       },
     })
 
     chartRef.current = chart
 
-    // Add candlestick series with sample data
-    const seriesOptions: CandlestickSeriesPartialOptions = {
-      upColor: '#26a69a',
-      downColor: '#ef5350',
-      borderVisible: false,
-      wickUpColor: '#26a69a',
-      wickDownColor: '#ef5350',
-    }
+    // Add line series for trades
+    const series = chart.addSeries(LineSeries, {
+      color: '#2962FF',
+      lineWidth: 2,
+      priceLineVisible: true,
+      lastValueVisible: true,
+      crosshairMarkerVisible: true,
+      crosshairMarkerRadius: 4,
+    })
 
-    const candlestickSeries = chart.addSeries(CandlestickSeries, seriesOptions)
-
-    // Generate sample data
-    const sampleData = generateSampleData()
-    candlestickSeries.setData(sampleData)
-
-    // Fit content
-    chart.timeScale().fitContent()
+    seriesRef.current = series
 
     // Handle resize
     const handleResize = () => {
@@ -55,50 +73,85 @@ export default function ChartPanel() {
       }
     }
 
-    window.addEventListener('resize', handleResize)
+    const resizeObserver = new ResizeObserver(handleResize)
+    resizeObserver.observe(chartContainerRef.current)
 
     return () => {
-      window.removeEventListener('resize', handleResize)
+      resizeObserver.disconnect()
       chart.remove()
+      chartRef.current = null
+      seriesRef.current = null
+      dataRef.current = []
     }
   }, [])
 
+  // Reset data when symbol changes
+  useEffect(() => {
+    if (!seriesRef.current) return
+
+    if (symbol !== currentSymbolRef.current) {
+      // Symbol changed, clear data
+      dataRef.current = []
+      seriesRef.current.setData([])
+      currentSymbolRef.current = symbol
+    }
+  }, [symbol])
+
+  // Handle real-time trade updates
+  useEffect(() => {
+    if (!seriesRef.current || !latestTrade || latestTrade.symbol !== symbol) return
+    if (typeof latestTrade.price !== 'number' || typeof latestTrade.timestamp !== 'number') return
+
+    const newPoint: LineData<Time> = {
+      time: Math.floor(latestTrade.timestamp / 1000) as Time,
+      value: latestTrade.price,
+    }
+
+    // Check if this is a new point (not a duplicate)
+    const lastPoint = dataRef.current[dataRef.current.length - 1]
+    if (lastPoint && lastPoint.time === newPoint.time && lastPoint.value === newPoint.value) {
+      return // Skip duplicate
+    }
+
+    // Use update for real-time data
+    try {
+      seriesRef.current.update(newPoint)
+      dataRef.current.push(newPoint)
+
+      // Keep only last 1000 points to prevent memory issues
+      if (dataRef.current.length > 1000) {
+        dataRef.current = dataRef.current.slice(-1000)
+        seriesRef.current.setData(dataRef.current)
+      }
+    } catch {
+      // If update fails (e.g., out of order), fall back to setData
+      dataRef.current.push(newPoint)
+      dataRef.current.sort((a, b) => (a.time as number) - (b.time as number))
+      seriesRef.current.setData(dataRef.current)
+    }
+  }, [latestTrade, symbol])
+
   return (
     <div>
+      <div className="flex items-center justify-between mb-2">
+        <span style={{ fontSize: '14px', color: '#d1d4dc' }}>
+          {symbol ? `${symbol} - Real-time Trades` : 'No Symbol Selected'}
+        </span>
+        {latestTrade && latestTrade.symbol === symbol && typeof latestTrade.price === 'number' && (
+          <span style={{ fontSize: '12px', color: '#26a69a' }}>
+            Last: ${latestTrade.price.toFixed(2)} ({latestTrade.size} shares)
+          </span>
+        )}
+      </div>
       <div ref={chartContainerRef} />
+      {!symbol && (
+        <div style={{ textAlign: 'center', padding: '40px', color: '#888' }}>
+          Add a symbol to see real-time trade data
+        </div>
+      )}
       <div style={{ marginTop: '12px', fontSize: '12px', color: '#888' }}>
-        Sample candlestick chart using TradingView lightweight-charts
+        Real-time trade chart using TradingView lightweight-charts
       </div>
     </div>
   )
-}
-
-// Generate sample candlestick data
-function generateSampleData() {
-  const data = []
-  const basePrice = 100
-  const startTime = Math.floor(Date.now() / 1000) - 86400 * 30 // 30 days ago
-
-  let lastClose = basePrice
-
-  for (let i = 0; i < 100; i++) {
-    const time = startTime + i * 86400
-    const change = (Math.random() - 0.5) * 4
-    const open = lastClose
-    const close = open + change
-    const high = Math.max(open, close) + Math.random() * 2
-    const low = Math.min(open, close) - Math.random() * 2
-
-    data.push({
-      time: time as any,  // unix ms
-      open: open,  // float
-      high: high,  // float
-      low: low,  // float
-      close: close,  // float
-    })
-
-    lastClose = close
-  }
-
-  return data
 }

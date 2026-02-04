@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 
 interface Quote {
   symbol: string;
@@ -16,109 +16,37 @@ interface Trade {
   timestamp: number;
 }
 
-export default function OrderBookDashboard() {
-  // local storage for symbols
-  const [symbols, setSymbols] = useState<string[]>(() => {
-    const saved = localStorage.getItem("symbols");
-    return saved ? JSON.parse(saved) : [];
-  });
+interface OrderBookDashboardProps {
+  symbols: string[];
+  symbolData: Record<string, Partial<Record<"Q" | "T", Quote | Trade>>>;
+  perSymbolEvents: Record<string, string[]>;
+  onAddSymbol: (symbols: string[], events: string[]) => void;
+  onRemoveSymbol: (symbol: string) => void;
+}
 
+export default function OrderBookDashboard({
+  symbols,
+  symbolData,
+  onAddSymbol,
+  onRemoveSymbol,
+}: OrderBookDashboardProps) {
   const [input, setInput] = useState("");
-  const ws = useRef<WebSocket | null>(null);
-  // data per symbol, grouping events by event_type: { [symbol]: { Q?: Quote, T?: Trade } }
-  const [symbolData, setSymbolData] = useState<
-    Record<string, Partial<Record<"Q" | "T", Quote | Trade>>>
-  >({});
-  // per-symbol events that were subscribed (persisted)
-  const [perSymbolEvents, setPerSymbolEvents] = useState<
-    Record<string, string[]>
-  >(() => {
-    const saved = localStorage.getItem("perSymbolEvents");
-    return saved ? JSON.parse(saved) : {};
-  });
   // selected events for new subscriptions (Q = quotes, T = trades)
   const [selectedEvents, setSelectedEvents] = useState<string[]>(["Q", "T"]);
-
-  useEffect(() => {
-    ws.current = new WebSocket("ws://localhost:8000/ws/tickdata");
-
-    ws.current.onopen = () => {
-      console.log("✅ Connected to backend");
-      // on connect, re-subscribe stored symbols with their events
-      if (symbols.length > 0) {
-        // build subscriptions array
-        const subs = symbols.map((s) => ({
-          symbol: s,
-          events: perSymbolEvents[s] || ["Q"],
-        }));
-        ws.current?.send(JSON.stringify({ subscriptions: subs }));
-      }
-    };
-
-    ws.current.onmessage = (event) => {
-      // messages include an event_type field now
-      console.log("📩 Message from server:", event.data);
-      const data = JSON.parse(event.data);
-      const ev = data.event_type;
-      const sym = data.symbol;
-
-      setSymbolData((prev) => {
-        const prevSym = prev[sym] || {};
-        return {
-          ...prev,
-          [sym]: { ...prevSym, [ev]: data },
-        };
-      });
-    };
-
-    ws.current.onclose = () => console.log("❌ Disconnected");
-
-    return () => ws.current?.close();
-  }, []);
 
   const addSymbol = () => {
     const newSyms = input
       .split(",")
       .map((s) => s.trim().toUpperCase())
       .filter(Boolean);
-    const newSymbols = Array.from(new Set([...symbols, ...newSyms]));
-    setSymbols(newSymbols);
-    // save per-symbol events for each newly added symbol
-    const newPerSymbolEvents = { ...perSymbolEvents };
-    newSyms.forEach((s) => {
-      newPerSymbolEvents[s] = selectedEvents;
-    });
-    setPerSymbolEvents(newPerSymbolEvents);
-    localStorage.setItem("symbols", JSON.stringify(newSymbols));
-    localStorage.setItem("perSymbolEvents", JSON.stringify(newPerSymbolEvents));
-
-    // send subscriptions to server in the shape: { subscriptions: [{symbol, events}, ...] }
-    const subs = newSyms.map((s) => ({ symbol: s, events: selectedEvents }));
-    if (subs.length > 0) ws.current?.send(JSON.stringify({ subscriptions: subs }));
+    if (newSyms.length > 0) {
+      onAddSymbol(newSyms, selectedEvents);
+    }
     setInput("");
   };
 
   const removeSymbol = (symbol: string) => {
-    const updated = symbols.filter((s) => s !== symbol);
-    setSymbols(updated);
-    localStorage.setItem("symbols", JSON.stringify(updated));
-    // send unsubscribe with events for this symbol if we have them
-    const events = perSymbolEvents[symbol] || ["Q"];
-    ws.current?.send(JSON.stringify({ action: "unsubscribe", symbol, events }));
-    console.log("unsubscribe:", symbol);
-
-    // remove saved per-symbol events
-    const newPer = { ...perSymbolEvents };
-    delete newPer[symbol];
-    setPerSymbolEvents(newPer);
-    localStorage.setItem("perSymbolEvents", JSON.stringify(newPer));
-
-    // clear its data
-    setSymbolData((prev) => {
-      const newData = { ...prev };
-      delete newData[symbol];
-      return newData;
-    });
+    onRemoveSymbol(symbol);
   };
 
   return (

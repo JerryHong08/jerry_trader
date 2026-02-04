@@ -57,7 +57,7 @@ class GridTraderChartDataManager:
         replay_date: Optional[str] = None,
         suffix_id: Optional[str] = None,
         redis_config: Optional[Dict[str, Any]] = None,
-        infludxdb_config: Optional[Dict[str, Any]] = None,
+        influxdb_config: Optional[Dict[str, Any]] = None,
     ):
         self._chart_data_dirty = True
         self._cached_chart_data_lw: Optional[Dict] = None
@@ -73,10 +73,8 @@ class GridTraderChartDataManager:
         self.db_id = f"{self.db_date}_{suffix_id}" if suffix_id else f"{self.db_date}"
 
         # ------- Redis Configuration -------
-        # Parse redis config (with defaults)
         redis_cfg = redis_config or {}
-        redis_host_env = redis_cfg.get("host")
-        redis_host = os.getenv(f"{redis_host_env}") if redis_host_env else "localhost"
+        redis_host = redis_cfg.get("host", "127.0.0.1")
         redis_port = redis_cfg.get("port", 6379)
         redis_db = redis_cfg.get("db", 0)
 
@@ -89,13 +87,18 @@ class GridTraderChartDataManager:
         self.HSET_NAME = f"state_cursor:{self.db_date}"
 
         # ------- InfluxDB Configuration -------
-        token = os.environ.get("INFLUXDB_TOKEN")
         self.org = "jerryhong"
-        self.bucket = "jerrymmm"
-        influx_url_env = (
-            infludxdb_config.get("influx_url_env") if infludxdb_config else None
-        )
+        influx_cfg = influxdb_config or {}
+        self.bucket = influx_cfg.get("bucket", "jerryib_trade")
+
+        # Token from env var
+        influx_token_env = influx_cfg.get("influx_token_env")
+        token = os.getenv(influx_token_env) if influx_token_env else None
+
+        # URL from env var
+        influx_url_env = influx_cfg.get("influx_url_env")
         url = os.getenv(influx_url_env) if influx_url_env else "http://localhost:8086"
+        logger.info(f"__init__ - Connecting to InfluxDB at {url}, bucket={self.bucket}")
 
         self._influx_client = influxdb_client.InfluxDBClient(
             url=url, token=token, org=self.org
@@ -103,7 +106,7 @@ class GridTraderChartDataManager:
         self._query_api = self._influx_client.query_api()
 
         logger.info(
-            f"GridTraderChartDataManager initialized: mode={self.run_mode}, db_id={self.db_id}"
+            f"__init__ - GridTraderChartDataManager initialized: mode={self.run_mode}, db_id={self.db_id}"
         )
 
     def mark_dirty(self):

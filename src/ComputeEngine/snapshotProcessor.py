@@ -57,6 +57,7 @@ class SnapshotProcessor:
         suffix_id: Optional[str] = None,
         load_history: Optional[str] = None,
         redis_config: Optional[Dict[str, Any]] = None,
+        influxdb_config: Optional[Dict[str, Any]] = None,
     ):
 
         self.run_mode = "replay" if replay_date else "live"
@@ -65,15 +66,23 @@ class SnapshotProcessor:
             if replay_date
             else datetime.now(ZoneInfo("America/New_York")).strftime("%Y%m%d")
         )
-        self.db_id = self._derive_db_id(self.db_date, suffix_id)
+
+        self.db_id = f"{self.db_date}_{suffix_id}" if suffix_id else f"{self.db_date}"
 
         self.load_history = load_history
 
         # ---------- InfluxDB Configuration ----------
-        token = os.environ.get("INFLUXDB_TOKEN")
         self.org = "jerryhong"
-        self.bucket = "jerrymmm"
-        url = "http://localhost:8086"
+        influx_cfg = influxdb_config or {}
+        self.bucket = influx_cfg.get("bucket", "jerryib_trade")
+
+        # Token from env var
+        influx_token_env = influx_cfg.get("influx_token_env")
+        token = os.environ.get(influx_token_env) if influx_token_env else None
+
+        # URL from env var
+        influx_url_env = influx_cfg.get("influx_url_env")
+        url = os.getenv(influx_url_env) if influx_url_env else "http://localhost:8086"
 
         self._influx_client = influxdb_client.InfluxDBClient(
             url=url, token=token, org=self.org
@@ -83,9 +92,7 @@ class SnapshotProcessor:
 
         # ---------- Redis Configuration ----------
         redis_cfg = redis_config or {}
-        redis_host_env = redis_cfg.get("host")
-        redis_host = os.getenv(redis_host_env)
-
+        redis_host = redis_cfg.get("host", "127.0.0.1")
         redis_port = redis_cfg.get("port", 6379)
         redis_db = redis_cfg.get("db", 0)
         self.r = redis.Redis(
@@ -135,16 +142,6 @@ class SnapshotProcessor:
             f"__init__ - SnapshotProcessor initialized: mode={self.run_mode}, "
             f"db_id={self.db_id}, INPUT={self.INPUT_STREAM_NAME}, OUTPUT={self.OUTPUT_STREAM_NAME}"
         )
-
-    @staticmethod
-    def _derive_db_id(db_date: Optional[str], override: Optional[str]) -> str:
-        if db_date and override:
-            return f"{db_date}_{override}"
-        if override:
-            return override
-        if db_date:
-            return db_date
-        return "na"
 
     # =========================================================================
     # PUBLIC API - Start Listener

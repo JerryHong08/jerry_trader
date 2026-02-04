@@ -31,6 +31,10 @@ from pathlib import Path
 from threading import Thread
 from typing import Any, Dict, Optional
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import yaml
 
 from utils.logger import setup_logger
@@ -39,7 +43,7 @@ logger = setup_logger(__name__, log_to_file=True, level=logging.INFO)
 
 # Project root for config file
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config_v2.yaml"
 
 
 def load_yaml_config(config_path: Path = DEFAULT_CONFIG_PATH) -> dict:
@@ -138,8 +142,9 @@ def build_runtime_config(
     - "llm.active_model" -> sets llm.active_model
     - "roles.GridTraderBFF.port" -> sets role-specific param
 
-    Redis/Postgres references in roles are resolved to their actual configs.
-    e.g., role.redis: "redis-1-a" -> resolves to yaml_cfg["redis-1-a"]
+    Database references use "db-name@MACHINE" format:
+    - "redis-b@OLDMAN" -> resolves host from OLDMAN_IP env var
+    - "redis-b" -> defaults to LOCAL (127.0.0.1)
     """
     if machine not in yaml_cfg.get("machines", {}):
         available = list(yaml_cfg.get("machines", {}).keys())
@@ -153,7 +158,7 @@ def build_runtime_config(
     # Add LLM config
     runtime["llm"] = copy.deepcopy(yaml_cfg.get("llm", {}))
 
-    # Add enabled roles with their config, resolving redis/postgres references
+    # Add enabled roles with their config, resolving database references
     runtime["roles"] = {}
     for role_name, role_cfg in machine_cfg.get("roles", {}).items():
         if role_cfg.get("enabled", True):
@@ -163,14 +168,12 @@ def build_runtime_config(
             for db_type in ["redis", "postgres", "influxdb"]:
                 db_ref = role_cfg.get(db_type)
                 if db_ref and isinstance(db_ref, str):
-                    if db_ref in yaml_cfg:
-                        resolved_cfg[db_type] = copy.deepcopy(yaml_cfg[db_ref])
-                    else:
-                        logger.warning(
-                            f"{db_type.capitalize()} config '{db_ref}' not found for role {role_name}"
-                        )
+                    resolved_cfg[db_type] = _resolve_db_reference(
+                        yaml_cfg, db_type, db_ref, role_name
+                    )
 
             runtime["roles"][role_name] = resolved_cfg
+
     # Apply CLI overrides using dot notation
     # Support both "replay_date" and "defaults.replay_date" for convenience
     for key_path, value in overrides.items():
@@ -183,6 +186,81 @@ def build_runtime_config(
     _normalize_date_fields(runtime)
 
     return runtime
+
+
+def _resolve_db_reference(
+    yaml_cfg: dict, db_type: str, db_ref: str, role_name: str
+) -> Optional[dict]:
+    """
+    Resolve database reference string to actual config.
+
+    Format: "db-name@MACHINE" or "db-name" (defaults to LOCAL)
+
+    Examples:
+        "redis-b@OLDMAN" -> {host: env(OLDMAN_IP), port: 6379, db: 0}
+        "redis-b" -> {host: "127.0.0.1", port: 6379, db: 0}
+        "postgres-a@WSL2" -> {host: ..., port: 5432, database: ..., url: "postgresql://..."}
+    """
+    # Parse "db-name@MACHINE" format
+    if "@" in db_ref:
+        db_name, machine_name = db_ref.rsplit("@", 1)
+    else:
+        db_name = db_ref
+        machine_name = "LOCAL"
+
+    # Get database template from databases section
+    databases = yaml_cfg.get("databases", {})
+    db_configs = databases.get(db_type, {})
+
+    if db_name not in db_configs:
+        logger.warning(
+            f"{db_type.capitalize()} config '{db_name}' not found for role {role_name}. "
+            f"Available: {list(db_configs.keys())}"
+        )
+        return None
+
+    # Copy database template
+    resolved = copy.deepcopy(db_configs[db_name])
+
+    # Resolve host from network section
+    network = yaml_cfg.get("network", {})
+    if machine_name not in network:
+        logger.warning(
+            f"Machine '{machine_name}' not found in network section for {role_name}.{db_type}. "
+            f"Available: {list(network.keys())}"
+        )
+        return None
+
+    host_env_var = network[machine_name]
+
+    if host_env_var is None:
+        # LOCAL = 127.0.0.1
+        resolved["host"] = "127.0.0.1"
+    else:
+        # Resolve from environment variable
+        host_value = os.getenv(host_env_var)
+        if host_value:
+            resolved["host"] = host_value
+        else:
+            logger.warning(
+                f"Environment variable '{host_env_var}' not set for {role_name}.{db_type}. "
+                f"Using env var name as placeholder."
+            )
+            # Keep env var name as placeholder for debugging
+            resolved["host"] = f"${{{host_env_var}}}"
+
+    # For influxdb, resolve the URL env var based on machine
+    if db_type == "influxdb":
+        resolved["influx_url_env"] = f"{machine_name}_INFLUXDB_URL"
+
+    # For postgres, resolve the URL env var based on machine
+    if db_type == "postgres":
+        database_url_env = f"{machine_name}_DATABASE_URL"
+        resolved["database_url_env"] = database_url_env
+        # Also resolve the actual URL for convenience
+        resolved["url"] = os.getenv(database_url_env)
+
+    return resolved
 
 
 def _normalize_date_fields(config: dict) -> None:
@@ -275,6 +353,7 @@ class GridTraderBackendStarter:
                 suffix_id=self.suffix_id,
                 load_history=self.load_history,
                 redis_config=role_cfg.get("redis"),
+                influxdb_config=role_cfg.get("influxdb"),
             )
             self._services.append(("SnapshotProcessor", self.processor))
         else:

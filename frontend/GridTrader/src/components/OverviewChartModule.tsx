@@ -250,7 +250,8 @@ export function OverviewChartModule({
   const lastDataTimestampRef = useRef<Map<string, number>>(new Map()); // Track last data point time per symbol
   const previousSeriesDataRef = useRef<Record<string, { data: { time: number; value: number }[]; states: { time: number; state: TickerState }[] }>>({}); // Track previous series data for incremental updates
   const seriesInitializedRef = useRef<Set<string>>(new Set()); // Track which series have been initialized with setData
-  const timeRangeAppliedRef = useRef<string | null>(null); // Track which time range has been applied to avoid re-applying on data updates
+  const timeRangeAppliedRef = useRef<string | null>(null); // Track which time range + focus mode has been applied
+  const globalTimeRangeRef = useRef<{ min: number; max: number } | null>(null); // Track global time range from all tickers
 
   // State
   const [rankData, setRankData] = useState<LocalTickerDataWithHistory[]>([]);
@@ -278,6 +279,14 @@ export function OverviewChartModule({
   const [useLogScale, setUseLogScale] = useState(true); // Logarithmic scale by default
   const [isFollowingLatest, setIsFollowingLatest] = useState(true); // Track if chart should follow latest data
   const isUserInteractingRef = useRef(false); // Track if user is currently interacting
+
+  // Sync focusMode from parent settings (when changed via GridItem button)
+  useEffect(() => {
+    const newFocusMode = settings?.overviewChart?.focusMode ?? false;
+    setFocusMode(newFocusMode);
+    // Clear timeRangeAppliedRef to force re-apply time range with global range
+    timeRangeAppliedRef.current = null;
+  }, [settings?.overviewChart?.focusMode]);
   const [topN, setTopN] = useState<number>(settings?.overviewChart?.topN || 20); // Number of top tickers to display
   const [showTopNMenu, setShowTopNMenu] = useState(false);
 
@@ -719,16 +728,34 @@ export function OverviewChartModule({
       segSeries.segmentSeries.forEach(s => s.applyOptions({ lineWidth }));
     });
 
-    // Only fit content on initial data load, not on subsequent updates
+    // On initial data load, trigger time range effect to apply range (don't use fitContent to avoid glitch)
     if (!hasInitialFitRef.current && chartSeriesData.size > 0) {
-      chart.timeScale().fitContent();
       hasInitialFitRef.current = true;
+      // Force time range effect to run by clearing the applied ref
+      timeRangeAppliedRef.current = null;
     }
   }, [chartReady, displayedRankData, chartSeriesData, enableSegmentation, hoveredSymbol]);
 
   // ============================================================================
   // Time Range Control
   // ============================================================================
+
+  // Update global time range whenever chartSeriesData changes (tracks ALL tickers, not just displayed)
+  useEffect(() => {
+    if (chartSeriesData.size === 0) return;
+
+    const allTimes: number[] = [];
+    chartSeriesData.forEach((data) => {
+      data.data.forEach(d => allTimes.push(d.time as number));
+    });
+
+    if (allTimes.length > 0) {
+      globalTimeRangeRef.current = {
+        min: Math.min(...allTimes),
+        max: Math.max(...allTimes),
+      };
+    }
+  }, [chartSeriesData]);
 
   useEffect(() => {
     if (!chartRef.current || !chartSeriesData.size) return;
@@ -739,49 +766,47 @@ export function OverviewChartModule({
       return;
     }
 
-    // Skip if we've already applied this time range (avoid glitch on data updates)
-    if (timeRangeAppliedRef.current === timeRange) {
+    // Create a key that includes both timeRange and focusMode to track what we've applied
+    const currentKey = `${timeRange}-${focusMode}`;
+
+    // Skip if we've already applied this exact configuration
+    if (timeRangeAppliedRef.current === currentKey) {
       return;
     }
 
     const chart = chartRef.current;
     const selectedOption = timeRangeOptions.find(opt => opt.value === timeRange);
 
+    // Use global time range (from all tickers) to keep focus mode synced with overview
+    const globalRange = globalTimeRangeRef.current;
+    if (!globalRange) return;
+
+    // Mark as applied BEFORE making changes to prevent re-entry
+    timeRangeAppliedRef.current = currentKey;
+
     if (selectedOption && selectedOption.minutes !== null) {
-      // Get the latest time from data
-      const allTimes: number[] = [];
-      chartSeriesData.forEach((data) => {
-        data.data.forEach(d => allTimes.push(d.time as number));
+      const rangeSeconds = selectedOption.minutes * 60;
+      const minTime = globalRange.max - rangeSeconds;
+
+      // Set the visible range
+      chart.timeScale().setVisibleRange({
+        from: minTime as Time,
+        to: globalRange.max as Time,
       });
 
-      if (allTimes.length > 0) {
-        const maxTime = Math.max(...allTimes);
-        const rangeSeconds = selectedOption.minutes * 60;
-        const minTime = maxTime - rangeSeconds;
-
-        // First, set the visible range to show the data
-        chart.timeScale().setVisibleRange({
-          from: minTime as Time,
-          to: maxTime as Time,
-        });
-
-        // Then use scrollToPosition to add right offset
-        const offsetBars = selectedOption.minutes;
-
-        setTimeout(() => {
-          if (chartRef.current) {
-            chartRef.current.timeScale().scrollToPosition(offsetBars, false);
-          }
-        }, 0);
-
-        // Mark this time range as applied
-        timeRangeAppliedRef.current = timeRange;
-      }
+      // Add right offset synchronously
+      chart.timeScale().scrollToPosition(selectedOption.minutes, false);
     } else {
-      chart.timeScale().fitContent();
-      timeRangeAppliedRef.current = timeRange;
+      // 'All' mode - use global range instead of fitContent to keep consistent
+      chart.timeScale().setVisibleRange({
+        from: globalRange.min as Time,
+        to: globalRange.max as Time,
+      });
+
+      // Add some right padding synchronously
+      chart.timeScale().scrollToPosition(10, false);
     }
-  }, [timeRange, chartSeriesData, isFollowingLatest]);
+  }, [timeRange, chartSeriesData, isFollowingLatest, focusMode]);
 
   // ============================================================================
   // Event Handlers
@@ -809,7 +834,9 @@ export function OverviewChartModule({
   const toggleFocusMode = useCallback(() => {
     setFocusMode(prev => {
       const newFocusMode = !prev;
-      hasInitialFitRef.current = false; // Reset to allow new fit on focus mode change
+      // Clear timeRangeAppliedRef to force re-apply time range
+      // Don't reset hasInitialFitRef - let time range effect handle range management
+      timeRangeAppliedRef.current = null;
       onSettingsChange?.({
         overviewChart: {
           selectedStates: Array.from(selectedStates),
@@ -847,34 +874,29 @@ export function OverviewChartModule({
     setIsFollowingLatest(true);
     timeRangeAppliedRef.current = null; // Clear to force re-apply
 
+    // Use global time range to keep consistent with overview
+    const globalRange = globalTimeRangeRef.current;
+    if (!globalRange) return;
+
     if (selectedOption && selectedOption.minutes !== null) {
-      // Apply current time range
-      const allTimes: number[] = [];
-      chartSeriesData.forEach((data) => {
-        data.data.forEach(d => allTimes.push(d.time as number));
+      const rangeSeconds = selectedOption.minutes * 60;
+      const minTime = globalRange.max - rangeSeconds;
+
+      chart.timeScale().setVisibleRange({
+        from: minTime as Time,
+        to: globalRange.max as Time,
       });
 
-      if (allTimes.length > 0) {
-        const maxTime = Math.max(...allTimes);
-        const rangeSeconds = selectedOption.minutes * 60;
-        const minTime = maxTime - rangeSeconds;
-
-        chart.timeScale().setVisibleRange({
-          from: minTime as Time,
-          to: maxTime as Time,
-        });
-
-        // Add right offset using scrollToPosition
-        const offsetBars = selectedOption.minutes;
-        setTimeout(() => {
-          if (chartRef.current) {
-            chartRef.current.timeScale().scrollToPosition(offsetBars, false);
-          }
-        }, 0);
-      }
+      // Add right offset synchronously
+      chart.timeScale().scrollToPosition(selectedOption.minutes, false);
     } else {
-      // 'All' mode - just fit content
-      chart.timeScale().fitContent();
+      // 'All' mode - use global range
+      chart.timeScale().setVisibleRange({
+        from: globalRange.min as Time,
+        to: globalRange.max as Time,
+      });
+
+      chart.timeScale().scrollToPosition(10, false);
     }
   }, [timeRange, chartSeriesData]);
 

@@ -152,6 +152,7 @@ class GridTraderBFF:
         # Parse redis config (with defaults)
         redis_cfg = redis_config or {}
         redis_host = redis_cfg.get("host", "127.0.0.1")
+
         redis_port = redis_cfg.get("port", 6379)
         redis_db = redis_cfg.get("db", 0)
 
@@ -259,8 +260,10 @@ class GridTraderBFF:
         self._setup_routes()
 
         logger.info(
-            f"GridTraderBFF initialized: host={host}, port={port}, "
-            f"replay_date={replay_date}, suffix_id={suffix_id}"
+            f"GridTraderBFF initialized: backend host={host}, port={port}, "
+            f"replay_date={replay_date}, suffix_id={suffix_id},"
+            f"redis host={redis_host}, redis port={redis_port}, redis db={redis_db}"
+            f"influxdb config={influxdb_config}"
         )
 
     def _setup_routes(self):

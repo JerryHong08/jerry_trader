@@ -93,7 +93,7 @@ class GridTraderChartDataManager:
 
         # Token from env var
         influx_token_env = influx_cfg.get("influx_token_env")
-        token = os.environ.get(influx_token_env) if influx_token_env else None
+        token = os.getenv(influx_token_env) if influx_token_env else None
 
         # URL from env var
         influx_url_env = influx_cfg.get("influx_url_env")

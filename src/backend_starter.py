@@ -220,7 +220,9 @@ def _resolve_db_reference(
         return None
 
     # Copy database template
-    resolved = copy.deepcopy(db_configs[db_name])
+    # resolved = copy.deepcopy(db_configs[db_name])
+    template = db_configs[db_name]
+    resolved = copy.deepcopy(template) if template is not None else {}
 
     # Resolve host from network section
     network = yaml_cfg.get("network", {})

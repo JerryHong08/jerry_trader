@@ -89,6 +89,11 @@ class IBGateway:
         """
         order_id = self.client.place_order(contract, order)
 
+        # Log the outsideRth value for debugging
+        logger.info(
+            f"place_order - Order {order_id} {contract.symbol}: outsideRth={order.outsideRth}"
+        )
+
         # 发布订单提交事件
         self.event_bus.publish_event(
             OrderPlacedEvent(

@@ -175,18 +175,25 @@ class DatabaseService:
         avg_fill_price: Optional[float] = None,
         commission: Optional[float] = None,
     ):
+        """Insert or update an order row.
+
+        Handles race condition between simultaneous events for the SAME new order
+        by catching IntegrityError and retrying as update. Will still raise error
+        for historical conflicts (different orders reusing the same order_id).
+        """
         from OrderManagement.persistence.models import now_et
 
-        with self.Session() as session:
-            account_norm = (account or "").strip()
+        account_norm = (account or "").strip()
+
+        def _do_update(session):
             row = (
                 session.query(Order)
                 .filter(Order.account == account_norm, Order.order_id == int(order_id))
                 .one_or_none()
             )
             if row is None:
-                row = Order(account=account_norm, order_id=int(order_id))
-                session.add(row)
+                # Historical record was deleted between our insert attempt and now
+                raise IntegrityError("Row not found for update", None, None)
 
             if symbol is not None:
                 row.symbol = symbol
@@ -194,7 +201,6 @@ class DatabaseService:
                 row.action = action
             if quantity is not None:
                 row.quantity = int(quantity)
-
             if order_type is not None:
                 row.order_type = order_type
             if limit_price is not None:
@@ -207,7 +213,6 @@ class DatabaseService:
                 row.sec_type = sec_type
             if reason is not None:
                 row.reason = reason
-
             if last_status is not None:
                 row.last_status = last_status
             if filled is not None:
@@ -221,6 +226,61 @@ class DatabaseService:
 
             row.updated_at = now_et()
             session.commit()
+
+        with self.Session() as session:
+            # First check if row exists
+            existing = (
+                session.query(Order)
+                .filter(Order.account == account_norm, Order.order_id == int(order_id))
+                .one_or_none()
+            )
+
+            if existing is not None:
+                # Row exists - update it
+                _do_update(session)
+                return
+
+            # Row doesn't exist - try to insert
+            try:
+                row = Order(account=account_norm, order_id=int(order_id))
+                if symbol is not None:
+                    row.symbol = symbol
+                if action is not None:
+                    row.action = action
+                if quantity is not None:
+                    row.quantity = int(quantity)
+                if order_type is not None:
+                    row.order_type = order_type
+                if limit_price is not None:
+                    row.limit_price = float(limit_price)
+                if tif is not None:
+                    row.tif = tif
+                if outside_rth is not None:
+                    row.outside_rth = 1 if bool(outside_rth) else 0
+                if sec_type is not None:
+                    row.sec_type = sec_type
+                if reason is not None:
+                    row.reason = reason
+                if last_status is not None:
+                    row.last_status = last_status
+                if filled is not None:
+                    row.filled = int(filled)
+                if remaining is not None:
+                    row.remaining = int(remaining)
+                if avg_fill_price is not None:
+                    row.avg_fill_price = float(avg_fill_price)
+                if commission is not None:
+                    row.commission = float(commission)
+
+                row.created_at = now_et()
+                row.updated_at = now_et()
+                session.add(row)
+                session.commit()
+            except IntegrityError:
+                # Race condition: another event inserted the same order_id just now
+                # Retry as update
+                session.rollback()
+                _do_update(session)
 
     def _write_order_placed(self, event: OrderPlacedEvent):
         self._upsert_order_row(

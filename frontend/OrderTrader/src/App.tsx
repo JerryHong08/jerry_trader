@@ -195,7 +195,10 @@ export default function App() {
               </div>
             </div>
             <div className="cardBody">
-              <IbbotPanel />
+              <IbbotPanel
+                chartSymbol={chartSymbol}
+                lastTradePrice={latestTrade?.price ?? null}
+              />
             </div>
           </section>
         </div>

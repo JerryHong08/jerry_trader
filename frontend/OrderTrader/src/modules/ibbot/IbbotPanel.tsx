@@ -26,6 +26,11 @@ type PositionRow = {
   realized_pnl?: number;
 };
 
+interface IbbotPanelProps {
+  chartSymbol?: string | null;
+  lastTradePrice?: number | null;
+}
+
 function canCancelOrder(status: string): boolean {
   const s = (status || '').toLowerCase();
   // terminal-ish states
@@ -45,7 +50,103 @@ function mergeOrder(prev: OrderStatusEventData | undefined, next: OrderStatusEve
   };
 }
 
-export default function IbbotPanel() {
+// Scrollable price input component
+function PriceInput({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: number | null;
+  onChange: (v: number | null) => void;
+  disabled?: boolean;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [isHovering, setIsHovering] = useState(false);
+
+  const currentPrice = value ?? 0;
+
+  const handleWheel = (e: React.WheelEvent) => {
+    if (disabled) return;
+    e.preventDefault();
+    const step = currentPrice * 0.001; // 0.1% per scroll tick
+    const delta = e.deltaY < 0 ? step : -step;
+    const newPrice = Math.max(0.01, currentPrice + delta);
+    onChange(Math.round(newPrice * 100) / 100);
+  };
+
+  const adjustByPercent = (percent: number) => {
+    if (disabled) return;
+    const newPrice = currentPrice * (1 + percent / 100);
+    onChange(Math.max(0.01, Math.round(newPrice * 100) / 100));
+  };
+
+  return (
+    <div
+      onMouseEnter={() => setIsHovering(true)}
+      onMouseLeave={() => setIsHovering(false)}
+      style={{ display: 'flex', flexDirection: 'column', gap: 4 }}
+    >
+      <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => adjustByPercent(-5)}
+          style={{ padding: '2px 6px', fontSize: 11 }}
+          title="-5%"
+        >
+          -5%
+        </button>
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => adjustByPercent(-1)}
+          style={{ padding: '2px 6px', fontSize: 11 }}
+          title="-1%"
+        >
+          -1%
+        </button>
+        <input
+          ref={inputRef}
+          style={{
+            width: '100%',
+            cursor: isHovering && !disabled ? 'ns-resize' : 'text',
+          }}
+          type="number"
+          step="0.01"
+          value={value ?? ''}
+          onChange={(e) => onChange(e.target.value === '' ? null : Number(e.target.value))}
+          onWheel={handleWheel}
+          disabled={disabled}
+        />
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => adjustByPercent(1)}
+          style={{ padding: '2px 6px', fontSize: 11 }}
+          title="+1%"
+        >
+          +1%
+        </button>
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => adjustByPercent(5)}
+          style={{ padding: '2px 6px', fontSize: 11 }}
+          title="+5%"
+        >
+          +5%
+        </button>
+      </div>
+      {isHovering && !disabled && (
+        <div style={{ fontSize: 10, opacity: 0.6, textAlign: 'center' }}>
+          Scroll to adjust price (0.1% per tick)
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function IbbotPanel({ chartSymbol, lastTradePrice }: IbbotPanelProps) {
   const cfg = useMemo(() => getIbbotConfig(), []);
 
   const [wsStatus, setWsStatus] = useState<'connected' | 'disconnected' | 'error'>('disconnected');
@@ -71,16 +172,43 @@ export default function IbbotPanel() {
   }, [cfg.restBaseUrl]);
 
   const [form, setForm] = useState<PlaceOrderRequest>({
-    symbol: 'AAPL',
+    symbol: chartSymbol || 'AAPL',
     action: 'BUY',
-    quantity: 1,
-    order_type: 'MKT',
-    limit_price: null,
+    quantity: 100,
+    order_type: 'LMT',  // Default to LMT for pre-market trading (MKT conflicts with OutsideRth)
+    limit_price: lastTradePrice ?? null,
     tif: 'DAY',
     OutsideRth: true,
     sec_type: 'STK',
     reason: '',
   });
+
+  // Track if price has been manually set (to avoid overwriting user input)
+  const priceInitializedRef = useRef(false);
+
+  // Sync symbol from chart when it changes
+  useEffect(() => {
+    if (chartSymbol && chartSymbol !== form.symbol) {
+      setForm((p) => ({ ...p, symbol: chartSymbol }));
+      // Reset price initialization when symbol changes
+      priceInitializedRef.current = false;
+    }
+  }, [chartSymbol, form.symbol]);
+
+  // Sync limit price from last trade price (only on first load or after refresh)
+  useEffect(() => {
+    if (lastTradePrice && !priceInitializedRef.current && form.order_type === 'LMT') {
+      setForm((p) => ({ ...p, limit_price: Math.round(lastTradePrice * 100) / 100 }));
+      priceInitializedRef.current = true;
+    }
+  }, [lastTradePrice, form.order_type]);
+
+  // Function to refresh limit price from latest trade
+  const syncPriceFromTrade = () => {
+    if (lastTradePrice) {
+      setForm((p) => ({ ...p, limit_price: Math.round(lastTradePrice * 100) / 100 }));
+    }
+  };
 
   const [cancelReason, setCancelReason] = useState<string>('');
 
@@ -337,7 +465,7 @@ export default function IbbotPanel() {
               <input
                 style={{ width: '100%' }}
                 type="number"
-                min={1}
+                min={100}
                 value={form.quantity}
                 onChange={(e) => setForm((p) => ({ ...p, quantity: Number(e.target.value) }))}
               />
@@ -374,24 +502,33 @@ export default function IbbotPanel() {
             </label>
 
             {form.order_type === 'LMT' ? (
-              <label style={{ gridColumn: 'span 2' }}>
-                Limit Price
-                <input
-                  style={{ width: '100%' }}
-                  type="number"
-                  step="0.01"
-                  value={form.limit_price ?? ''}
-                  onChange={(e) =>
-                    setForm((p) => ({
-                      ...p,
-                      limit_price: e.target.value === '' ? null : Number(e.target.value),
-                    }))
-                  }
+              <div style={{ gridColumn: 'span 4' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                  <span>Limit Price</span>
+                  <button
+                    type="button"
+                    disabled={loading || !lastTradePrice}
+                    onClick={syncPriceFromTrade}
+                    style={{ padding: '2px 8px', fontSize: 11 }}
+                    title="Sync price from last trade"
+                  >
+                    ↻ Sync
+                  </button>
+                  {lastTradePrice && (
+                    <span style={{ fontSize: 11, opacity: 0.7 }}>
+                      (Last: ${lastTradePrice.toFixed(2)})
+                    </span>
+                  )}
+                </div>
+                <PriceInput
+                  value={form.limit_price ?? null}
+                  onChange={(v) => setForm((p) => ({ ...p, limit_price: v }))}
+                  disabled={loading}
                 />
-              </label>
+              </div>
             ) : null}
 
-            <label style={{ gridColumn: 'span 2', display: 'flex', alignItems: 'center', gap: 8, marginTop: 22 }}>
+            <label style={{ gridColumn: form.order_type === 'LMT' ? 'span 2' : 'span 2', display: 'flex', alignItems: 'center', gap: 8, marginTop: 22 }}>
               <input
                 type="checkbox"
                 checked={Boolean(form.OutsideRth)}

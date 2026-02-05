@@ -43,7 +43,7 @@ logger = setup_logger(__name__, log_to_file=True, level=logging.INFO)
 
 # Project root for config file
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config_v2.yaml"
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 
 
 def load_yaml_config(config_path: Path = DEFAULT_CONFIG_PATH) -> dict:

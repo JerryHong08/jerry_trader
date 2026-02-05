@@ -109,7 +109,7 @@ async def lifespan(app: FastAPI):
     logger.info("✅ Services initialized and subscribed to events")
 
     # 2.5 Optional: database persistence (best-effort)
-    database_url = os.getenv("DATABASE_URL")
+    database_url = os.getenv("LOCAL_DATABASE_URL")
     if database_url:
         try:
             database_service = DatabaseService(database_url)
@@ -124,8 +124,8 @@ async def lifespan(app: FastAPI):
 
     # 3. NOW connect to IB Gateway (services are ready to receive events)
     host = os.getenv("IB_GATEWAY_HOST", "127.0.0.1")
-    # port = int(os.getenv("IB_GATEWAY_PORT", "4002"))
-    port = int(os.getenv("IB_GATEWAY_PORT", "7497"))
+    port = int(os.getenv("IB_GATEWAY_PORT", "4002"))
+    # port = int(os.getenv("IB_GATEWAY_PORT", "7497"))
     client_id = int(os.getenv("IB_CLIENT_ID", "1"))
 
     logger.info(f"📡 Connecting to IB Gateway at {host}:{port}...")

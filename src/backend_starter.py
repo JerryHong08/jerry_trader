@@ -43,7 +43,7 @@ logger = setup_logger(__name__, log_to_file=True, level=logging.INFO)
 
 # Project root for config file
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config_v2.yaml"
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 
 
 def load_yaml_config(config_path: Path = DEFAULT_CONFIG_PATH) -> dict:
@@ -219,8 +219,7 @@ def _resolve_db_reference(
         )
         return None
 
-    # Copy database template
-    # resolved = copy.deepcopy(db_configs[db_name])
+    # Copy database template (handle None/empty entries in YAML)
     template = db_configs[db_name]
     resolved = copy.deepcopy(template) if template is not None else {}
 
@@ -239,6 +238,7 @@ def _resolve_db_reference(
         # LOCAL = 127.0.0.1
         resolved["host"] = "127.0.0.1"
     else:
+        print(host_env_var)
         # Resolve from environment variable
         host_value = os.getenv(host_env_var)
         if host_value:

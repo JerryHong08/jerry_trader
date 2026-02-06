@@ -15,7 +15,7 @@ Examples:
     make_session_id(replay_date="20260120", suffix_id="v1") -> "20260120_replay_v1"
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Tuple
 from zoneinfo import ZoneInfo
 
@@ -58,3 +58,19 @@ def parse_session_id(session_id: str) -> Tuple[str, str]:
     db_date = session_id[:8]
     run_mode = "replay" if "_replay" in session_id else "live"
     return db_date, run_mode
+
+
+def db_date_to_date(db_date: str) -> date:
+    """
+    Parse a YYYYMMDD string into a :class:`datetime.date`.
+
+    This eliminates the fragile ``db_date[:4]`` / ``[4:6]`` / ``[6:8]``
+    slicing that was copy-pasted across the codebase.
+
+    Args:
+        db_date: Date string in YYYYMMDD format (e.g. "20260120").
+
+    Returns:
+        A ``datetime.date`` object.
+    """
+    return date(int(db_date[:4]), int(db_date[4:6]), int(db_date[6:8]))

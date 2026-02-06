@@ -27,7 +27,7 @@ import redis
 from influxdb_client.client.write_api import SYNCHRONOUS
 
 from utils.logger import setup_logger
-from utils.session import make_session_id, parse_session_id
+from utils.session import db_date_to_date, make_session_id, parse_session_id
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
 
@@ -534,13 +534,13 @@ class StateEngine:
                         continue
 
                 if min_ts:
-                    range_start = f"{self.db_date[:4]}-{self.db_date[4:6]}-{self.db_date[6:8]}T00:00:00Z"
+                    range_start = (
+                        f"{db_date_to_date(self.db_date).isoformat()}T00:00:00Z"
+                    )
                     range_end = min_ts.isoformat()
                     return range_start, range_end
 
-            range_start = (
-                f"{self.db_date[:4]}-{self.db_date[4:6]}-{self.db_date[6:8]}T00:00:00Z"
-            )
+            range_start = f"{db_date_to_date(self.db_date).isoformat()}T00:00:00Z"
             range_end = "now()"
             return range_start, range_end
         else:

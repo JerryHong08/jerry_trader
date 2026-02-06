@@ -26,7 +26,7 @@ import influxdb_client
 import redis
 
 from utils.logger import setup_logger
-from utils.session import make_session_id, parse_session_id
+from utils.session import db_date_to_date, make_session_id, parse_session_id
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
 
@@ -121,12 +121,10 @@ class GridTraderChartDataManager:
         ny_tz = ZoneInfo("America/New_York")
 
         if self.run_mode == "replay":
-            year = int(self.db_date[:4])
-            month = int(self.db_date[4:6])
-            day = int(self.db_date[6:8])
+            d = db_date_to_date(self.db_date)
             # Create datetime in NY timezone to get correct offset for that date
-            start_dt = datetime(year, month, day, 4, 0, 0, tzinfo=ny_tz)
-            end_dt = datetime(year, month, day, 16, 0, 0, tzinfo=ny_tz)
+            start_dt = datetime(d.year, d.month, d.day, 4, 0, 0, tzinfo=ny_tz)
+            end_dt = datetime(d.year, d.month, d.day, 16, 0, 0, tzinfo=ny_tz)
             range_start = start_dt.isoformat()
             range_end = end_dt.isoformat()
         else:
@@ -184,7 +182,7 @@ class GridTraderChartDataManager:
             range_end = (
                 "now()"
                 if self.run_mode != "replay"
-                else f"{self.db_date[:4]}-{self.db_date[4:6]}-{self.db_date[6:8]}T23:59:59Z"
+                else f"{db_date_to_date(self.db_date).isoformat()}T23:59:59Z"
             )
         else:
             range_start, range_end = self._get_intraday_time_range()

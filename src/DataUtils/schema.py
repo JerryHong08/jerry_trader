@@ -52,9 +52,9 @@ MASSIVE_SNAPSHOT_SCHEMA = {
     "lastTrade_x": pl.Int64,
     # lastQuote fields
     "lastQuote_P": pl.Float64,
-    "lastQuote_S": pl.Int64,  # bid size should be integer
+    "lastQuote_S": pl.Int64,  # ask size should be integer
     "lastQuote_p": pl.Float64,
-    "lastQuote_s": pl.Int64,  # ask size should be integer
+    "lastQuote_s": pl.Int64,  # bid size should be integer
     "lastQuote_t": pl.Int64,
 }
 

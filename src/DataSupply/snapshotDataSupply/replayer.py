@@ -271,6 +271,11 @@ class MarketSnapshotReplayer:
                         pl.col("prevDay_c").alias("prev_close"),
                         pl.col("prevDay_v").alias("prev_volume"),
                         pl.col("min_vw").alias("vwap"),
+                        # Quote fields for robust weighted-mid price
+                        pl.col("lastQuote_p").cast(pl.Float64).alias("bid"),
+                        pl.col("lastQuote_P").cast(pl.Float64).alias("ask"),
+                        pl.col("lastQuote_s").cast(pl.Float64).alias("bid_size"),
+                        pl.col("lastQuote_S").cast(pl.Float64).alias("ask_size"),
                     ]
                 )
 

@@ -600,11 +600,11 @@ class GridTraderBackendStarter:
             port = bff_cfg.get("port", 5001)
             logger.info(f"Starting GridTrader BFF on {host}:{port}")
             self.bff.run()
-        # else:
-        #     # If no BFF, just keep running
-        #     logger.info("No BFF - running in headless mode")
-        #     while self._running:
-        #         time.sleep(1)
+        else:
+            # If no BFF, just keep running
+            # logger.info("No BFF - running in headless mode")
+            while self._running:
+                time.sleep(1)
 
 
 def main():

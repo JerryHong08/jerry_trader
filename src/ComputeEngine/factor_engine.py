@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import WriteOptions, WriteType
 
-from tickDataSupply.unified_tick_manager import UnifiedTickManager
+from DataSupply.tickDataSupply.unified_tick_manager import UnifiedTickManager
 from utils.logger import setup_logger
 from utils.session import make_session_id, parse_session_id
 

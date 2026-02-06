@@ -132,8 +132,9 @@ class MarketSnapshotReplayer:
         self._files_replayed = 0
 
         logger.info(
-            f"MarketSnapshotReplayer initialized: date={replay_date}, suffix_id={suffix_id}, "
-            f"speed={speed}x, format={file_format}, redis={redis_host}:{redis_port}"
+            f"MarketSnapshotReplayer initialized: date={replay_date}, suffix_id={suffix_id},\n"
+            f"speed={speed}x, format={file_format}, redis={redis_host}:{redis_port}\n"
+            f"influxdb_url={self.influx_url}, influxdb_bucket={self.influx_bucket}, db_id={self.db_id}"
         )
 
     async def start(self):

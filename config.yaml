@@ -101,7 +101,8 @@ machines:
         enabled: true
         speed: 1.0
         format: "parquet"
-        rollback-to: null
+        rollback_to: null
+        start_from: null
         clear: false
         redis: "redis-b"
         influxdb: "influxdb-b"

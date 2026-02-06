@@ -140,7 +140,8 @@ class SnapshotProcessor:
 
         logger.info(
             f"__init__ - SnapshotProcessor initialized: mode={self.run_mode}, "
-            f"db_id={self.db_id}, INPUT={self.INPUT_STREAM_NAME}, OUTPUT={self.OUTPUT_STREAM_NAME}"
+            f"db_host:{redis_host}:db_id={self.db_id}, INPUT={self.INPUT_STREAM_NAME}, OUTPUT={self.OUTPUT_STREAM_NAME}"
+            f"influxdb_url={url}, bucket={self.bucket}"
         )
 
     # =========================================================================

@@ -117,6 +117,8 @@ class MarketSnapshotReplayer:
         )
         self.influx_org = influx_cfg.get("org", self.DEFAULT_INFLUX_ORG)
         self.influx_bucket = influx_cfg.get("bucket", self.DEFAULT_INFLUX_BUCKET)
+        influx_token_env = influx_cfg.get("influx_token_env")
+        self.influx_token = os.getenv(influx_token_env) if influx_token_env else None
 
         # Derive db_id for InfluxDB filtering
         self.db_id = f"{replay_date}_{suffix_id}" if suffix_id else f"{replay_date}"
@@ -132,8 +134,9 @@ class MarketSnapshotReplayer:
         self._files_replayed = 0
 
         logger.info(
-            f"MarketSnapshotReplayer initialized: date={replay_date}, suffix_id={suffix_id}, "
-            f"speed={speed}x, format={file_format}, redis={redis_host}:{redis_port}"
+            f"MarketSnapshotReplayer initialized: date={replay_date}, suffix_id={suffix_id},\n"
+            f"speed={speed}x, format={file_format}, redis={redis_host}:{redis_port}\n"
+            f"influxdb_url={self.influx_url}, influxdb_bucket={self.influx_bucket}, db_id={self.db_id}"
         )
 
     async def start(self):
@@ -151,6 +154,7 @@ class MarketSnapshotReplayer:
         # Handle clear if requested
         if self.clear:
             self._clear_all_data()
+            self._running = False
 
         # Run the replay
         await self._run_replay()
@@ -389,15 +393,14 @@ class MarketSnapshotReplayer:
 
     def _rollback_influxdb(self, rollback_dt: datetime) -> None:
         """Rollback InfluxDB data after the specified datetime."""
-        token = os.environ.get("INFLUXDB_TOKEN")
 
-        if not token:
+        if not self.influx_token:
             logger.warning("INFLUXDB_TOKEN not set, skipping InfluxDB rollback")
             return
 
         try:
             client = influxdb_client.InfluxDBClient(
-                url=self.influx_url, token=token, org=self.influx_org
+                url=self.influx_url, token=self.influx_token, org=self.influx_org
             )
             delete_api = client.delete_api()
 
@@ -454,15 +457,14 @@ class MarketSnapshotReplayer:
                 logger.info(f"Redis key {key} does not exist, skipping")
 
         # Delete InfluxDB data
-        token = os.environ.get("INFLUXDB_TOKEN")
 
-        if not token:
+        if not self.influx_token:
             logger.warning("INFLUXDB_TOKEN not set, skipping InfluxDB clear")
             return
 
         try:
             client = influxdb_client.InfluxDBClient(
-                url=self.influx_url, token=token, org=self.influx_org
+                url=self.influx_url, token=self.influx_token, org=self.influx_org
             )
             delete_api = client.delete_api()
 

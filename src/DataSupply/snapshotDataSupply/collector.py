@@ -11,6 +11,7 @@ import time
 from datetime import datetime
 from datetime import time as dtime
 from queue import Empty, Queue
+from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
 
 import exchange_calendars as xcals
@@ -21,6 +22,7 @@ from dotenv import load_dotenv
 from config import cache_dir
 from DataUtils.schema import MASSIVE_SNAPSHOT_SCHEMA
 from utils.logger import setup_logger
+from utils.session import make_session_id
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
 
@@ -30,9 +32,23 @@ EST = ZoneInfo("America/New_York")
 
 
 class MarketsnapshotCollector:
-    def __init__(self, limit: str = "market_open"):
+    def __init__(
+        self,
+        limit: str = "market_open",
+        session_id: Optional[str] = None,
+        redis_config: Optional[Dict[str, Any]] = None,
+    ):
         self.limit = limit
-        self.r = redis.Redis(host="localhost", port=6379, db=0)
+        self.session_id = session_id or make_session_id()
+
+        # Parse redis config
+        redis_cfg = redis_config or {}
+        redis_host = redis_cfg.get("host", "127.0.0.1")
+        redis_port = redis_cfg.get("port", 6379)
+        redis_db = redis_cfg.get("db", 0)
+        self.r = redis.Redis(
+            host=redis_host, port=redis_port, db=redis_db, decode_responses=True
+        )
 
         self.tz = EST
         self.calendar = xcals.get_calendar("XNYS")
@@ -233,9 +249,8 @@ class MarketsnapshotCollector:
 
                 # Publish to Redis
                 payload = stream_df.write_json()
-                today = datetime.now(ZoneInfo("America/New_York")).strftime("%Y%m%d")
-                STREAM_NAME = f"market_snapshot_stream:{today}"
-                assert ":" in STREAM_NAME, "STREAM_NAME must include a date suffix!"
+                STREAM_NAME = f"market_snapshot_stream:{self.session_id}"
+                assert ":" in STREAM_NAME, "STREAM_NAME must include a session suffix!"
 
                 message_id = self.r.xadd(STREAM_NAME, {"data": payload}, maxlen=100)
                 if self.r.ttl(STREAM_NAME) < 0:

@@ -29,12 +29,13 @@ r = redis.Redis(host="localhost", port=6379, db=0)
 
 stream_message_ids: Dict[str, str] = {}  # ticker -> message_id
 
-if replay_date := os.getenv("REPLAY_DATE"):
-    logger.info(f"Replay mode activated for date: {replay_date}")
-    STREAM_NAME = f"factor_tasks_replay:{replay_date}"
-else:
-    today = datetime.now(ZoneInfo("America/New_York")).strftime("%Y%m%d")
-    STREAM_NAME = f"factor_tasks:{today}"
+from utils.session import make_session_id
+
+_replay_date = os.getenv("REPLAY_DATE")
+_suffix_id = os.getenv("SUFFIX_ID")
+_session_id = make_session_id(replay_date=_replay_date, suffix_id=_suffix_id)
+logger.info(f"tickdata_manager session_id={_session_id}")
+STREAM_NAME = f"factor_tasks:{_session_id}"
 
 
 @app.on_event("startup")

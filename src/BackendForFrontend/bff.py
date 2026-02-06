@@ -35,8 +35,9 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from DataManager.overviewchartdataManager import GridTraderChartDataManager
+from DataManager.overviewchartdat_manager import GridTraderChartDataManager
 from utils.logger import setup_logger
+from utils.session import make_session_id, parse_session_id
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
 
@@ -48,8 +49,8 @@ class HealthResponse(BaseModel):
     status: str
     redis: str
     connected_clients: int
-    replay_date: Optional[str]
-    suffix_id: Optional[str]
+    session_id: Optional[str]
+    run_mode: str
     subscriptions: Dict[str, int]
 
 
@@ -139,15 +140,16 @@ class GridTraderBFF:
         self,
         host: str = "0.0.0.0",
         port: int = 5001,
-        replay_date: Optional[str] = None,
-        suffix_id: Optional[str] = None,
+        session_id: Optional[str] = None,
         redis_config: Optional[Dict[str, Any]] = None,
         influxdb_config: Optional[Dict[str, Any]] = None,
     ):
         self.host = host
         self.port = port
-        self.replay_date = replay_date
-        self.suffix_id = suffix_id
+
+        # Unified session id — single source of truth for mode & date
+        self.session_id = session_id or make_session_id()
+        self.db_date, self.run_mode = parse_session_id(self.session_id)
 
         # Parse redis config (with defaults)
         redis_cfg = redis_config or {}
@@ -164,38 +166,28 @@ class GridTraderBFF:
             host=redis_host, port=redis_port, db=redis_db, decode_responses=True
         )
 
-        # Determine date suffix for stream names
-        if replay_date:
-            self.date_suffix = replay_date
-        else:
-            self.date_suffix = datetime.now().strftime("%Y%m%d")
-
-        self.SNAPSHOT_STREAM_NAME = f"market_snapshot_processed:{self.date_suffix}"
-        self.STATE_STREAM_NAME = f"movers_state:{self.date_suffix}"
-        self.STATIC_UPDATE_STREAM = "static_update_stream"
-        self.NEWS_ARTICLE_STREAM = (
-            "news_article_stream"  # New - per-article notifications
-        )
-        self.STATIC_SUMMARY_PREFIX = "static:ticker:summary"
-        self.STATIC_PROFILE_PREFIX = "static:ticker:profile"
-        self.NEWS_TICKER_PREFIX = "news:ticker"
-        self.NEWS_ITEM_PREFIX = "news:item"
+        # All Redis keys scoped by session_id
+        self.SNAPSHOT_STREAM_NAME = f"market_snapshot_processed:{self.session_id}"
+        self.STATE_STREAM_NAME = f"movers_state:{self.session_id}"
+        self.STATIC_UPDATE_STREAM = f"static_update_stream:{self.session_id}"
+        self.NEWS_ARTICLE_STREAM = f"news_article_stream:{self.session_id}"
+        self.STATIC_SUMMARY_PREFIX = f"static:ticker:summary:{self.session_id}"
+        self.STATIC_PROFILE_PREFIX = f"static:ticker:profile:{self.session_id}"
+        self.NEWS_TICKER_PREFIX = f"news:ticker:{self.session_id}"
+        self.NEWS_ITEM_PREFIX = f"news:item:{self.session_id}"
 
         # Pending sets for static data worker
-        self.STATIC_PENDING_SET = "static:pending"
-        self.NEWS_PENDING_SET = "static:pending:news"  # News-only refetch
+        self.STATIC_PENDING_SET = f"static:pending:{self.session_id}"
+        self.NEWS_PENDING_SET = f"static:pending:news:{self.session_id}"
 
         # Version tracking for static updates (symbol -> domain -> last_applied_version)
         # Used to ignore stale updates with version <= last_applied_version
         self._applied_versions: Dict[str, Dict[str, int]] = {}
-        self.VERSION_KEY_PREFIX = (
-            f"static:version:{self.date_suffix}"  # Must match static_data_worker
-        )
+        self.VERSION_KEY_PREFIX = f"static:version:{self.session_id}"
 
         # Initialize chart data manager
         self.chart_manager = GridTraderChartDataManager(
-            replay_date=replay_date,
-            suffix_id=suffix_id,
+            session_id=self.session_id,
             redis_config=redis_config,
             influxdb_config=influxdb_config,
         )
@@ -261,7 +253,7 @@ class GridTraderBFF:
 
         logger.info(
             f"GridTraderBFF initialized: backend host={host}, port={port}, "
-            f"replay_date={replay_date}, suffix_id={suffix_id},"
+            f"session_id={self.session_id}, run_mode={self.run_mode}, "
             f"redis host={redis_host}, redis port={redis_port}, redis db={redis_db}"
             f"influxdb config={influxdb_config}"
         )
@@ -290,8 +282,8 @@ class GridTraderBFF:
                 status="ok",
                 redis=redis_status,
                 connected_clients=len(self.manager.active_connections),
-                replay_date=self.replay_date,
-                suffix_id=self.suffix_id,
+                session_id=self.session_id,
+                run_mode=self.run_mode,
                 subscriptions=self.manager.get_stats(),
             )
 
@@ -374,7 +366,7 @@ class GridTraderBFF:
                 }
             else:
                 # Queue for static data fetch (will be processed by StaticDataWorker)
-                self.r.sadd("static:pending", ticker_upper)
+                self.r.sadd(self.STATIC_PENDING_SET, ticker_upper)
                 logger.info(
                     f"Profile not found for {ticker_upper}, queued for static fetch"
                 )
@@ -1142,10 +1134,10 @@ class GridTraderBFF:
         logger.info(f"Starting GridTrader BFF on {self.host}:{self.port}")
         logger.info("=" * 60)
 
-        if self.replay_date:
-            logger.info(f"Mode: REPLAY (date={self.replay_date}, id={self.suffix_id})")
+        if self.run_mode == "replay":
+            logger.info(f"Mode: REPLAY (session_id={self.session_id})")
         else:
-            logger.info("Mode: LIVE")
+            logger.info(f"Mode: LIVE (session_id={self.session_id})")
 
         logger.info(f"API available at http://{self.host}:{self.port}")
         logger.info(
@@ -1212,12 +1204,17 @@ Examples:
 
     args = parser.parse_args()
 
+    # Build session_id from CLI args
+    session_id = make_session_id(
+        replay_date=args.replay_date,
+        suffix_id=args.suffix_id,
+    )
+
     # Create and run BFF
     bff = GridTraderBFF(
         host=args.host,
         port=args.port,
-        replay_date=args.replay_date,
-        suffix_id=args.suffix_id,
+        session_id=session_id,
     )
 
     try:

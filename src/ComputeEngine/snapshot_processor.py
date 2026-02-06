@@ -34,6 +34,7 @@ from config import cache_dir
 from DataUtils.data_utils import get_common_stocks
 from DataUtils.transforms import _parse_transfrom_timetamp
 from utils.logger import setup_logger
+from utils.session import make_session_id, parse_session_id
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
 
@@ -53,21 +54,15 @@ class SnapshotProcessor:
 
     def __init__(
         self,
-        replay_date: Optional[str] = None,
-        suffix_id: Optional[str] = None,
         load_history: Optional[str] = None,
+        session_id: Optional[str] = None,
         redis_config: Optional[Dict[str, Any]] = None,
         influxdb_config: Optional[Dict[str, Any]] = None,
     ):
 
-        self.run_mode = "replay" if replay_date else "live"
-        self.db_date = (
-            replay_date
-            if replay_date
-            else datetime.now(ZoneInfo("America/New_York")).strftime("%Y%m%d")
-        )
-
-        self.db_id = f"{self.db_date}_{suffix_id}" if suffix_id else f"{self.db_date}"
+        # Unified session id — single source of truth for mode & date
+        self.session_id = session_id or make_session_id()
+        self.db_date, self.run_mode = parse_session_id(self.session_id)
 
         self.load_history = load_history
 
@@ -99,19 +94,17 @@ class SnapshotProcessor:
             host=redis_host, port=redis_port, db=redis_db, decode_responses=True
         )
 
-        # Input stream (from collector)
-        self.INPUT_STREAM_NAME = f"market_snapshot_stream:{self.db_date}"
-        if self.run_mode == "replay":
-            self.INPUT_STREAM_NAME = f"market_snapshot_stream_replay:{self.db_date}"
+        # Input stream (from collector/replayer) — unified by session_id
+        self.INPUT_STREAM_NAME = f"market_snapshot_stream:{self.session_id}"
 
         # Output stream (for BFF and StateEngine)
-        self.OUTPUT_STREAM_NAME = f"market_snapshot_processed:{self.db_date}"
+        self.OUTPUT_STREAM_NAME = f"market_snapshot_processed:{self.session_id}"
 
         # Set: tracks all tickers that have ever been in top 20 (for subscription)
-        self.SUBSCRIBED_SET_NAME = f"movers_subscribed_set:{self.db_date}"
+        self.SUBSCRIBED_SET_NAME = f"movers_subscribed_set:{self.session_id}"
 
         # HSET for cursor recovery (used by _filter_files_after_timestamp)
-        self.CURSOR_HSET_NAME = f"state_cursor:{self.db_date}"
+        self.CURSOR_HSET_NAME = f"state_cursor:{self.session_id}"
 
         # Consumer group config
         self.CONSUMER_GROUP = "market_consumers"
@@ -140,7 +133,7 @@ class SnapshotProcessor:
 
         logger.info(
             f"__init__ - SnapshotProcessor initialized: mode={self.run_mode}, "
-            f"db_host:{redis_host}:db_id={self.db_id}, INPUT={self.INPUT_STREAM_NAME}, OUTPUT={self.OUTPUT_STREAM_NAME}"
+            f"session_id={self.session_id}, INPUT={self.INPUT_STREAM_NAME}, OUTPUT={self.OUTPUT_STREAM_NAME}"
             f"influxdb_url={url}, bucket={self.bucket}"
         )
 
@@ -567,10 +560,6 @@ class SnapshotProcessor:
     # SUBSCRIPTION MANAGEMENT
     # =========================================================================
 
-    # Redis key for static data pending queue
-    STATIC_PENDING_SET = "static:pending"
-    NEWS_PENDING_SET = "static:pending:news"  # News-only refetch
-
     def _update_subscription_set(
         self, current_top_n: pl.DataFrame, timestamp: datetime
     ) -> List[str]:
@@ -581,6 +570,10 @@ class SnapshotProcessor:
         new_subscriptions = []
         timestamp_score = timestamp.timestamp()  # Unix timestamp as score
 
+        # Session-scoped pending sets
+        static_pending = f"static:pending:{self.session_id}"
+        news_pending = f"static:pending:news:{self.session_id}"
+
         for row in current_top_n.iter_rows(named=True):
             ticker = row["ticker"]
             # ZADD with NX option: only add if not exists (preserves first appearance time)
@@ -590,8 +583,8 @@ class SnapshotProcessor:
             if added:
                 new_subscriptions.append(ticker)
                 # Queue for static data fetch (fundamentals, float, news)
-                self.r.sadd(self.STATIC_PENDING_SET, ticker)
-                self.r.sadd(self.NEWS_PENDING_SET, ticker)
+                self.r.sadd(static_pending, ticker)
+                self.r.sadd(news_pending, ticker)
                 logger.debug(
                     f"_update_subscription_set - New subscription: {ticker} at {timestamp}"
                 )
@@ -670,8 +663,7 @@ class SnapshotProcessor:
             point = (
                 influxdb_client.Point("market_snapshot")
                 .tag("symbol", ticker)
-                .tag("run_mode", self.run_mode)
-                .tag("db_id", self.db_id)
+                .tag("session_id", self.session_id)
             )
 
             # Process all fields dynamically
@@ -749,8 +741,7 @@ class SnapshotProcessor:
                 |> range(start: {range_start}, stop: {range_end})
                 |> filter(fn: (r) => r["_measurement"] == "market_snapshot")
                 |> filter(fn: (r) => r["symbol"] == "{ticker}")
-                |> filter(fn: (r) => r["run_mode"] == "{self.run_mode}")
-                |> filter(fn: (r) => r["db_id"] == "{self.db_id}")
+                |> filter(fn: (r) => r["session_id"] == "{self.session_id}")
                 |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
                 |> sort(columns: ["_time"], desc: false)
             """

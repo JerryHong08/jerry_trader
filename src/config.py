@@ -57,7 +57,7 @@ splits_dir = os.path.join(data_dir, "raw/us_stocks_sip/splits")
 splits_error_file_copy = os.path.join(
     data_dir, "raw/us_stocks_sip/splits/splits_error.csv"
 )
-splits_error_file = "src/utils/data_discrepancy_fixed/splits_error.csv"
+splits_error_file = "src/utils/manual_fixed_data/splits_error.csv"
 
 # ===================== float shares =====================
 float_shares_dir = os.path.join(data_dir, "raw/us_stocks_sip/float_shares")
@@ -76,9 +76,7 @@ def get_asset_dir(asset):
         raise ValueError(f"Unsupported asset type: {asset}")
 
     asset_dir = os.path.join(data_dir, asset_dir_config[asset][0])
-    asset_error_file = os.path.join(
-        "src/utils/data_discrepancy_fixed", f"{asset}_error.csv"
-    )
+    asset_error_file = os.path.join("src/utils/manual_fixed_data", f"{asset}_error.csv")
     asset_error_file_copy = os.path.join(asset_dir, f"{asset}_error.csv")
 
     return asset_dir, asset_error_file, asset_error_file_copy

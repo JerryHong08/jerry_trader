@@ -47,9 +47,10 @@ machines:
       StateEngine:
         enabled: false
       FactorEngine:
-        enabled: false
-        redis: "redis-b@OLDMAN_REMOTE"
-        influxdb: "influxdb-b@OLDMAN_REMOTE"
+        enabled: true
+        manager_type: "polygon" # choices=["polygon", "theta", "replayer"]
+        redis: "redis-b@OLDMAN"
+        influxdb: "influxdb-b@OLDMAN"
 
   mibuntu:
     roles:
@@ -134,4 +135,3 @@ llm:
       base_url: "https://api.moonshot.cn/v1"
       thinking_mode: false
       api_key_env: "KIMI_API_KEY"
-

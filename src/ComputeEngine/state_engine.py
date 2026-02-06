@@ -27,6 +27,11 @@ import redis
 from influxdb_client.client.write_api import SYNCHRONOUS
 
 from utils.logger import setup_logger
+from utils.redis_keys import (
+    market_snapshot_processed,
+    movers_state_stream,
+    state_cursor,
+)
 from utils.session import db_date_to_date, make_session_id, parse_session_id
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
@@ -86,13 +91,13 @@ class StateEngine:
         )
 
         # Input stream (from SnapshotProcessor)
-        self.INPUT_STREAM_NAME = f"market_snapshot_processed:{self.session_id}"
+        self.INPUT_STREAM_NAME = market_snapshot_processed(self.session_id)
 
         # Output stream (for BFF notification)
-        self.OUTPUT_STREAM_NAME = f"movers_state:{self.session_id}"
+        self.OUTPUT_STREAM_NAME = movers_state_stream(self.session_id)
 
         # HSET for cursor tracking
-        self.CURSOR_HSET_NAME = f"state_cursor:{self.session_id}"
+        self.CURSOR_HSET_NAME = state_cursor(self.session_id)
 
         # Consumer group config
         self.CONSUMER_GROUP = "state_consumers"

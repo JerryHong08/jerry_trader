@@ -26,6 +26,11 @@ import influxdb_client
 import redis
 
 from utils.logger import setup_logger
+from utils.redis_keys import (
+    market_snapshot_processed,
+    movers_subscribed_set,
+    state_cursor,
+)
 from utils.session import db_date_to_date, make_session_id, parse_session_id
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
@@ -77,9 +82,9 @@ class GridTraderChartDataManager:
             host=redis_host, port=redis_port, db=redis_db, decode_responses=True
         )
 
-        self.STREAM_NAME = f"market_snapshot_processed:{self.session_id}"
-        self.SUBSCRIBED_SET_NAME = f"movers_subscribed_set:{self.session_id}"
-        self.HSET_NAME = f"state_cursor:{self.session_id}"
+        self.STREAM_NAME = market_snapshot_processed(self.session_id)
+        self.SUBSCRIBED_SET_NAME = movers_subscribed_set(self.session_id)
+        self.HSET_NAME = state_cursor(self.session_id)
 
         # ------- InfluxDB Configuration -------
         self.org = "jerryhong"

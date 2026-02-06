@@ -34,6 +34,14 @@ from config import cache_dir
 from DataUtils.data_utils import get_common_stocks
 from DataUtils.transforms import _parse_transfrom_timetamp
 from utils.logger import setup_logger
+from utils.redis_keys import (
+    market_snapshot_processed,
+    market_snapshot_stream,
+    movers_subscribed_set,
+    news_pending,
+    state_cursor,
+    static_pending,
+)
 from utils.session import db_date_to_date, make_session_id, parse_session_id
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
@@ -95,16 +103,16 @@ class SnapshotProcessor:
         )
 
         # Input stream (from collector/replayer) — unified by session_id
-        self.INPUT_STREAM_NAME = f"market_snapshot_stream:{self.session_id}"
+        self.INPUT_STREAM_NAME = market_snapshot_stream(self.session_id)
 
         # Output stream (for BFF and StateEngine)
-        self.OUTPUT_STREAM_NAME = f"market_snapshot_processed:{self.session_id}"
+        self.OUTPUT_STREAM_NAME = market_snapshot_processed(self.session_id)
 
         # Set: tracks all tickers that have ever been in top 20 (for subscription)
-        self.SUBSCRIBED_SET_NAME = f"movers_subscribed_set:{self.session_id}"
+        self.SUBSCRIBED_SET_NAME = movers_subscribed_set(self.session_id)
 
         # HSET for cursor recovery (used by _filter_files_after_timestamp)
-        self.CURSOR_HSET_NAME = f"state_cursor:{self.session_id}"
+        self.CURSOR_HSET_NAME = state_cursor(self.session_id)
 
         # Consumer group config
         self.CONSUMER_GROUP = "market_consumers"
@@ -593,8 +601,8 @@ class SnapshotProcessor:
         timestamp_score = timestamp.timestamp()  # Unix timestamp as score
 
         # Session-scoped pending sets
-        static_pending = f"static:pending:{self.session_id}"
-        news_pending = f"static:pending:news:{self.session_id}"
+        static_pending_key = static_pending(self.session_id)
+        news_pending_key = news_pending(self.session_id)
 
         for row in current_top_n.iter_rows(named=True):
             ticker = row["ticker"]
@@ -605,8 +613,8 @@ class SnapshotProcessor:
             if added:
                 new_subscriptions.append(ticker)
                 # Queue for static data fetch (fundamentals, float, news)
-                self.r.sadd(static_pending, ticker)
-                self.r.sadd(news_pending, ticker)
+                self.r.sadd(static_pending_key, ticker)
+                self.r.sadd(news_pending_key, ticker)
                 logger.debug(
                     f"_update_subscription_set - New subscription: {ticker} at {timestamp}"
                 )

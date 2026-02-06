@@ -52,6 +52,19 @@ from DataSupply.staticdataSupply.news_fetch import (
 )
 from utils.async_helpers import AsyncRateLimiter, RetryConfig
 from utils.logger import setup_logger
+from utils.redis_keys import (
+    market_snapshot_processed,
+    news_article_stream,
+    news_item_prefix,
+    news_pending,
+    news_processing,
+    news_seen_articles,
+    news_seen_titles,
+    news_ticker_prefix,
+    static_ticker_summary_prefix,
+    static_update_stream,
+    static_version_prefix,
+)
 from utils.session import db_date_to_date, make_session_id, parse_session_id
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
@@ -127,27 +140,27 @@ class NewsWorker:
         self.session_id = session_id or make_session_id()
         self.db_date, self.run_mode = parse_session_id(self.session_id)
 
-        # Redis key patterns — session-scoped instance attributes
-        self.NEWS_PENDING_SET = f"static:pending:news:{self.session_id}"
-        self.NEWS_PROCESSING_SET = f"static:processing:news:{self.session_id}"
-        self.SUMMARY_KEY_PREFIX = f"static:ticker:summary:{self.session_id}"
-        self.NEWS_TICKER_PREFIX = f"news:ticker:{self.session_id}"
-        self.NEWS_ITEM_PREFIX = f"news:item:{self.session_id}"
+        # Redis key patterns — session-scoped (from centralized schema)
+        self.NEWS_PENDING_SET = news_pending(self.session_id)
+        self.NEWS_PROCESSING_SET = news_processing(self.session_id)
+        self.SUMMARY_KEY_PREFIX = static_ticker_summary_prefix(self.session_id)
+        self.NEWS_TICKER_PREFIX = news_ticker_prefix(self.session_id)
+        self.NEWS_ITEM_PREFIX = news_item_prefix(self.session_id)
 
         # Streams — session-scoped
-        self.UPDATE_STREAM = f"static_update_stream:{self.session_id}"
-        self.ARTICLE_STREAM = f"news_article_stream:{self.session_id}"
+        self.UPDATE_STREAM = static_update_stream(self.session_id)
+        self.ARTICLE_STREAM = news_article_stream(self.session_id)
 
         # Deduplication
-        self.SEEN_ARTICLES_KEY = f"news:seen_articles:{self.session_id}"
-        self.SEEN_TITLES_KEY = f"news:seen_titles:{self.session_id}"
+        self.SEEN_ARTICLES_KEY = news_seen_articles(self.session_id)
+        self.SEEN_TITLES_KEY = news_seen_titles(self.session_id)
         self.SEEN_ARTICLES_TTL = 86400  # 24 hours
 
         # Redis stream for get current time
-        self.SNAPSHOT_STREAM_NAME = f"market_snapshot_processed:{self.session_id}"
+        self.SNAPSHOT_STREAM_NAME = market_snapshot_processed(self.session_id)
 
         # Version tracking keys (for monotonic versioning per symbol/domain)
-        self.VERSION_KEY_PREFIX = f"static:version:{self.session_id}"
+        self.VERSION_KEY_PREFIX = static_version_prefix(self.session_id)
 
         # Rate limiters
         self.moomoo_limiter = AsyncRateLimiter(moomoo_concurrent, moomoo_delay)

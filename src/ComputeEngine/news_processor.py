@@ -22,6 +22,12 @@ from openai import OpenAI
 from config import load_prompt
 from DataUtils.schema import NewsArticle
 from utils.logger import setup_logger
+from utils.redis_keys import (
+    news_article_stream,
+    news_item_prefix,
+    news_ticker_prefix,
+    static_ticker_summary_prefix,
+)
 from utils.session import make_session_id
 
 logger = setup_logger(__name__, log_to_file=True)
@@ -111,10 +117,10 @@ class NewsProcessor:
 
         self.session_id = session_id or make_session_id()
 
-        self.NEWS_ARTICLE_STREAM = f"news_article_stream:{self.session_id}"
-        self.NEWS_TICKER_PREFIX = f"news:ticker:{self.session_id}"
-        self.NEWS_ITEM_PREFIX = f"news:item:{self.session_id}"
-        self.STATIC_SUMMARY_PREFIX = f"static:ticker:summary:{self.session_id}"
+        self.NEWS_ARTICLE_STREAM = news_article_stream(self.session_id)
+        self.NEWS_TICKER_PREFIX = news_ticker_prefix(self.session_id)
+        self.NEWS_ITEM_PREFIX = news_item_prefix(self.session_id)
+        self.STATIC_SUMMARY_PREFIX = static_ticker_summary_prefix(self.session_id)
 
         self.consumer_name = f"consumer_{socket.gethostname()}_{self.active_model}"
 

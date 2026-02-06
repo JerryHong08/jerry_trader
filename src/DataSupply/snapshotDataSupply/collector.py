@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 from config import cache_dir
 from DataUtils.schema import MASSIVE_SNAPSHOT_SCHEMA
 from utils.logger import setup_logger
+from utils.redis_keys import market_snapshot_stream
 from utils.session import make_session_id
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
@@ -254,7 +255,7 @@ class MarketsnapshotCollector:
 
                 # Publish to Redis
                 payload = stream_df.write_json()
-                STREAM_NAME = f"market_snapshot_stream:{self.session_id}"
+                STREAM_NAME = market_snapshot_stream(self.session_id)
                 assert ":" in STREAM_NAME, "STREAM_NAME must include a session suffix!"
 
                 message_id = self.r.xadd(STREAM_NAME, {"data": payload}, maxlen=100)

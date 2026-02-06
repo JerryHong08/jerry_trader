@@ -77,9 +77,9 @@ class NewsPersistence:
     """
 
     def __init__(self, database_url: Optional[str] = None):
-        
+
         self.database_url = database_url
-        
+
         if not self.database_url:
             logger.warning("DATABASE_URL not set, news persistence disabled")
         else:
@@ -230,6 +230,66 @@ class NewsPersistence:
                 return articles
         except Exception as e:
             logger.error(f"Failed to get news articles for {symbol}: {e}")
+            return []
+
+    def get_articles_in_window(
+        self,
+        symbols: List[str],
+        start: "datetime",
+        end: "datetime",
+    ) -> List[Dict]:
+        """
+        Get articles published between *start* (exclusive) and *end* (inclusive)
+        for any of the given symbols.  Used by the replay loop.
+
+        Args:
+            symbols: List of ticker symbols.
+            start: Lower bound (exclusive) — typically the previous snapshot time.
+            end:   Upper bound (inclusive) — the current snapshot time.
+
+        Returns:
+            List of article dicts (same shape as get_articles).
+        """
+        if not self.database_url or not symbols:
+            return []
+
+        select_sql = """
+        SELECT news_id, symbol, published_at, fetched_at, source, title, summary, url
+        FROM news_events
+        WHERE symbol = ANY(%s)
+          AND published_at > %s
+          AND published_at <= %s
+        ORDER BY published_at ASC
+        """
+
+        try:
+            conn = self._get_connection()
+            if conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        select_sql,
+                        ([s.upper() for s in symbols], start, end),
+                    )
+                    rows = cur.fetchall()
+                conn.close()
+
+                articles = []
+                for row in rows:
+                    articles.append(
+                        {
+                            "news_id": row[0],
+                            "symbol": row[1],
+                            "published_time": row[2].isoformat() if row[2] else None,
+                            "fetched_at": row[3].isoformat() if row[3] else None,
+                            "sources": row[4],
+                            "title": row[5],
+                            "text": row[6],
+                            "url": row[7],
+                        }
+                    )
+                return articles
+        except Exception as e:
+            logger.error(f"Failed to get articles in window: {e}")
             return []
 
 

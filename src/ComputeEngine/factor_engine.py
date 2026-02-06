@@ -16,8 +16,9 @@ from dotenv import load_dotenv
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import WriteOptions, WriteType
 
-from tickDataSupply.unified_tick_manager import UnifiedTickManager
+from DataSupply.tickDataSupply.unified_tick_manager import UnifiedTickManager
 from utils.logger import setup_logger
+from utils.redis_keys import factor_tasks_stream
 from utils.session import make_session_id, parse_session_id
 
 logger = setup_logger("factor_engine", log_to_file=True, level=logging.DEBUG)
@@ -203,7 +204,7 @@ class FactorManager:
             host=redis_host, port=redis_port, db=redis_db, decode_responses=True
         )
 
-        self.STREAM_NAME = f"factor_tasks:{self.session_id}"
+        self.STREAM_NAME = factor_tasks_stream(self.session_id)
         self.CONSUMER_GROUP = "factor_tasks_consumer"
         self.CONSUMER_NAME = f"consumer_{socket.gethostname()}_{os.getpid()}"
 

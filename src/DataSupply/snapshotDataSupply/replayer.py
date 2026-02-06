@@ -29,6 +29,15 @@ from influxdb_client.client.delete_api import DeleteApi
 
 from config import cache_dir
 from utils.logger import setup_logger
+from utils.redis_keys import (
+    clear_session_keys,
+    market_snapshot_processed,
+    market_snapshot_stream,
+    movers_state_stream,
+    movers_subscribed_set,
+    rollback_session_streams,
+    state_cursor,
+)
 from utils.session import make_session_id
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
@@ -128,12 +137,12 @@ class MarketSnapshotReplayer:
         influx_token_env = influx_cfg.get("influx_token_env")
         self.influx_token = os.getenv(influx_token_env) if influx_token_env else None
 
-        # Redis key names — all scoped by session_id
-        self.INPUT_STREAM = f"market_snapshot_stream:{self.session_id}"
-        self.OUTPUT_STREAM = f"market_snapshot_processed:{self.session_id}"
-        self.STATE_STREAM = f"movers_state:{self.session_id}"
-        self.SUBSCRIBED_ZSET = f"movers_subscribed_set:{self.session_id}"
-        self.CURSOR_HSET = f"state_cursor:{self.session_id}"
+        # Redis key names — all scoped by session_id (from centralized schema)
+        self.INPUT_STREAM = market_snapshot_stream(self.session_id)
+        self.OUTPUT_STREAM = market_snapshot_processed(self.session_id)
+        self.STATE_STREAM = movers_state_stream(self.session_id)
+        self.SUBSCRIBED_ZSET = movers_subscribed_set(self.session_id)
+        self.CURSOR_HSET = state_cursor(self.session_id)
 
         self._running = False
         self._files_replayed = 0
@@ -271,6 +280,11 @@ class MarketSnapshotReplayer:
                         pl.col("prevDay_c").alias("prev_close"),
                         pl.col("prevDay_v").alias("prev_volume"),
                         pl.col("min_vw").alias("vwap"),
+                        # Quote fields for robust weighted-mid price
+                        pl.col("lastQuote_p").cast(pl.Float64).alias("bid"),
+                        pl.col("lastQuote_P").cast(pl.Float64).alias("ask"),
+                        pl.col("lastQuote_s").cast(pl.Float64).alias("bid_size"),
+                        pl.col("lastQuote_S").cast(pl.Float64).alias("ask_size"),
                     ]
                 )
 
@@ -329,9 +343,8 @@ class MarketSnapshotReplayer:
         logger.info(f"Rolling back to {rollback_dt}")
         logger.info("=" * 70)
 
-        # Rollback Redis Streams
-        for stream_name in [self.INPUT_STREAM, self.OUTPUT_STREAM, self.STATE_STREAM]:
-            self._rollback_stream(stream_name, rollback_ts_ms)
+        # Rollback all session-scoped Redis Streams
+        rollback_session_streams(self.r, self.session_id, rollback_ts_ms)
 
         # Rollback movers_subscribed_set
         if self.r.exists(self.SUBSCRIBED_ZSET):
@@ -451,19 +464,8 @@ class MarketSnapshotReplayer:
         logger.info(f"Clearing all data for replay date: {self.replay_date}")
         logger.info("=" * 70)
 
-        # Delete Redis keys
-        for key in [
-            self.INPUT_STREAM,
-            self.OUTPUT_STREAM,
-            self.STATE_STREAM,
-            self.SUBSCRIBED_ZSET,
-            self.CURSOR_HSET,
-        ]:
-            if self.r.exists(key):
-                self.r.delete(key)
-                logger.info(f"Deleted Redis key: {key}")
-            else:
-                logger.info(f"Redis key {key} does not exist, skipping")
+        # Delete ALL session-scoped Redis keys (streams, sets, hashes, etc.)
+        clear_session_keys(self.r, self.session_id)
 
         # Delete InfluxDB data
 

@@ -37,6 +37,19 @@ from pydantic import BaseModel
 
 from DataManager.overviewchartdat_manager import GridTraderChartDataManager
 from utils.logger import setup_logger
+from utils.redis_keys import (
+    market_snapshot_processed,
+    movers_state_stream,
+    news_article_stream,
+    news_item_prefix,
+    news_pending,
+    news_ticker_prefix,
+    static_pending,
+    static_ticker_profile_prefix,
+    static_ticker_summary_prefix,
+    static_update_stream,
+    static_version_prefix,
+)
 from utils.session import make_session_id, parse_session_id
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
@@ -166,24 +179,24 @@ class GridTraderBFF:
             host=redis_host, port=redis_port, db=redis_db, decode_responses=True
         )
 
-        # All Redis keys scoped by session_id
-        self.SNAPSHOT_STREAM_NAME = f"market_snapshot_processed:{self.session_id}"
-        self.STATE_STREAM_NAME = f"movers_state:{self.session_id}"
-        self.STATIC_UPDATE_STREAM = f"static_update_stream:{self.session_id}"
-        self.NEWS_ARTICLE_STREAM = f"news_article_stream:{self.session_id}"
-        self.STATIC_SUMMARY_PREFIX = f"static:ticker:summary:{self.session_id}"
-        self.STATIC_PROFILE_PREFIX = f"static:ticker:profile:{self.session_id}"
-        self.NEWS_TICKER_PREFIX = f"news:ticker:{self.session_id}"
-        self.NEWS_ITEM_PREFIX = f"news:item:{self.session_id}"
+        # All Redis keys scoped by session_id (from centralized schema)
+        self.SNAPSHOT_STREAM_NAME = market_snapshot_processed(self.session_id)
+        self.STATE_STREAM_NAME = movers_state_stream(self.session_id)
+        self.STATIC_UPDATE_STREAM = static_update_stream(self.session_id)
+        self.NEWS_ARTICLE_STREAM = news_article_stream(self.session_id)
+        self.STATIC_SUMMARY_PREFIX = static_ticker_summary_prefix(self.session_id)
+        self.STATIC_PROFILE_PREFIX = static_ticker_profile_prefix(self.session_id)
+        self.NEWS_TICKER_PREFIX = news_ticker_prefix(self.session_id)
+        self.NEWS_ITEM_PREFIX = news_item_prefix(self.session_id)
 
         # Pending sets for static data worker
-        self.STATIC_PENDING_SET = f"static:pending:{self.session_id}"
-        self.NEWS_PENDING_SET = f"static:pending:news:{self.session_id}"
+        self.STATIC_PENDING_SET = static_pending(self.session_id)
+        self.NEWS_PENDING_SET = news_pending(self.session_id)
 
         # Version tracking for static updates (symbol -> domain -> last_applied_version)
         # Used to ignore stale updates with version <= last_applied_version
         self._applied_versions: Dict[str, Dict[str, int]] = {}
-        self.VERSION_KEY_PREFIX = f"static:version:{self.session_id}"
+        self.VERSION_KEY_PREFIX = static_version_prefix(self.session_id)
 
         # Initialize chart data manager
         self.chart_manager = GridTraderChartDataManager(

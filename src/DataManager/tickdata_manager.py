@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from tickDataSupply.unified_tick_manager import UnifiedTickManager
+from DataSupply.tickDataSupply.unified_tick_manager import UnifiedTickManager
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__, log_to_file=True)

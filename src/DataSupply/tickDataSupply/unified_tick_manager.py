@@ -21,9 +21,9 @@ from typing import Any, Dict, List, Optional, Set, Union
 
 from dotenv import load_dotenv
 
-from tickDataSupply.polygon_manager import PolygonWebSocketManager
-from tickDataSupply.replayer_manager import ReplayerWebSocketManager
-from tickDataSupply.thetadata_manager import ThetaDataManager
+from DataSupply.tickDataSupply.polygon_manager import PolygonWebSocketManager
+from DataSupply.tickDataSupply.replayer_manager import ReplayerWebSocketManager
+from DataSupply.tickDataSupply.thetadata_manager import ThetaDataManager
 
 load_dotenv()
 

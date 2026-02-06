@@ -41,6 +41,14 @@ from DataSupply.staticdataSupply.fundamentals_fetch import (
     FundamentalsFetcher,
 )
 from utils.logger import setup_logger
+from utils.redis_keys import (
+    static_pending,
+    static_processing,
+    static_ticker_profile_prefix,
+    static_ticker_summary_prefix,
+    static_update_stream,
+    static_version_prefix,
+)
 from utils.session import make_session_id, parse_session_id
 
 logger = setup_logger(__name__, log_to_file=True)
@@ -90,15 +98,15 @@ class StaticDataWorker:
         self.session_id = session_id or make_session_id()
         self.db_date, self.run_mode = parse_session_id(self.session_id)
 
-        # Redis key patterns — session-scoped instance attributes
-        self.PENDING_SET = f"static:pending:{self.session_id}"
-        self.PROCESSING_SET = f"static:processing:{self.session_id}"
-        self.SUMMARY_KEY_PREFIX = f"static:ticker:summary:{self.session_id}"
-        self.PROFILE_KEY_PREFIX = f"static:ticker:profile:{self.session_id}"
-        self.UPDATE_STREAM = f"static_update_stream:{self.session_id}"
+        # Redis key patterns — session-scoped (from centralized schema)
+        self.PENDING_SET = static_pending(self.session_id)
+        self.PROCESSING_SET = static_processing(self.session_id)
+        self.SUMMARY_KEY_PREFIX = static_ticker_summary_prefix(self.session_id)
+        self.PROFILE_KEY_PREFIX = static_ticker_profile_prefix(self.session_id)
+        self.UPDATE_STREAM = static_update_stream(self.session_id)
 
         # Version tracking keys (for monotonic versioning per symbol/domain)
-        self.VERSION_KEY_PREFIX = f"static:version:{self.session_id}"
+        self.VERSION_KEY_PREFIX = static_version_prefix(self.session_id)
 
         # Initialize fetchers
         self.fundamentals_fetcher = FundamentalsFetcher()

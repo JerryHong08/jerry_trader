@@ -37,6 +37,8 @@ import hashlib
 import json
 import logging
 import os
+import re
+import string
 from datetime import datetime, timedelta
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set
 from zoneinfo import ZoneInfo
@@ -48,47 +50,24 @@ from DataSupply.staticdataSupply.news_fetch import (
     MoomooStockResolver,
     NewsPersistence,
 )
+from utils.async_helpers import AsyncRateLimiter, RetryConfig
 from utils.logger import setup_logger
-from utils.session import make_session_id, parse_session_id
+from utils.redis_keys import (
+    market_snapshot_processed,
+    news_article_stream,
+    news_item_prefix,
+    news_pending,
+    news_processing,
+    news_seen_articles,
+    news_seen_titles,
+    news_ticker_prefix,
+    static_ticker_summary_prefix,
+    static_update_stream,
+    static_version_prefix,
+)
+from utils.session import db_date_to_date, make_session_id, parse_session_id
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
-
-
-# ============================================================================
-# Rate Limiting and Retry Configuration
-# ============================================================================
-
-
-class AsyncRateLimiter:
-    """Rate limiter using semaphore with delay between requests."""
-
-    def __init__(self, max_concurrent: int, delay_between: float):
-        self._semaphore = asyncio.Semaphore(max_concurrent)
-        self._delay = delay_between
-        self._last_request = 0.0
-        self._lock = asyncio.Lock()
-
-    async def __aenter__(self):
-        await self._semaphore.acquire()
-        async with self._lock:
-            now = asyncio.get_event_loop().time()
-            wait_time = max(0, self._delay - (now - self._last_request))
-            if wait_time > 0:
-                await asyncio.sleep(wait_time)
-            self._last_request = asyncio.get_event_loop().time()
-        return self
-
-    async def __aexit__(self, *args):
-        self._semaphore.release()
-
-
-class RetryConfig:
-    """Configuration for retry logic with exponential backoff."""
-
-    MAX_RETRIES = 3
-    BASE_DELAY = 0.5  # seconds
-    MAX_DELAY = 8.0  # seconds
-    EXPONENTIAL_BASE = 2
 
 
 class NewsWorker:
@@ -161,26 +140,27 @@ class NewsWorker:
         self.session_id = session_id or make_session_id()
         self.db_date, self.run_mode = parse_session_id(self.session_id)
 
-        # Redis key patterns — session-scoped instance attributes
-        self.NEWS_PENDING_SET = f"static:pending:news:{self.session_id}"
-        self.NEWS_PROCESSING_SET = f"static:processing:news:{self.session_id}"
-        self.SUMMARY_KEY_PREFIX = f"static:ticker:summary:{self.session_id}"
-        self.NEWS_TICKER_PREFIX = f"news:ticker:{self.session_id}"
-        self.NEWS_ITEM_PREFIX = f"news:item:{self.session_id}"
+        # Redis key patterns — session-scoped (from centralized schema)
+        self.NEWS_PENDING_SET = news_pending(self.session_id)
+        self.NEWS_PROCESSING_SET = news_processing(self.session_id)
+        self.SUMMARY_KEY_PREFIX = static_ticker_summary_prefix(self.session_id)
+        self.NEWS_TICKER_PREFIX = news_ticker_prefix(self.session_id)
+        self.NEWS_ITEM_PREFIX = news_item_prefix(self.session_id)
 
         # Streams — session-scoped
-        self.UPDATE_STREAM = f"static_update_stream:{self.session_id}"
-        self.ARTICLE_STREAM = f"news_article_stream:{self.session_id}"
+        self.UPDATE_STREAM = static_update_stream(self.session_id)
+        self.ARTICLE_STREAM = news_article_stream(self.session_id)
 
         # Deduplication
-        self.SEEN_ARTICLES_KEY = f"news:seen_articles:{self.session_id}"
+        self.SEEN_ARTICLES_KEY = news_seen_articles(self.session_id)
+        self.SEEN_TITLES_KEY = news_seen_titles(self.session_id)
         self.SEEN_ARTICLES_TTL = 86400  # 24 hours
 
         # Redis stream for get current time
-        self.SNAPSHOT_STREAM_NAME = f"market_snapshot_processed:{self.session_id}"
+        self.SNAPSHOT_STREAM_NAME = market_snapshot_processed(self.session_id)
 
         # Version tracking keys (for monotonic versioning per symbol/domain)
-        self.VERSION_KEY_PREFIX = f"static:version:{self.session_id}"
+        self.VERSION_KEY_PREFIX = static_version_prefix(self.session_id)
 
         # Rate limiters
         self.moomoo_limiter = AsyncRateLimiter(moomoo_concurrent, moomoo_delay)
@@ -196,6 +176,7 @@ class NewsWorker:
         self._processed_count = 0
         self._article_count = 0
         self._duplicate_count = 0
+        self._roundup_count = 0
 
         logger.info(
             f"NewsWorker initialized: mode={self.run_mode}, db_date={self.db_date}, "
@@ -262,11 +243,188 @@ class NewsWorker:
             logger.info(
                 f"NewsWorker running in replay mode - listen on market_snapshot_processed:{self.session_id}"
             )
-            # In replay mode, there is no fetch from pending set.
-            # Instead, we listen on market_snapshot_processed stream to get current replay time,
-            # and fetch news for tickers as of that time from local persistence psql.
-            # but skip for now.
-            pass
+            await self._run_replay_loop()
+
+    # ============================================================================
+    # Replay Mode
+    # ============================================================================
+
+    async def _run_replay_loop(self):
+        """
+        Replay mode: follow the snapshot stream and inject historical news.
+
+        Algorithm:
+        1. Read snapshot messages from market_snapshot_processed via XREAD
+        2. For each message, extract current_ts and the list of tickers
+        3. Query psql: news_events WHERE symbol IN (...) AND published_at
+           BETWEEN last_replay_ts AND current_ts
+        4. Push matching articles through the same cache → emit pipeline
+        5. Advance last_replay_ts = current_ts
+        """
+        # Start-of-day as initial lower bound
+        d = db_date_to_date(self.db_date)
+        last_replay_ts = datetime(
+            d.year, d.month, d.day, 0, 0, 0, tzinfo=ZoneInfo("America/New_York")
+        )
+
+        # XREAD cursor — start from the beginning of the stream
+        last_id = "0-0"
+
+        logger.info(
+            f"Replay loop starting, db_date={self.db_date}, "
+            f"initial lower bound={last_replay_ts.isoformat()}"
+        )
+
+        while self._running:
+            try:
+                # Block up to 2 s waiting for new snapshot messages
+                result = self.r.xread(
+                    {self.SNAPSHOT_STREAM_NAME: last_id}, count=1, block=2000
+                )
+
+                if not result:
+                    continue  # no new messages yet
+
+                for stream_name, messages in result:
+                    for msg_id, msg_data in messages:
+                        last_id = msg_id
+
+                        # Parse current replay timestamp
+                        ts_str = msg_data.get("timestamp")
+                        if not ts_str:
+                            continue
+                        current_ts = datetime.fromisoformat(ts_str)
+
+                        # Extract tickers present in this snapshot
+                        tickers = self._extract_tickers_from_snapshot(msg_data)
+                        if not tickers:
+                            continue
+
+                        # Query psql for articles published in this window
+                        articles = self.news_persistence.get_articles_in_window(
+                            symbols=tickers,
+                            start=last_replay_ts,
+                            end=current_ts,
+                        )
+
+                        if articles:
+                            await self._process_replay_articles(articles, current_ts)
+
+                        last_replay_ts = current_ts
+
+            except asyncio.CancelledError:
+                logger.info("Replay loop cancelled")
+                break
+            except Exception as e:
+                logger.error(f"Replay loop error: {e}")
+                await asyncio.sleep(2)
+
+        logger.info(
+            f"Replay loop stopped. Emitted {self._article_count} articles, "
+            f"{self._duplicate_count} duplicates skipped, "
+            f"{self._roundup_count} roundups filtered"
+        )
+
+    async def _process_replay_articles(
+        self, articles: List[Dict], current_ts: datetime
+    ):
+        """
+        Push historical articles from psql through the same emit pipeline.
+
+        Applies the same dedup & roundup filters as live mode.
+        """
+        for row in articles:
+            title = row.get("title", "")
+            symbol = row.get("symbol", "")
+            url = row.get("url", "")
+            news_id = row.get("news_id", "")
+
+            # --- Gate 1: Market roundup filter ---
+            if self._is_market_roundup(title):
+                self._roundup_count += 1
+                continue
+
+            # --- Gate 2: URL dedup ---
+            article_id = news_id or hashlib.md5(url.encode()).hexdigest()[:16]
+            if self._is_duplicate_url(article_id):
+                self._duplicate_count += 1
+                continue
+
+            # --- Gate 3: Title fingerprint dedup ---
+            title_fp = self._title_fingerprint(title)
+            if self._is_duplicate_title(title_fp):
+                self._duplicate_count += 1
+                continue
+
+            # Parse published_time
+            pub_time = row.get("published_time")
+            if isinstance(pub_time, str):
+                pub_time = datetime.fromisoformat(pub_time)
+            elif pub_time is None:
+                pub_time = current_ts
+
+            # Build a lightweight article-like dict for caching / emitting
+            ticker_key = f"{self.NEWS_TICKER_PREFIX}:{symbol}"
+            item_key = f"{self.NEWS_ITEM_PREFIX}:{article_id}"
+
+            article_data = {
+                "symbol": symbol,
+                "title": title,
+                "url": url,
+                "sources": row.get("sources", ""),
+                "published_time": pub_time.isoformat(),
+            }
+            text = row.get("text") or row.get("summary") or ""
+            if text:
+                article_data["text"] = text
+
+            # Cache to Redis
+            self.r.zadd(ticker_key, {article_id: pub_time.timestamp()})
+            self.r.hset(item_key, mapping=article_data)
+            self.r.zremrangebyrank(ticker_key, 0, -51)
+
+            # Emit to article stream
+            self.r.xadd(
+                self.ARTICLE_STREAM,
+                {
+                    "symbol": symbol,
+                    "news_id": article_id,
+                    "title": title,
+                    "url": url,
+                    "published_time": pub_time.isoformat(),
+                    "sources": row.get("sources", ""),
+                    "text": text,
+                    "timestamp": current_ts.isoformat(),
+                },
+            )
+
+            self._mark_seen(article_id, title_fp)
+            self._article_count += 1
+
+            # Emit legacy static_update_stream per symbol (batch at end)
+            version = self._increment_version(symbol, "news")
+            self.r.xadd(
+                self.UPDATE_STREAM,
+                {
+                    "symbol": symbol,
+                    "update_type": "static",
+                    "domains": json.dumps(["news"]),
+                    "version": json.dumps({"news": version}),
+                    "timestamp": current_ts.isoformat(),
+                },
+            )
+
+    @staticmethod
+    def _extract_tickers_from_snapshot(msg_data: Dict) -> List[str]:
+        """Extract ticker symbols from a snapshot stream message."""
+        data_json = msg_data.get("data")
+        if not data_json:
+            return []
+        try:
+            tickers_data = json.loads(data_json)
+            return [item["symbol"] for item in tickers_data if "symbol" in item]
+        except (json.JSONDecodeError, KeyError):
+            return []
 
     def stop(self):
         """Stop the worker loop."""
@@ -323,11 +481,11 @@ class NewsWorker:
         """
         Process news for a symbol with per-article streaming.
 
-        Each article is:
-        1. Deduplicated
-        2. Cached to Redis
-        3. Persisted to PostgreSQL
-        4. Emitted to news_article_stream
+        Pipeline per article:
+        1. Always persist to PostgreSQL (raw archive, deduped by URL via UPSERT)
+        2. Filter out market roundup / junk titles
+        3. Deduplicate by URL hash AND title fingerprint
+        4. Cache to Redis + emit to news_article_stream
 
         After all articles, emits legacy notification to static_update_stream.
         """
@@ -338,31 +496,38 @@ class NewsWorker:
 
         # Fetch from all providers, streaming articles
         async for article in self._fetch_news_streaming(symbol):
-            # Generate article ID
-            article_id = hashlib.md5(article.url.encode()).hexdigest()[:16]
+            # Always collect for persistence (raw archive)
+            articles_to_persist.append(article)
 
-            # Check deduplication
-            if self._is_duplicate(article_id):
-                self._duplicate_count += 1
-                logger.debug(f"Skipping duplicate: {article.title[:50]}")
+            # --- Gate 1: Market roundup / junk filter ---
+            if self._is_market_roundup(article.title):
+                self._roundup_count += 1
+                logger.debug(f"Filtered roundup: {article.title[:60]}")
                 continue
 
-            # Cache to Redis
+            # --- Gate 2: URL-based dedup ---
+            article_id = hashlib.md5(article.url.encode()).hexdigest()[:16]
+            if self._is_duplicate_url(article_id):
+                self._duplicate_count += 1
+                logger.debug(f"Skipping URL duplicate: {article.title[:50]}")
+                continue
+
+            # --- Gate 3: Title fingerprint dedup ---
+            title_fp = self._title_fingerprint(article.title)
+            if self._is_duplicate_title(title_fp):
+                self._duplicate_count += 1
+                logger.debug(f"Skipping title duplicate: {article.title[:50]}")
+                continue
+
+            # Passed all gates — emit
             self._cache_single_article(symbol, article, article_id)
-
-            # Emit to article stream
             self._emit_article(symbol, article, article_id, current_timestamp)
-
-            # Mark as seen
-            self._mark_seen(article_id)
-
-            # Collect for persistence
-            articles_to_persist.append(article)
+            self._mark_seen(article_id, title_fp)
 
             articles_emitted += 1
             self._article_count += 1
 
-        # Persist all articles to PostgreSQL
+        # Persist ALL articles to PostgreSQL (raw archive, before dedup)
         if articles_to_persist:
             try:
                 saved_count = self.news_persistence.save_articles(articles_to_persist)
@@ -453,17 +618,105 @@ class NewsWorker:
                     )
 
     # ============================================================================
-    # Deduplication Methods
+    # Title Normalization, Deduplication & Filtering
     # ============================================================================
 
-    def _is_duplicate(self, article_id: str) -> bool:
-        """Check if article was already processed today."""
+    # Prefixes that news aggregators prepend to syndicated titles
+    _TITLE_STRIP_PREFIXES = [
+        "Express News |",
+        "Express News|",
+        "Breaking |",
+        "Breaking|",
+        "BREAKING:",
+        "UPDATE:",
+        "UPDATE ",
+        "UPDATED:",
+    ]
+
+    # Regex patterns for market-roundup / junk titles that are not ticker-specific.
+    # Each pattern is compiled once at class level for speed.
+    _ROUNDUP_PATTERNS: List[re.Pattern] = [
+        # "12 Communication Services Stocks Moving In Wednesday's After-Market Session"
+        re.compile(
+            r"^\d+\s+\w+\s+stocks?\s+moving\s+in",
+            re.IGNORECASE,
+        ),
+        # "Trending Stocks Today | Tian Ruixiang Soars 114.81%"
+        re.compile(r"^trending\s+stocks?\s+today", re.IGNORECASE),
+        # "Top Gainers / Top Losers" roundups
+        re.compile(
+            r"^(top|biggest)\s+(gainers?|losers?|movers?)",
+            re.IGNORECASE,
+        ),
+        # "Stocks That Hit 52-Week Highs On ..."
+        re.compile(
+            r"^stocks?\s+that\s+hit\s+\d+-week",
+            re.IGNORECASE,
+        ),
+        # "Mid-Day Gainers / Losers"
+        re.compile(
+            r"^(mid-?day|pre-?market|after-?hours?)\s+(gainers?|losers?|movers?)",
+            re.IGNORECASE,
+        ),
+    ]
+
+    @staticmethod
+    def _normalize_title(title: str) -> str:
+        """
+        Normalize a title for fingerprinting:
+        1. Strip known aggregator prefixes ("Express News | ", "BREAKING:", etc.)
+        2. Lowercase
+        3. Remove punctuation
+        4. Collapse whitespace
+        """
+        t = title
+        for prefix in NewsWorker._TITLE_STRIP_PREFIXES:
+            if t.startswith(prefix):
+                t = t[len(prefix) :]
+                break  # only one prefix at a time
+        t = t.lower()
+        t = t.translate(str.maketrans("", "", string.punctuation))
+        t = " ".join(t.split())  # collapse whitespace
+        return t.strip()
+
+    @staticmethod
+    def _title_fingerprint(title: str) -> str:
+        """
+        Generate a stable fingerprint from a title.
+
+        Strips aggregator prefixes, normalizes, then hashes.
+        Identical or near-identical headlines from different sources
+        (e.g. "Express News | X" vs "X") produce the same fingerprint.
+        """
+        normalized = NewsWorker._normalize_title(title)
+        return hashlib.md5(normalized.encode()).hexdigest()[:16]
+
+    @classmethod
+    def _is_market_roundup(cls, title: str) -> bool:
+        """
+        Return True if the title matches a market-roundup / junk pattern.
+
+        These are multi-stock summary articles that are not ticker-specific
+        and would waste LLM tokens in the news_processor.
+        """
+        return any(pat.search(title) for pat in cls._ROUNDUP_PATTERNS)
+
+    def _is_duplicate_url(self, article_id: str) -> bool:
+        """Check if article URL hash was already emitted today."""
         return bool(self.r.sismember(self.SEEN_ARTICLES_KEY, article_id))
 
-    def _mark_seen(self, article_id: str):
-        """Mark article as processed."""
-        self.r.sadd(self.SEEN_ARTICLES_KEY, article_id)
-        self.r.expire(self.SEEN_ARTICLES_KEY, self.SEEN_ARTICLES_TTL)
+    def _is_duplicate_title(self, title_fp: str) -> bool:
+        """Check if a title fingerprint was already emitted today."""
+        return bool(self.r.sismember(self.SEEN_TITLES_KEY, title_fp))
+
+    def _mark_seen(self, article_id: str, title_fp: str):
+        """Mark both article URL hash and title fingerprint as seen."""
+        pipe = self.r.pipeline()
+        pipe.sadd(self.SEEN_ARTICLES_KEY, article_id)
+        pipe.expire(self.SEEN_ARTICLES_KEY, self.SEEN_ARTICLES_TTL)
+        pipe.sadd(self.SEEN_TITLES_KEY, title_fp)
+        pipe.expire(self.SEEN_TITLES_KEY, self.SEEN_ARTICLES_TTL)
+        pipe.execute()
 
     # ============================================================================
     # Caching and Streaming Methods
@@ -538,10 +791,10 @@ class NewsWorker:
             logger.warning(f"Failed to get current time for {symbol}: {e}")
 
         # Fallback: use date from db_date
-        year = int(self.db_date[:4])
-        month = int(self.db_date[4:6])
-        day = int(self.db_date[6:8])
-        return datetime(year, month, day, 9, 30, 0, tzinfo=ZoneInfo("America/New_York"))
+        d = db_date_to_date(self.db_date)
+        return datetime(
+            d.year, d.month, d.day, 9, 30, 0, tzinfo=ZoneInfo("America/New_York")
+        )
 
     def get_news(self, symbol: str, limit: int = 10) -> List[Dict[str, str]]:
         """Get cached news for a symbol."""

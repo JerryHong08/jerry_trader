@@ -17,6 +17,7 @@ def _get_data_dir_from_config() -> str:
     config_path = Path(__file__).resolve().parents[1] / "machine_config.yaml"
 
     if not config_path.exists():
+        print("WARNING: machine_config.yaml not found, using default data dir.")
         return blackdisk_data_dir
 
     try:
@@ -36,6 +37,8 @@ def _get_data_dir_from_config() -> str:
 
 # =====================================================================
 data_dir = _get_data_dir_from_config()
+# data_dir = oldman_data_dir
+print(f"DEBUG: Current data root dir: {data_dir}")
 lake_data_dir = os.path.join(data_dir, "lake")
 raw_data_dir = os.path.join(data_dir, "raw")
 cache_dir = os.path.join(data_dir, "processed")

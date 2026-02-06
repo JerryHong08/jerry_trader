@@ -46,8 +46,8 @@ class ReplayerWebSocketManager:
         self.ws = None
         self.connected = False
 
-        # Queues keyed by stream_key, e.g. "Q.AAPL" or "T.AAPL"
-        self.queues: Dict[str, asyncio.Queue] = {}
+        # Per-client fan-out queues: { stream_key: { client: asyncio.Queue } }
+        self._client_queues: Dict[str, Dict[str, asyncio.Queue]] = {}
 
         # Connections map client -> set of stream_keys
         self.connections: Dict[str, Set[str]] = {}
@@ -57,6 +57,20 @@ class ReplayerWebSocketManager:
 
         # Track server connection info
         self._server_info = None
+
+    @property
+    def queues(self) -> Dict[str, asyncio.Queue]:
+        """Backward-compatible view: returns {stream_key: first_client_queue}.
+        For explicit per-client access, use get_client_queue()."""
+        flat = {}
+        for sk, client_map in self._client_queues.items():
+            if client_map:
+                flat[sk] = next(iter(client_map.values()))
+        return flat
+
+    def get_client_queue(self, client, stream_key: str) -> Optional[asyncio.Queue]:
+        """Get a specific client's queue for a stream_key."""
+        return self._client_queues.get(stream_key, {}).get(client)
 
     async def connect(self):
         """Connect to the Rust replay WebSocket server."""
@@ -109,9 +123,11 @@ class ReplayerWebSocketManager:
             for ev in events:
                 stream_key = f"{ev}.{sym}"
 
-                # Ensure a queue exists for this stream_key
-                if stream_key not in self.queues:
-                    self.queues[stream_key] = asyncio.Queue()
+                # Ensure per-client queue exists for this stream_key
+                if stream_key not in self._client_queues:
+                    self._client_queues[stream_key] = {}
+                if websocket_client not in self._client_queues[stream_key]:
+                    self._client_queues[stream_key][websocket_client] = asyncio.Queue()
 
                 # Add to client's subscriptions
                 self.connections[websocket_client].add(stream_key)
@@ -165,9 +181,14 @@ class ReplayerWebSocketManager:
                 sk = f"{ev}.{symbol}"
                 self.connections[websocket_client].discard(sk)
 
-        # For each stream_key, if no other client needs it, unsubscribe from server
+        # For each stream_key, remove per-client queue and check if still needed
         for ev in events:
             stream_key = f"{ev}.{symbol}"
+
+            # Remove this client's queue
+            if stream_key in self._client_queues:
+                self._client_queues[stream_key].pop(websocket_client, None)
+
             still_needed = any(stream_key in syms for syms in self.connections.values())
 
             if not still_needed and self.connected:
@@ -186,8 +207,8 @@ class ReplayerWebSocketManager:
                         logger.error(f"❌ Failed to unsubscribe from {stream_key}: {e}")
                         self.connected = False
                         self.ws = None
-                # Remove queue
-                self.queues.pop(stream_key, None)
+                # Remove all queues for this stream_key
+                self._client_queues.pop(stream_key, None)
             else:
                 print(f"ℹ️ {stream_key} still needed by other clients or not connected")
 
@@ -201,6 +222,10 @@ class ReplayerWebSocketManager:
         client_streams = self.connections.pop(websocket_client, set())
 
         for stream_key in list(client_streams):
+            # Remove this client's queue
+            if stream_key in self._client_queues:
+                self._client_queues[stream_key].pop(websocket_client, None)
+
             still_needed = any(stream_key in syms for syms in self.connections.values())
 
             if (
@@ -218,7 +243,7 @@ class ReplayerWebSocketManager:
                     }
                     await self.ws.send(json.dumps(unsubscribe_msg))
                     self.subscribed_streams.discard(stream_key)
-                    self.queues.pop(stream_key, None)
+                    self._client_queues.pop(stream_key, None)
                     logger.info(
                         f"❌ Auto-unsubscribed from {stream_key} (no more clients)"
                     )
@@ -276,8 +301,8 @@ class ReplayerWebSocketManager:
                         }
 
                         stream_key = f"Q.{symbol}"
-                        q = self.queues.get(stream_key)
-                        if q:
+                        # Fan out to all client queues
+                        for q in self._client_queues.get(stream_key, {}).values():
                             await q.put(payload)
 
                     # Handle Trade messages (ev: "T")
@@ -298,8 +323,8 @@ class ReplayerWebSocketManager:
                         }
 
                         stream_key = f"T.{symbol}"
-                        q = self.queues.get(stream_key)
-                        if q:
+                        # Fan out to all client queues
+                        for q in self._client_queues.get(stream_key, {}).values():
                             await q.put(payload)
 
                     else:

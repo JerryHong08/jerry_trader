@@ -46,11 +46,16 @@ machines:
     roles:
       StateEngine:
         enabled: false
+      TickDataServer:
+        enabled: true
+        host: "0.0.0.0"
+        port: 8000
+        redis: "redis-a"
       FactorEngine:
         enabled: true
         manager_type: "polygon" # choices=["polygon", "theta", "replayer"]
-        redis: "redis-b@OLDMAN"
-        influxdb: "influxdb-b@OLDMAN"
+        redis: "redis-a"
+        influxdb: "influxdb-a"
 
   mibuntu:
     roles:

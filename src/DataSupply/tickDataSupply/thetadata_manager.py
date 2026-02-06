@@ -35,8 +35,8 @@ class ThetaDataManager:
         self.ws = None
         self.connected = False
 
-        # queues keyed by stream_key
-        self.queues: Dict[str, asyncio.Queue] = {}
+        # Per-client fan-out queues: { stream_key: { client: asyncio.Queue } }
+        self._client_queues: Dict[str, Dict[object, asyncio.Queue]] = {}
 
         # connections map client -> set of stream_keys
         self.connections: Dict[object, Set[str]] = {}
@@ -46,6 +46,19 @@ class ThetaDataManager:
 
         # subscription ID counter
         self.next_id = 0
+
+    @property
+    def queues(self) -> Dict[str, asyncio.Queue]:
+        """Backward-compatible view: returns {stream_key: first_client_queue}."""
+        flat = {}
+        for sk, client_map in self._client_queues.items():
+            if client_map:
+                flat[sk] = next(iter(client_map.values()))
+        return flat
+
+    def get_client_queue(self, client, stream_key: str) -> Optional[asyncio.Queue]:
+        """Get a specific client's queue for a stream_key."""
+        return self._client_queues.get(stream_key, {}).get(client)
 
     def _generate_stream_key(self, sec_type: str, req_type: str, contract: dict) -> str:
         """Generate a unique stream key for subscription tracking."""
@@ -131,8 +144,10 @@ class ThetaDataManager:
                 req_type = req_type.upper()
                 stream_key = self._generate_stream_key(sec_type, req_type, contract)
 
-                if stream_key not in self.queues:
-                    self.queues[stream_key] = asyncio.Queue()
+                if stream_key not in self._client_queues:
+                    self._client_queues[stream_key] = {}
+                if websocket_client not in self._client_queues[stream_key]:
+                    self._client_queues[stream_key][websocket_client] = asyncio.Queue()
 
                 self.connections[websocket_client].add(stream_key)
 
@@ -174,6 +189,10 @@ class ThetaDataManager:
             if websocket_client in self.connections:
                 self.connections[websocket_client].discard(stream_key)
 
+            # Remove this client's queue
+            if stream_key in self._client_queues:
+                self._client_queues[stream_key].pop(websocket_client, None)
+
             still_needed = any(stream_key in syms for syms in self.connections.values())
 
             if (
@@ -194,7 +213,7 @@ class ThetaDataManager:
 
                     await self.ws.send(json.dumps(req))
                     self.subscribed_streams.discard(stream_key)
-                    self.queues.pop(stream_key, None)
+                    self._client_queues.pop(stream_key, None)
                     logger.info(f"❌ Unsubscribed from ThetaData: {stream_key}")
                 except Exception as e:
                     logger.error(f"❌ Failed to unsubscribe from {stream_key}: {e}")
@@ -206,6 +225,10 @@ class ThetaDataManager:
         client_streams = self.connections.pop(websocket_client, set())
 
         for stream_key in list(client_streams):
+            # Remove this client's queue
+            if stream_key in self._client_queues:
+                self._client_queues[stream_key].pop(websocket_client, None)
+
             still_needed = any(stream_key in syms for syms in self.connections.values())
 
             if (
@@ -228,7 +251,7 @@ class ThetaDataManager:
 
                     await self.ws.send(json.dumps(req))
                     self.subscribed_streams.discard(stream_key)
-                    self.queues.pop(stream_key, None)
+                    self._client_queues.pop(stream_key, None)
                     logger.info(
                         f"❌ Auto-unsubscribed from {stream_key} (no more clients)"
                     )
@@ -327,11 +350,12 @@ class ThetaDataManager:
                     else:
                         continue
 
-                    # Put payload into the appropriate queue
-                    q = self.queues.get(stream_key)
-                    if q and event_data:
+                    # Put payload into the appropriate queues (fan out)
+                    client_queues = self._client_queues.get(stream_key, {})
+                    if client_queues and event_data:
                         logger.debug(f"👁️ sent payload: {payload}")
-                        await q.put(payload)
+                        for q in client_queues.values():
+                            await q.put(payload)
                         logger.debug(f"📨 Routed {req_type} for {stream_key}")
 
             except websockets.exceptions.ConnectionClosed:

@@ -215,9 +215,11 @@ class MarketSnapshotReplayer:
 
         # Filter files if start_from is provided
         if self.start_from:
-            start_hour = int(self.start_from[:2])
-            start_minute = int(self.start_from[2:4])
-            start_second = int(self.start_from[4:6])
+            # Zero-pad to 6 chars in case leading zero was stripped (e.g. 75900 -> 075900)
+            start_from_str = str(self.start_from).zfill(6)
+            start_hour = int(start_from_str[:2])
+            start_minute = int(start_from_str[2:4])
+            start_second = int(start_from_str[4:6])
 
             start_from_dt = datetime(
                 int(self.replay_date[:4]),
@@ -322,9 +324,11 @@ class MarketSnapshotReplayer:
         Args:
             rollback_time: The timestamp to rollback to (HHMMSS), e.g., "061652"
         """
-        rollback_hour = int(rollback_time[:2])
-        rollback_minute = int(rollback_time[2:4])
-        rollback_second = int(rollback_time[4:6])
+        # Zero-pad to 6 chars in case leading zero was stripped
+        rollback_time_str = str(rollback_time).zfill(6)
+        rollback_hour = int(rollback_time_str[:2])
+        rollback_minute = int(rollback_time_str[2:4])
+        rollback_second = int(rollback_time_str[4:6])
 
         rollback_dt = datetime(
             int(self.replay_date[:4]),

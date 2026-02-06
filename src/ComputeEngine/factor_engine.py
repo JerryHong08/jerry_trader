@@ -122,6 +122,8 @@ class FactorManager:
         session_id: Optional[str] = None,
         redis_config: Optional[Dict[str, Any]] = None,
         influxdb_config: Optional[Dict[str, Any]] = None,
+        ws_manager: Optional[UnifiedTickManager] = None,
+        ws_loop: Optional[asyncio.AbstractEventLoop] = None,
     ):
         """
         Initialize Factor Manager
@@ -132,6 +134,8 @@ class FactorManager:
             session_id: Unified session identifier (e.g. '20260115_replay_v1')
             redis_config: Redis connection config dict with host, port, db keys
             influxdb_config: InfluxDB connection config dict with influx_url_env key
+            ws_manager: Shared UnifiedTickManager instance (if None, creates its own)
+            ws_loop: Shared asyncio event loop for the ws_manager (required if ws_manager is shared)
         """
         # Unified session id — single source of truth for mode & date
         self.session_id = session_id or make_session_id()
@@ -217,11 +221,17 @@ class FactorManager:
                 raise
 
         # ------- Data Manager Configuration -------
-        # Use UnifiedTickManager for all data sources
-        self.ws_manager = UnifiedTickManager(provider=manager_type)
+        # Use shared or own UnifiedTickManager
+        if ws_manager:
+            self.ws_manager = ws_manager
+            self._owns_manager = False
+        else:
+            self.ws_manager = UnifiedTickManager(provider=manager_type)
+            self._owns_manager = True
 
         logger.info(
-            f"🚀 FactorManager using {self.ws_manager.provider.upper()} data manager"
+            f"🚀 FactorManager using {self.ws_manager.provider.upper()} data manager "
+            f"(shared={not self._owns_manager})"
         )
 
         # ------- Runtime State -------
@@ -235,10 +245,17 @@ class FactorManager:
         # thread pool for CPU-bound factor compute
         self.pool = ThreadPoolExecutor(max_workers=8)
 
-        # start an event loop asyncio, for websocket listening
-        self.ws_loop = asyncio.new_event_loop()
-        self.ws_thread = Thread(target=self._start_ws_loop, daemon=True)
-        self.ws_thread.start()
+        # Event loop for async operations
+        # If shared manager, use provided loop; otherwise create own
+        if self._owns_manager:
+            self.ws_loop = asyncio.new_event_loop()
+            self.ws_thread = Thread(target=self._start_ws_loop, daemon=True)
+            self.ws_thread.start()
+        else:
+            # Use the shared event loop (from backend_starter)
+            self.ws_loop = ws_loop
+            if self.ws_loop is None:
+                raise ValueError("ws_loop is required when using a shared ws_manager")
 
     def _start_ws_loop(self):
         """start WebSocket event loop"""
@@ -276,8 +293,8 @@ class FactorManager:
 
                 for stream_name, msg_list in messages:
                     for msg_id, msg_data in msg_list:
-                        action = msg_data.get(b"action", b"").decode()
-                        symbol = msg_data.get(b"ticker", b"").decode().upper()
+                        action = msg_data.get("action", "")
+                        symbol = msg_data.get("ticker", "").upper()
                         logger.info(
                             f"_tasks_listener - action: {action} symbol: {symbol}"
                         )
@@ -370,7 +387,7 @@ class FactorManager:
     async def _consume_stream_key(self, stream_key):
         """Consume WebSocket queue with data normalization using UnifiedTickManager"""
         logger.debug(f"_consume_stream_key - Starting consumer for {stream_key}")
-        q = self.ws_manager.queues.get(stream_key)
+        q = self.ws_manager.get_client_queue("factor_manager", stream_key)
         if q is None:
             logger.warning(f"_consume_stream_key - No queue found for {stream_key}")
             return
@@ -526,7 +543,7 @@ class FactorManager:
             else 0
         )
 
-        # Spread widening = liquidity drying up (危险信号)
+        # Spread widening = liquidity drying up
         spreads = [
             float(q.get("ask", 0)) - float(q.get("bid", 0)) for q in recent_quotes
         ]
@@ -574,12 +591,12 @@ class FactorManager:
         #     mapping={"mid_price": mid, "ts": now}
         # )
 
-        if factor_ts:
-            human_time = datetime.fromtimestamp(factor_ts / 1000).strftime(
-                "%Y-%m-%d %H:%M:%S.%f"
-            )[:-3]
-        else:
-            human_time = "1970-01-01 00:00:00.000"
+        # if factor_ts:
+        #     human_time = datetime.fromtimestamp(factor_ts / 1000).strftime(
+        #         "%Y-%m-%d %H:%M:%S.%f"
+        #     )[:-3]
+        # else:
+        #     human_time = "1970-01-01 00:00:00.000"
 
         # logger.debug(
         #     f"compute_factors - {ctx.symbol} "
@@ -750,7 +767,8 @@ class FactorManager:
             future.cancel()
         self.stream_consumers.clear()
 
-        if self.ws_loop.is_running():
+        # Only stop the ws_loop if we own it
+        if self._owns_manager and self.ws_loop and self.ws_loop.is_running():
             self.ws_loop.call_soon_threadsafe(self.ws_loop.stop)
 
         self.pool.shutdown(wait=False)
@@ -759,7 +777,7 @@ class FactorManager:
             thread.join(timeout=2)
             logger.debug(f"stop - Joined thread {name}")
 
-        if hasattr(self, "ws_thread"):
+        if self._owns_manager and hasattr(self, "ws_thread"):
             self.ws_thread.join(timeout=2)
 
         try:

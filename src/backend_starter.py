@@ -239,7 +239,6 @@ def _resolve_db_reference(
         # LOCAL = 127.0.0.1
         resolved["host"] = "127.0.0.1"
     else:
-        print(host_env_var)
         # Resolve from environment variable
         host_value = os.getenv(host_env_var)
         if host_value:
@@ -459,16 +458,75 @@ class GridTraderBackendStarter:
         else:
             self.replayer = None
 
+        # ============================================================================
+        # TickDataServer + FactorEngine — shared UnifiedTickManager when co-located
+        # ============================================================================
+        # Initialize TickDataServer first (if enabled) so its manager can be shared
+        # with FactorEngine. When both run on the same machine, they share a single
+        # connection to the data provider via fan-out queues.
+        self._shared_ws_manager = None
+        self._shared_ws_loop = None
+
+        if "TickDataServer" in self.roles:
+            from DataManager.tickdata_server import TickDataServer
+            from DataSupply.tickDataSupply.unified_tick_manager import (
+                UnifiedTickManager,
+            )
+
+            role_cfg = self.roles["TickDataServer"]
+
+            # Determine manager type: TickDataServer config takes precedence,
+            # fallback to FactorEngine config if co-located
+            manager_type = role_cfg.get("manager_type")
+            if not manager_type and "FactorEngine" in self.roles:
+                manager_type = self.roles["FactorEngine"].get("manager_type")
+
+            # Create shared UnifiedTickManager
+            self._shared_ws_manager = UnifiedTickManager(provider=manager_type)
+
+            # Create shared event loop for the ws_manager
+            self._shared_ws_loop = asyncio.new_event_loop()
+            self._shared_ws_thread = Thread(
+                target=self._run_shared_ws_loop, daemon=True, name="SharedWSLoop"
+            )
+            self._shared_ws_thread.start()
+
+            self.tick_data_server = TickDataServer(
+                host=role_cfg.get("host", "0.0.0.0"),
+                port=role_cfg.get("port", 8000),
+                session_id=self.session_id,
+                ws_manager=self._shared_ws_manager,
+                redis_config=role_cfg.get("redis"),
+            )
+            self._services.append(("TickDataServer", self.tick_data_server))
+            logger.info(
+                f"TickDataServer initialized with shared {self._shared_ws_manager.provider.upper()} manager"
+            )
+        else:
+            self.tick_data_server = None
+
         if "FactorEngine" in self.roles:
             from ComputeEngine.factor_engine import FactorManager
 
             role_cfg = self.roles["FactorEngine"]
-            self.factor_engine = FactorManager(
-                session_id=self.session_id,
-                manager_type=role_cfg.get("manager_type"),
-                redis_config=role_cfg.get("redis"),
-                influxdb_config=role_cfg.get("influxdb"),
-            )
+
+            # If TickDataServer is also enabled, share the UnifiedTickManager
+            if self.tick_data_server is not None:
+                self.factor_engine = FactorManager(
+                    session_id=self.session_id,
+                    redis_config=role_cfg.get("redis"),
+                    influxdb_config=role_cfg.get("influxdb"),
+                    ws_manager=self.tick_data_server.manager,
+                    ws_loop=self._shared_ws_loop,
+                )
+            else:
+                # Standalone FactorEngine with its own manager
+                self.factor_engine = FactorManager(
+                    session_id=self.session_id,
+                    manager_type=role_cfg.get("manager_type"),
+                    redis_config=role_cfg.get("redis"),
+                    influxdb_config=role_cfg.get("influxdb"),
+                )
             self._services.append(("FactorEngine", self.factor_engine))
         else:
             self.factor_engine = None
@@ -508,10 +566,40 @@ class GridTraderBackendStarter:
             self.factor_engine.stop()
             logger.info("FactorEngine stopped")
 
+        if self.tick_data_server:
+            self.tick_data_server.cleanup()
+            logger.info("TickDataServer stopped")
+
+        # Stop shared WS loop if it exists
+        if self._shared_ws_loop and self._shared_ws_loop.is_running():
+            self._shared_ws_loop.call_soon_threadsafe(self._shared_ws_loop.stop)
+            if hasattr(self, "_shared_ws_thread"):
+                self._shared_ws_thread.join(timeout=2)
+            logger.info("Shared WS loop stopped")
+
         if self.bff:
             self.bff.cleanup()
 
         logger.info("All services cleaned up")
+
+    def _run_shared_ws_loop(self):
+        """Run the shared WebSocket event loop for UnifiedTickManager."""
+        asyncio.set_event_loop(self._shared_ws_loop)
+        self._shared_ws_loop.create_task(self._shared_ws_manager.stream_forever())
+        try:
+            self._shared_ws_loop.run_forever()
+        finally:
+            pending = asyncio.all_tasks(loop=self._shared_ws_loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                self._shared_ws_loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True)
+                )
+            self._shared_ws_loop.run_until_complete(
+                self._shared_ws_loop.shutdown_asyncgens()
+            )
+            self._shared_ws_loop.close()
 
     def _start_async_worker_in_thread(self, worker, name: str):
         """Start an async worker in a separate thread with its own event loop."""
@@ -592,6 +680,24 @@ class GridTraderBackendStarter:
         if self.factor_engine:
             self.factor_engine.start()
             logger.info("FactorEngine started")
+
+        # Start TickDataServer if enabled
+        # Runs in a separate thread since it's a blocking uvicorn server
+        if self.tick_data_server:
+            tick_cfg = self.roles.get("TickDataServer", {})
+            host = tick_cfg.get("host", "0.0.0.0")
+            port = tick_cfg.get("port", 8000)
+            logger.info(f"Starting TickDataServer on {host}:{port}")
+
+            def run_tick_server():
+                self.tick_data_server.run()
+
+            tick_thread = Thread(
+                target=run_tick_server, daemon=True, name="TickDataServer"
+            )
+            tick_thread.start()
+            self._threads.append(tick_thread)
+            logger.info("TickDataServer started")
 
         # Run BFF in the main thread (blocking) if enabled
         if self.bff:

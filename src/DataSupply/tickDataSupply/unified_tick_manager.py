@@ -80,8 +80,17 @@ class UnifiedTickManager:
 
     @property
     def queues(self) -> Dict:
-        """Access to underlying manager's queues."""
+        """Access to underlying manager's queues (backward-compatible flat view)."""
         return self._manager.queues
+
+    @property
+    def _client_queues(self) -> Dict:
+        """Access to underlying manager's per-client queue structure."""
+        return self._manager._client_queues
+
+    def get_client_queue(self, client, stream_key: str):
+        """Get a specific client's queue for a stream_key."""
+        return self._manager.get_client_queue(client, stream_key)
 
     @property
     def connections(self) -> Dict:

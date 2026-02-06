@@ -15,12 +15,26 @@ class PolygonWebSocketManager:
         self.api_key = api_key
         self.ws = None
         self.connected = False
-        # queues keyed by stream_key, e.g. "Q.AAPL" or "T.AAPL"
-        self.queues = {}  # { stream_key: asyncio.Queue }
+        # Per-client fan-out queues: { stream_key: { client: asyncio.Queue } }
+        self._client_queues = {}  # { stream_key: { client: Queue } }
         # connections map client -> set of stream_keys
         self.connections = {}  # { websocket_client: set(stream_keys) }
         # track which stream_keys have been subscribed to Polygon
         self.subscribed_streams = set()
+
+    @property
+    def queues(self):
+        """Backward-compatible view: returns {stream_key: first_client_queue}.
+        For explicit per-client access, use get_client_queue()."""
+        flat = {}
+        for sk, client_map in self._client_queues.items():
+            if client_map:
+                flat[sk] = next(iter(client_map.values()))
+        return flat
+
+    def get_client_queue(self, client, stream_key: str):
+        """Get a specific client's queue for a stream_key."""
+        return self._client_queues.get(stream_key, {}).get(client)
 
     async def connect(self):
         try:
@@ -68,9 +82,11 @@ class PolygonWebSocketManager:
             for ev in events:
                 stream_key = f"{ev}.{sym}"
 
-                # ensure a queue exists for this stream_key
-                if stream_key not in self.queues:
-                    self.queues[stream_key] = asyncio.Queue()
+                # ensure per-client queue exists for this stream_key
+                if stream_key not in self._client_queues:
+                    self._client_queues[stream_key] = {}
+                if websocket_client not in self._client_queues[stream_key]:
+                    self._client_queues[stream_key][websocket_client] = asyncio.Queue()
 
                 # add to client's subscriptions
                 self.connections[websocket_client].add(stream_key)
@@ -102,9 +118,14 @@ class PolygonWebSocketManager:
                 sk = f"{ev}.{symbol}"
                 self.connections[websocket_client].discard(sk)
 
-        # for each stream_key, if no other client needs it, unsubscribe from Polygon and remove queue
+        # remove per-client queues and check if stream_key still needed
         for ev in events:
             stream_key = f"{ev}.{symbol}"
+
+            # remove this client's queue
+            if stream_key in self._client_queues:
+                self._client_queues[stream_key].pop(websocket_client, None)
+
             still_needed = any(stream_key in syms for syms in self.connections.values())
 
             if not still_needed and self.connected:
@@ -120,8 +141,8 @@ class PolygonWebSocketManager:
                         logger.error(f"❌ Failed to unsubscribe from {stream_key}: {e}")
                         self.connected = False
                         self.ws = None
-                # remove queue
-                self.queues.pop(stream_key, None)
+                # remove all queues for this stream_key
+                self._client_queues.pop(stream_key, None)
             else:
                 print(f"ℹ️ {stream_key} still needed by other clients or not connected")
 
@@ -130,6 +151,10 @@ class PolygonWebSocketManager:
         client_streams = self.connections.pop(websocket_client, set())
 
         for stream_key in list(client_streams):
+            # remove this client's queue
+            if stream_key in self._client_queues:
+                self._client_queues[stream_key].pop(websocket_client, None)
+
             still_needed = any(stream_key in syms for syms in self.connections.values())
 
             if (
@@ -142,7 +167,7 @@ class PolygonWebSocketManager:
                         json.dumps({"action": "unsubscribe", "params": stream_key})
                     )
                     self.subscribed_streams.discard(stream_key)
-                    self.queues.pop(stream_key, None)
+                    self._client_queues.pop(stream_key, None)
                     logger.info(
                         f"❌ Auto-unsubscribed from {stream_key} (no more clients)"
                     )
@@ -182,8 +207,8 @@ class PolygonWebSocketManager:
                                 "timestamp": item.get("t"),
                             }
                             stream_key = f"Q.{symbol}"
-                            q = self.queues.get(stream_key)
-                            if q:
+                            # Fan out to all client queues
+                            for q in self._client_queues.get(stream_key, {}).values():
                                 await q.put(payload)
 
                         elif ev == "T":  # Trade
@@ -199,8 +224,8 @@ class PolygonWebSocketManager:
                                 "trtf": item.get("trf_ts"),
                             }
                             stream_key = f"T.{symbol}"
-                            q = self.queues.get(stream_key)
-                            if q:
+                            # Fan out to all client queues
+                            for q in self._client_queues.get(stream_key, {}).values():
                                 await q.put(payload)
 
             except websockets.exceptions.ConnectionClosed:

@@ -49,6 +49,7 @@ from DataSupply.staticdataSupply.news_fetch import (
     NewsPersistence,
 )
 from utils.logger import setup_logger
+from utils.session import make_session_id, parse_session_id
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
 
@@ -102,28 +103,13 @@ class NewsWorker:
     - Article-level deduplication
     """
 
-    # Redis key patterns
-    NEWS_PENDING_SET = "static:pending:news"
-    NEWS_PROCESSING_SET = "static:processing:news"
-    SUMMARY_KEY_PREFIX = "static:ticker:summary"
-    NEWS_TICKER_PREFIX = "news:ticker"
-    NEWS_ITEM_PREFIX = "news:item"
-
-    # Streams
-    UPDATE_STREAM = "static_update_stream"  # Legacy - per-symbol notifications
-    ARTICLE_STREAM = "news_article_stream"  # New - per-article notifications
-
-    # Deduplication
-    SEEN_ARTICLES_PREFIX = "news:seen_articles"
-    SEEN_ARTICLES_TTL = 86400  # 24 hours
-
     def __init__(
         self,
         poll_interval: float = 1.0,
         batch_size: int = 5,
         news_limit: int = 5,
-        replay_date: Optional[str] = None,
         news_recency_hours: float = 24.0,
+        session_id: Optional[str] = None,
         # Rate limiting config
         moomoo_concurrent: int = 3,
         moomoo_delay: float = 0.5,
@@ -142,8 +128,8 @@ class NewsWorker:
             poll_interval: How often to check for pending symbols (seconds)
             batch_size: Max symbols to process per batch
             news_limit: Number of news articles to fetch per ticker
-            replay_date: Replay date (YYYYMMDD) for time reference, None for live mode
             news_recency_hours: Max age of news to be considered "recent" (default: 24 hours)
+            session_id: Unified session identifier (e.g. '20260115_replay_v1')
             redis_config: Redis connection config dict with host, port, db keys
             moomoo_concurrent: Max concurrent Moomoo requests
             moomoo_delay: Delay between Moomoo requests (seconds)
@@ -171,20 +157,30 @@ class NewsWorker:
         self.news_limit = news_limit
         self.news_recency_hours = news_recency_hours
 
-        # Mode detection
-        self.replay_date = replay_date
-        self.run_mode = "replay" if replay_date else "live"
-        self.db_date = (
-            replay_date
-            if replay_date
-            else datetime.now(ZoneInfo("America/New_York")).strftime("%Y%m%d")
-        )
+        # Unified session id — single source of truth for mode & date
+        self.session_id = session_id or make_session_id()
+        self.db_date, self.run_mode = parse_session_id(self.session_id)
+
+        # Redis key patterns — session-scoped instance attributes
+        self.NEWS_PENDING_SET = f"static:pending:news:{self.session_id}"
+        self.NEWS_PROCESSING_SET = f"static:processing:news:{self.session_id}"
+        self.SUMMARY_KEY_PREFIX = f"static:ticker:summary:{self.session_id}"
+        self.NEWS_TICKER_PREFIX = f"news:ticker:{self.session_id}"
+        self.NEWS_ITEM_PREFIX = f"news:item:{self.session_id}"
+
+        # Streams — session-scoped
+        self.UPDATE_STREAM = f"static_update_stream:{self.session_id}"
+        self.ARTICLE_STREAM = f"news_article_stream:{self.session_id}"
+
+        # Deduplication
+        self.SEEN_ARTICLES_KEY = f"news:seen_articles:{self.session_id}"
+        self.SEEN_ARTICLES_TTL = 86400  # 24 hours
 
         # Redis stream for get current time
-        self.SNAPSHOT_STREAM_NAME = f"market_snapshot_processed:{self.db_date}"
+        self.SNAPSHOT_STREAM_NAME = f"market_snapshot_processed:{self.session_id}"
 
         # Version tracking keys (for monotonic versioning per symbol/domain)
-        self.VERSION_KEY_PREFIX = f"static:version:{self.db_date}"
+        self.VERSION_KEY_PREFIX = f"static:version:{self.session_id}"
 
         # Rate limiters
         self.moomoo_limiter = AsyncRateLimiter(moomoo_concurrent, moomoo_delay)
@@ -264,7 +260,7 @@ class NewsWorker:
             )
         elif self.run_mode == "replay":
             logger.info(
-                f"NewsWorker running in replay mode - listen on market_snapshot_processed:{self.db_date}"
+                f"NewsWorker running in replay mode - listen on market_snapshot_processed:{self.session_id}"
             )
             # In replay mode, there is no fetch from pending set.
             # Instead, we listen on market_snapshot_processed stream to get current replay time,
@@ -462,14 +458,12 @@ class NewsWorker:
 
     def _is_duplicate(self, article_id: str) -> bool:
         """Check if article was already processed today."""
-        key = f"{self.SEEN_ARTICLES_PREFIX}:{self.db_date}"
-        return bool(self.r.sismember(key, article_id))
+        return bool(self.r.sismember(self.SEEN_ARTICLES_KEY, article_id))
 
     def _mark_seen(self, article_id: str):
         """Mark article as processed."""
-        key = f"{self.SEEN_ARTICLES_PREFIX}:{self.db_date}"
-        self.r.sadd(key, article_id)
-        self.r.expire(key, self.SEEN_ARTICLES_TTL)
+        self.r.sadd(self.SEEN_ARTICLES_KEY, article_id)
+        self.r.expire(self.SEEN_ARTICLES_KEY, self.SEEN_ARTICLES_TTL)
 
     # ============================================================================
     # Caching and Streaming Methods
@@ -587,14 +581,19 @@ if __name__ == "__main__":
     parser.add_argument("--benzinga-concurrent", type=int, default=5)
     args = parser.parse_args()
 
+    # Build session_id from CLI args
+    session_id = make_session_id(replay_date=args.replay_date)
+
     worker = NewsWorker(
-        redis_host=args.redis_host,
-        redis_port=args.redis_port,
-        redis_db=args.redis_db,
+        redis_config={
+            "host": args.redis_host,
+            "port": args.redis_port,
+            "db": args.redis_db,
+        },
         poll_interval=args.poll_interval,
         batch_size=args.batch_size,
         news_limit=args.news_limit,
-        replay_date=args.replay_date,
+        session_id=session_id,
         moomoo_concurrent=args.moomoo_concurrent,
         benzinga_concurrent=args.benzinga_concurrent,
     )

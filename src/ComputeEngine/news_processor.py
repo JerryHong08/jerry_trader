@@ -23,6 +23,7 @@ from openai import OpenAI
 from config import load_prompt
 from DataUtils.schema import NewsArticle
 from utils.logger import setup_logger
+from utils.session import make_session_id
 
 logger = setup_logger(__name__, log_to_file=True)
 load_dotenv()
@@ -81,6 +82,7 @@ class NewsProcessor:
         queue_maxsize: int = 200,
         article_limit: int = 10,
         monitor_interval: float = 10.0,
+        session_id: Optional[str] = None,
         llm_config: Optional[Dict[str, Any]] = None,
         redis_config: Optional[Dict[str, Any]] = None,
         postgres_config: Optional[Dict[str, Any]] = None,
@@ -125,10 +127,12 @@ class NewsProcessor:
                 "DEEPSEEK_API_KEY not set, news classification will be disabled"
             )
 
-        self.NEWS_ARTICLE_STREAM = "news_article_stream"  # per-article notifications
-        self.NEWS_TICKER_PREFIX = "news:ticker"
-        self.NEWS_ITEM_PREFIX = "news:item"
-        self.STATIC_SUMMARY_PREFIX = "static:ticker:summary"
+        self.session_id = session_id or make_session_id()
+
+        self.NEWS_ARTICLE_STREAM = f"news_article_stream:{self.session_id}"
+        self.NEWS_TICKER_PREFIX = f"news:ticker:{self.session_id}"
+        self.NEWS_ITEM_PREFIX = f"news:item:{self.session_id}"
+        self.STATIC_SUMMARY_PREFIX = f"static:ticker:summary:{self.session_id}"
 
         self.consumer_name = f"consumer_{socket.gethostname()}_{self.active_model}"
 

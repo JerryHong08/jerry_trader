@@ -27,6 +27,7 @@ import redis
 from influxdb_client.client.write_api import SYNCHRONOUS
 
 from utils.logger import setup_logger
+from utils.session import make_session_id, parse_session_id
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
 
@@ -47,19 +48,14 @@ class StateEngine:
 
     def __init__(
         self,
-        replay_date: Optional[str] = None,
-        suffix_id: Optional[str] = None,
+        session_id: Optional[str] = None,
         redis_config: Optional[Dict[str, Any]] = None,
         influxdb_config: Optional[Dict[str, Any]] = None,
     ):
 
-        self.run_mode = "replay" if replay_date else "live"
-        self.db_date = (
-            replay_date
-            if replay_date
-            else datetime.now(ZoneInfo("America/New_York")).strftime("%Y%m%d")
-        )
-        self.db_id = f"{self.db_date}_{suffix_id}" if suffix_id else f"{self.db_date}"
+        # Unified session id — single source of truth for mode & date
+        self.session_id = session_id or make_session_id()
+        self.db_date, self.run_mode = parse_session_id(self.session_id)
 
         # ---------- InfluxDB Configuration ----------
         self.org = "jerryhong"
@@ -90,13 +86,13 @@ class StateEngine:
         )
 
         # Input stream (from SnapshotProcessor)
-        self.INPUT_STREAM_NAME = f"market_snapshot_processed:{self.db_date}"
+        self.INPUT_STREAM_NAME = f"market_snapshot_processed:{self.session_id}"
 
         # Output stream (for BFF notification)
-        self.OUTPUT_STREAM_NAME = f"movers_state:{self.db_date}"
+        self.OUTPUT_STREAM_NAME = f"movers_state:{self.session_id}"
 
         # HSET for cursor tracking
-        self.CURSOR_HSET_NAME = f"state_cursor:{self.db_date}"
+        self.CURSOR_HSET_NAME = f"state_cursor:{self.session_id}"
 
         # Consumer group config
         self.CONSUMER_GROUP = "state_consumers"
@@ -120,7 +116,7 @@ class StateEngine:
 
         logger.info(
             f"__init__ - StateEngine initialized: mode={self.run_mode}, "
-            f"db_id={self.db_id}, INPUT={self.INPUT_STREAM_NAME}, "
+            f"session_id={self.session_id}, INPUT={self.INPUT_STREAM_NAME}, "
             f"OUTPUT={self.OUTPUT_STREAM_NAME}"
         )
 
@@ -356,8 +352,7 @@ class StateEngine:
         point = (
             influxdb_client.Point("movers_state")
             .tag("symbol", symbol)
-            .tag("run_mode", self.run_mode)
-            .tag("db_id", self.db_id)
+            .tag("session_id", self.session_id)
             .field("state", state.get("state", "unknown"))
             .field("stateReason", state.get("stateReason", ""))
             .field("rank", int(state.get("rank", 0)))
@@ -497,8 +492,7 @@ class StateEngine:
                 |> range(start: {range_start}, stop: {range_end})
                 |> filter(fn: (r) => r["_measurement"] == "movers_state")
                 |> filter(fn: (r) => r["symbol"] == "{ticker}")
-                |> filter(fn: (r) => r["run_mode"] == "{self.run_mode}")
-                |> filter(fn: (r) => r["db_id"] == "{self.db_id}")
+                |> filter(fn: (r) => r["session_id"] == "{self.session_id}")
                 |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
                 |> sort(columns: ["_time"], desc: true)
                 |> limit(n: 1)

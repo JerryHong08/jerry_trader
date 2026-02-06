@@ -26,6 +26,7 @@ import influxdb_client
 import redis
 
 from utils.logger import setup_logger
+from utils.session import make_session_id, parse_session_id
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
 
@@ -54,8 +55,7 @@ class GridTraderChartDataManager:
 
     def __init__(
         self,
-        replay_date: Optional[str] = None,
-        suffix_id: Optional[str] = None,
+        session_id: Optional[str] = None,
         redis_config: Optional[Dict[str, Any]] = None,
         influxdb_config: Optional[Dict[str, Any]] = None,
     ):
@@ -63,14 +63,9 @@ class GridTraderChartDataManager:
         self._cached_chart_data_lw: Optional[Dict] = None
         self._last_query_time: Optional[datetime] = None
 
-        self.run_mode = "replay" if replay_date else "live"
-        self.db_date = (
-            replay_date
-            if replay_date
-            else datetime.now(ZoneInfo("America/New_York")).strftime("%Y%m%d")
-        )
-
-        self.db_id = f"{self.db_date}_{suffix_id}" if suffix_id else f"{self.db_date}"
+        # Unified session id — single source of truth for mode & date
+        self.session_id = session_id or make_session_id()
+        self.db_date, self.run_mode = parse_session_id(self.session_id)
 
         # ------- Redis Configuration -------
         redis_cfg = redis_config or {}
@@ -82,9 +77,9 @@ class GridTraderChartDataManager:
             host=redis_host, port=redis_port, db=redis_db, decode_responses=True
         )
 
-        self.STREAM_NAME = f"market_snapshot_processed:{self.db_date}"
-        self.SUBSCRIBED_SET_NAME = f"movers_subscribed_set:{self.db_date}"
-        self.HSET_NAME = f"state_cursor:{self.db_date}"
+        self.STREAM_NAME = f"market_snapshot_processed:{self.session_id}"
+        self.SUBSCRIBED_SET_NAME = f"movers_subscribed_set:{self.session_id}"
+        self.HSET_NAME = f"state_cursor:{self.session_id}"
 
         # ------- InfluxDB Configuration -------
         self.org = "jerryhong"
@@ -97,16 +92,20 @@ class GridTraderChartDataManager:
 
         # URL from env var
         influx_url_env = influx_cfg.get("influx_url_env")
-        url = os.getenv(influx_url_env) if influx_url_env else "http://localhost:8086"
-        logger.info(f"__init__ - Connecting to InfluxDB at {url}, bucket={self.bucket}")
+        self.influx_url = (
+            os.getenv(influx_url_env) if influx_url_env else "http://localhost:8086"
+        )
+        logger.info(
+            f"__init__ - Connecting to InfluxDB at {self.influx_url}, bucket={self.bucket}"
+        )
 
         self._influx_client = influxdb_client.InfluxDBClient(
-            url=url, token=token, org=self.org
+            url=self.influx_url, token=token, org=self.org
         )
         self._query_api = self._influx_client.query_api()
 
         logger.info(
-            f"__init__ - GridTraderChartDataManager initialized: mode={self.run_mode}, db_id={self.db_id}"
+            f"__init__ - GridTraderChartDataManager initialized: mode={self.run_mode}, session_id={self.session_id}"
         )
 
     def mark_dirty(self):
@@ -195,8 +194,7 @@ class GridTraderChartDataManager:
             |> range(start: {range_start}, stop: {range_end})
             |> filter(fn: (r) => r["_measurement"] == "market_snapshot")
             |> filter(fn: (r) => r["symbol"] == "{ticker}")
-            |> filter(fn: (r) => r["run_mode"] == "{self.run_mode}")
-            |> filter(fn: (r) => r["db_id"] == "{self.db_id}")
+            |> filter(fn: (r) => r["session_id"] == "{self.session_id}")
             |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
             |> sort(columns: ["_time"])
         """
@@ -232,8 +230,7 @@ class GridTraderChartDataManager:
             |> range(start: {range_start}, stop: {range_end})
             |> filter(fn: (r) => r["_measurement"] == "movers_state")
             |> filter(fn: (r) => r["symbol"] == "{ticker}")
-            |> filter(fn: (r) => r["run_mode"] == "{self.run_mode}")
-            |> filter(fn: (r) => r["db_id"] == "{self.db_id}")
+            |> filter(fn: (r) => r["session_id"] == "{self.session_id}")
             |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
             |> sort(columns: ["_time"])
         """

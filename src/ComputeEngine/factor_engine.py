@@ -7,7 +7,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from threading import Lock, Thread
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 import influxdb_client
@@ -18,6 +18,7 @@ from influxdb_client.client.write_api import WriteOptions, WriteType
 
 from tickDataSupply.unified_tick_manager import UnifiedTickManager
 from utils.logger import setup_logger
+from utils.session import make_session_id, parse_session_id
 
 logger = setup_logger("factor_engine", log_to_file=True, level=logging.DEBUG)
 
@@ -111,33 +112,44 @@ class FactorManager:
     - Better error handling and logging
     """
 
-    def __init__(self, manager_type=None, replay_date=None, suffix_id=None):
+    DEFAULT_INFLUX_ORG = "jerryhong"
+    DEFAULT_INFLUX_BUCKET = "jerryib_trade"
+
+    def __init__(
+        self,
+        manager_type=None,
+        session_id: Optional[str] = None,
+        redis_config: Optional[Dict[str, Any]] = None,
+        influxdb_config: Optional[Dict[str, Any]] = None,
+    ):
         """
         Initialize Factor Manager
 
         Args:
             manager_type: Data manager type ('polygon', 'theta', 'replayer')
                          If None, reads from env var DATA_MANAGER (default: polygon)
-            replay_date: Optional replay date in YYYYMMDD format
-            suffix_id: Optional replay session ID. (eg. v1, v2, etc.)
+            session_id: Unified session identifier (e.g. '20260115_replay_v1')
+            redis_config: Redis connection config dict with host, port, db keys
+            influxdb_config: InfluxDB connection config dict with influx_url_env key
         """
+        # Unified session id — single source of truth for mode & date
+        self.session_id = session_id or make_session_id()
+        self.db_date, self.run_mode = parse_session_id(self.session_id)
 
-        token = os.environ.get("INFLUXDB_TOKEN")
-        self.org = "jerryhong"
-        url = "http://localhost:8086"
+        # Parse influxdb config
+        influx_cfg = influxdb_config or {}
+        influx_url_env = influx_cfg.get("influx_url_env")
+        self.influx_url = (
+            os.getenv(influx_url_env) if influx_url_env else "http://localhost:8086"
+        )
+        self.influx_org = influx_cfg.get("org", self.DEFAULT_INFLUX_ORG)
+        self.influx_bucket = influx_cfg.get("bucket", self.DEFAULT_INFLUX_BUCKET)
+        influx_token_env = influx_cfg.get("influx_token_env")
+        self.influx_token = os.getenv(influx_token_env) if influx_token_env else None
 
         write_client = influxdb_client.InfluxDBClient(
-            url=url, token=token, org=self.org
+            url=self.influx_url, token=self.influx_token, org=self.influx_org
         )
-        self.bucket = "jerrymmm"
-
-        self.run_mode = "replay" if replay_date else "live"
-        self.db_date = (
-            replay_date
-            if replay_date
-            else datetime.now(ZoneInfo("America/New_York")).strftime("%Y%m%d")
-        )
-        self.db_id = f"{self.db_date}_{suffix_id}" if suffix_id else f"{self.db_date}"
 
         self.factor_set = os.getenv("FACTOR_SET", "belief_micro_v1")
 
@@ -182,14 +194,16 @@ class FactorManager:
         )
         # ------- Redis Configuration -------
 
-        self.redis_client = redis.Redis(host="localhost", port=6379, db=0)
+        # Parse redis config
+        redis_cfg = redis_config or {}
+        redis_host = redis_cfg.get("host", "127.0.0.1")
+        redis_port = redis_cfg.get("port", 6379)
+        redis_db = redis_cfg.get("db", 0)
+        self.redis_client = redis.Redis(
+            host=redis_host, port=redis_port, db=redis_db, decode_responses=True
+        )
 
-        if self.run_mode == "replay":
-            today_stream = f"factor_tasks_replay:{self.db_date}"
-        else:
-            today_stream = f"factor_tasks:{self.db_date}"
-
-        self.STREAM_NAME = today_stream
+        self.STREAM_NAME = f"factor_tasks:{self.session_id}"
         self.CONSUMER_GROUP = "factor_tasks_consumer"
         self.CONSUMER_NAME = f"consumer_{socket.gethostname()}_{os.getpid()}"
 
@@ -651,8 +665,7 @@ class FactorManager:
         return (
             Point("market_quote")
             .tag("symbol", symbol)
-            .tag("run_mode", self.run_mode)
-            .tag("replay_id", self.replay_id)
+            .tag("session_id", self.session_id)
             .field("last_bid", bids[-1] if bids else 0.0)
             .field("last_ask", asks[-1] if asks else 0.0)
             .field("last_bid_size", bid_sizes[-1] if bid_sizes else 0.0)
@@ -683,8 +696,7 @@ class FactorManager:
         return (
             Point("market_trade")
             .tag("symbol", symbol)
-            .tag("run_mode", self.run_mode)
-            .tag("replay_id", self.replay_id)
+            .tag("session_id", self.session_id)
             .field("last_price", prices[-1] if prices else 0.0)
             .field("last_size", sizes[-1] if sizes else 0.0)
             .field("vwap", vwap)
@@ -703,8 +715,7 @@ class FactorManager:
         return (
             Point("belief_dynamics")
             .tag("symbol", symbol)
-            .tag("run_mode", self.run_mode)
-            .tag("replay_id", self.replay_id)
+            .tag("session_id", self.session_id)
             .tag("factor_set", self.factor_set)
             .field("trade_rate", float(factors.get("trade_rate", 0.0)))
             .field("accel", float(factors.get("accel", 0.0)))
@@ -716,7 +727,9 @@ class FactorManager:
         if point is None:
             return
         try:
-            self.write_api.write(bucket=self.bucket, org=self.org, record=point)
+            self.write_api.write(
+                bucket=self.influx_bucket, org=self.influx_org, record=point
+            )
         except Exception as exc:
             logger.error(f"_emit_point - Failed to write to InfluxDB: {exc}")
 
@@ -817,11 +830,16 @@ if __name__ == "__main__":
         except ValueError:
             parser.error("replay-date must be in format YYYYMMDD (e.g., 20240115)")
 
+    # Build session_id from CLI args
+    session_id = make_session_id(
+        replay_date=args.replay_date,
+        suffix_id=args.suffix_id,
+    )
+
     # Create and start manager
     fm = FactorManager(
-        replay_date=args.replay_date,
+        session_id=session_id,
         manager_type=args.manager_type,
-        suffix_id=args.suffix_id,
     )
     fm.start()
 

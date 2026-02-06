@@ -41,6 +41,7 @@ from DataSupply.staticdataSupply.fundamentals_fetch import (
     FundamentalsFetcher,
 )
 from utils.logger import setup_logger
+from utils.session import make_session_id, parse_session_id
 
 logger = setup_logger(__name__, log_to_file=True)
 
@@ -58,52 +59,11 @@ class StaticDataWorker:
     Note: News processing is handled by separate NewsWorker.
     """
 
-    # Redis key patterns
-    PENDING_SET = "static:pending"
-    PROCESSING_SET = "static:processing"  # In-progress items for fault tolerance
-    SUMMARY_KEY_PREFIX = "static:ticker:summary"
-    PROFILE_KEY_PREFIX = "static:ticker:profile"
-    UPDATE_STREAM = "static_update_stream"
-
-    # Summary fields (for RankList - lightweight)
-    SUMMARY_FIELDS = [
-        "marketCap",
-        "float",
-        "country",
-        "sector",
-        "hasNews",
-        "lastUpdated",
-    ]
-
-    # Profile fields (for StockDetail - full)
-    PROFILE_FIELDS = [
-        "symbol",
-        "companyName",
-        "country",
-        "sector",
-        "industry",
-        "marketCap",
-        "range",
-        "averageVolume",
-        "ipoDate",
-        "fullTimeEmployees",
-        "ceo",
-        "website",
-        "description",
-        "exchange",
-        "address",
-        "city",
-        "state",
-        "image",
-        "float",
-        "lastUpdated",
-    ]
-
     def __init__(
         self,
         poll_interval: float = 1.0,
         batch_size: int = 5,
-        replay_date: Optional[str] = None,
+        session_id: Optional[str] = None,
         redis_config: Optional[Dict[str, Any]] = None,
     ):
         """
@@ -112,7 +72,7 @@ class StaticDataWorker:
         Args:
             poll_interval: How often to check for pending symbols (seconds)
             batch_size: Max symbols to process per batch
-            replay_date: Replay date (YYYYMMDD) for time reference, None for live mode
+            session_id: Unified session identifier (e.g. '20260115_replay_v1')
             redis_config: Redis connection config dict with host, port, db keys
         """
         # Parse redis config (with defaults)
@@ -126,17 +86,19 @@ class StaticDataWorker:
         self.poll_interval = poll_interval
         self.batch_size = batch_size
 
-        # Mode detection
-        self.replay_date = replay_date
-        self.run_mode = "replay" if replay_date else "live"
-        self.db_date = (
-            replay_date
-            if replay_date
-            else datetime.now(ZoneInfo("America/New_York")).strftime("%Y%m%d")
-        )
+        # Unified session id — single source of truth for mode & date
+        self.session_id = session_id or make_session_id()
+        self.db_date, self.run_mode = parse_session_id(self.session_id)
+
+        # Redis key patterns — session-scoped instance attributes
+        self.PENDING_SET = f"static:pending:{self.session_id}"
+        self.PROCESSING_SET = f"static:processing:{self.session_id}"
+        self.SUMMARY_KEY_PREFIX = f"static:ticker:summary:{self.session_id}"
+        self.PROFILE_KEY_PREFIX = f"static:ticker:profile:{self.session_id}"
+        self.UPDATE_STREAM = f"static_update_stream:{self.session_id}"
 
         # Version tracking keys (for monotonic versioning per symbol/domain)
-        self.VERSION_KEY_PREFIX = f"static:version:{self.db_date}"  # static:version:{self.db_date}:{symbol}:{domain} -> INTEGER
+        self.VERSION_KEY_PREFIX = f"static:version:{self.session_id}"
 
         # Initialize fetchers
         self.fundamentals_fetcher = FundamentalsFetcher()
@@ -443,10 +405,13 @@ async def main():
 
     args = parser.parse_args()
 
+    # Build session_id from CLI args
+    session_id = make_session_id(replay_date=args.replay_date)
+
     worker = StaticDataWorker(
         poll_interval=args.poll_interval,
         batch_size=args.batch_size,
-        replay_date=args.replay_date,
+        session_id=session_id,
     )
 
     logger.info("Starting StaticDataWorker...")

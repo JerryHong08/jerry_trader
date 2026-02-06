@@ -38,6 +38,7 @@ load_dotenv()
 import yaml
 
 from utils.logger import setup_logger
+from utils.session import make_session_id
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.INFO)
 
@@ -313,6 +314,13 @@ class GridTraderBackendStarter:
         self.suffix_id = config.get("suffix_id")
         self.load_history = config.get("load_history")
 
+        # Unified session ID for all Redis keys and InfluxDB tags
+        self.session_id = make_session_id(
+            replay_date=self.replay_date,
+            suffix_id=self.suffix_id,
+        )
+        logger.info(f"Session ID: {self.session_id}")
+
         self._running = False
         self._services = []
         self._threads = []
@@ -337,8 +345,7 @@ class GridTraderBackendStarter:
             self.bff = GridTraderBFF(
                 host=role_cfg.get("host", "localhost"),
                 port=role_cfg.get("port", 5001),
-                replay_date=self.replay_date,
-                suffix_id=self.suffix_id,
+                session_id=self.session_id,
                 redis_config=role_cfg.get("redis"),
                 influxdb_config=role_cfg.get("influxdb"),
             )
@@ -347,12 +354,11 @@ class GridTraderBackendStarter:
             self.bff = None
 
         if "SnapshotProcessor" in self.roles:
-            from ComputeEngine.snapshotProcessor import SnapshotProcessor
+            from ComputeEngine.snapshot_processor import SnapshotProcessor
 
             role_cfg = self.roles["SnapshotProcessor"]
             self.processor = SnapshotProcessor(
-                replay_date=self.replay_date,
-                suffix_id=self.suffix_id,
+                session_id=self.session_id,
                 load_history=self.load_history,
                 redis_config=role_cfg.get("redis"),
                 influxdb_config=role_cfg.get("influxdb"),
@@ -362,13 +368,13 @@ class GridTraderBackendStarter:
             self.processor = None
 
         if "StateEngine" in self.roles:
-            from ComputeEngine.stateEngine import StateEngine
+            from ComputeEngine.state_engine import StateEngine
 
             role_cfg = self.roles["StateEngine"]
             self.state_engine = StateEngine(
-                replay_date=self.replay_date,
-                suffix_id=self.suffix_id,
+                session_id=self.session_id,
                 redis_config=role_cfg.get("redis"),
+                influxdb_config=role_cfg.get("influxdb"),
             )
             self._services.append(("StateEngine", self.state_engine))
         else:
@@ -379,7 +385,7 @@ class GridTraderBackendStarter:
 
             role_cfg = self.roles["StaticDataWorker"]
             self.static_worker = StaticDataWorker(
-                replay_date=self.replay_date,
+                session_id=self.session_id,
                 poll_interval=role_cfg.get("poll_interval", 1.0),
                 batch_size=role_cfg.get("batch_size", 5),
                 redis_config=role_cfg.get("redis"),
@@ -393,7 +399,7 @@ class GridTraderBackendStarter:
 
             role_cfg = self.roles["NewsWorker"]
             self.news_worker = NewsWorker(
-                replay_date=self.replay_date,
+                session_id=self.session_id,
                 poll_interval=role_cfg.get("poll_interval", 1.0),
                 batch_size=role_cfg.get("batch_size", 5),
                 news_limit=role_cfg.get("news_limit", 5),
@@ -406,13 +412,14 @@ class GridTraderBackendStarter:
             self.news_worker = None
 
         if "NewsProcessor" in self.roles:
-            from ComputeEngine.NewsProcessor import NewsProcessor
+            from ComputeEngine.news_processor import NewsProcessor
 
             role_cfg = self.roles["NewsProcessor"]
             llm_cfg = self.config.get("llm", {})
             self.news_processor = NewsProcessor(
                 # llm_model=active_model,
                 llm_config=llm_cfg,
+                session_id=self.session_id,
                 redis_config=role_cfg.get("redis"),
                 postgres_config=role_cfg.get("postgres"),
             )
@@ -426,6 +433,8 @@ class GridTraderBackendStarter:
             role_cfg = self.roles["Collector"]
             self.collector = MarketsnapshotCollector(
                 limit=role_cfg.get("limit", "market_open"),
+                session_id=self.session_id,
+                redis_config=role_cfg.get("redis"),
             )
             self._services.append(("Collector", self.collector))
         else:
@@ -437,7 +446,7 @@ class GridTraderBackendStarter:
             role_cfg = self.roles["Replayer"]
             self.replayer = MarketSnapshotReplayer(
                 replay_date=self.replay_date,
-                suffix_id=self.suffix_id,
+                session_id=self.session_id,
                 speed=role_cfg.get("speed", 1.0),
                 file_format=role_cfg.get("format", "parquet"),
                 start_from=role_cfg.get("start_from"),
@@ -449,6 +458,20 @@ class GridTraderBackendStarter:
             self._services.append(("Replayer", self.replayer))
         else:
             self.replayer = None
+
+        if "FactorEngine" in self.roles:
+            from ComputeEngine.factor_engine import FactorManager
+
+            role_cfg = self.roles["FactorEngine"]
+            self.factor_engine = FactorManager(
+                session_id=self.session_id,
+                manager_type=role_cfg.get("manager_type"),
+                redis_config=role_cfg.get("redis"),
+                influxdb_config=role_cfg.get("influxdb"),
+            )
+            self._services.append(("FactorEngine", self.factor_engine))
+        else:
+            self.factor_engine = None
 
         logger.info(f"Initialized {len(self._services)} services")
 
@@ -481,6 +504,10 @@ class GridTraderBackendStarter:
             self.replayer.stop()
             logger.info("Replayer stopped")
 
+        if self.factor_engine:
+            self.factor_engine.stop()
+            logger.info("FactorEngine stopped")
+
         if self.bff:
             self.bff.cleanup()
 
@@ -512,10 +539,7 @@ class GridTraderBackendStarter:
         logger.info(f"Enabled roles: {list(self.roles.keys())}")
         logger.info("=" * 70)
 
-        if self.replay_date:
-            logger.info(f"Mode: REPLAY (date={self.replay_date}, id={self.suffix_id})")
-        else:
-            logger.info("Mode: LIVE")
+        logger.info(f"Session: {self.session_id}")
 
         self._running = True
 
@@ -564,6 +588,11 @@ class GridTraderBackendStarter:
             self._start_async_worker_in_thread(self.replayer, "Replayer")
             logger.info("Replayer started")
 
+        # Start FactorEngine if enabled (it creates its own threads)
+        if self.factor_engine:
+            self.factor_engine.start()
+            logger.info("FactorEngine started")
+
         # Run BFF in the main thread (blocking) if enabled
         if self.bff:
             bff_cfg = self.roles.get("GridTraderBFF", {})
@@ -571,11 +600,11 @@ class GridTraderBackendStarter:
             port = bff_cfg.get("port", 5001)
             logger.info(f"Starting GridTrader BFF on {host}:{port}")
             self.bff.run()
-        else:
-            # If no BFF, just keep running
-            logger.info("No BFF - running in headless mode")
-            while self._running:
-                time.sleep(1)
+        # else:
+        #     # If no BFF, just keep running
+        #     logger.info("No BFF - running in headless mode")
+        #     while self._running:
+        #         time.sleep(1)
 
 
 def main():

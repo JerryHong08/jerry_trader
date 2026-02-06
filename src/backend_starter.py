@@ -375,7 +375,7 @@ class GridTraderBackendStarter:
             self.state_engine = None
 
         if "StaticDataWorker" in self.roles:
-            from DataSupply.staticdataSupply.static_data_worker import StaticDataWorker
+            from DataManager.static_data_worker import StaticDataWorker
 
             role_cfg = self.roles["StaticDataWorker"]
             self.static_worker = StaticDataWorker(
@@ -389,7 +389,7 @@ class GridTraderBackendStarter:
             self.static_worker = None
 
         if "NewsWorker" in self.roles:
-            from DataSupply.staticdataSupply.news_worker import NewsWorker
+            from DataManager.news_worker import NewsWorker
 
             role_cfg = self.roles["NewsWorker"]
             self.news_worker = NewsWorker(

@@ -497,11 +497,6 @@ class FactorManager:
         buy_ratio = sum(1 for a in aggressors if a > 0) / len(aggressors)
         sell_ratio = sum(1 for a in aggressors if a < 0) / len(aggressors)
 
-        # logger.debug(
-        #     f"compute_belief_dynamics - {ctx.symbol} "
-        #     f"trade_rate: {trade_rate:.4f}, "
-        #     f"accel: {accel:.4f}, "
-        #     f"aggressiveness: {aggressiveness:.4f}")
         return {
             "trade_rate": round(trade_rate, 4),
             "accel": round(accel, 4),
@@ -573,35 +568,10 @@ class FactorManager:
         # now = time.time()
         # ctx.last_calc_ts = now
 
-        # Write belief dynamics (factors) with rate limiting
-        # if self._should_write_factor(ctx):
-        #     self._write_factors_to_influx(ctx.symbol, belief)
-        # ctx.last_factor_write_ts = ctx.last_calc_ts
-
-        # with ctx.lock:
-        #     if not ctx.quote_window:
-        #         return
-
-        #     last = ctx.quote_window[-1]
-        #     spread = last["ask"] - last["bid"]
-
         # TODO: add Redis push later
         # self.redis_client.hset(
         #     f"factor:{ctx.symbol}",
         #     mapping={"mid_price": mid, "ts": now}
-        # )
-
-        # if factor_ts:
-        #     human_time = datetime.fromtimestamp(factor_ts / 1000).strftime(
-        #         "%Y-%m-%d %H:%M:%S.%f"
-        #     )[:-3]
-        # else:
-        #     human_time = "1970-01-01 00:00:00.000"
-
-        # logger.debug(
-        #     f"compute_factors - {ctx.symbol} "
-        #     f"factor:belief_state  {ctx.belief_state},"
-        #     f"ts: {human_time},"
         # )
 
     # new influx write methods with window flush

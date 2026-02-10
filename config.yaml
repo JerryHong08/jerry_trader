@@ -71,6 +71,10 @@ machines:
         batch_size: 5
         news_limit: 5
         news_recency_hours: 24.0
+        sources:
+          - momo
+          - benzinga
+          - fmp
         redis: "redis-b@OLDMAN"
         postgres: "postgres-b@OLDMAN"
 

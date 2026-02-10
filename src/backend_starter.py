@@ -403,6 +403,7 @@ class GridTraderBackendStarter:
                 batch_size=role_cfg.get("batch_size", 5),
                 news_limit=role_cfg.get("news_limit", 5),
                 news_recency_hours=role_cfg.get("news_recency_hours", 24.0),
+                sources=role_cfg.get("sources", ["momo", "benzinga"]),
                 redis_config=role_cfg.get("redis"),
                 postgres_config=role_cfg.get("postgres"),
             )

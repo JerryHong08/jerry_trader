@@ -2,7 +2,7 @@
 Docstring for DataSupply.snapshotDataSupply.news_fetch
 News Fetch module to get latest news from different providers.
 
-- Async methods: get_news_momo_async(), fetch_news_benzinga_async() - for streaming
+- Async methods: get_news_momo_async(), fetch_news_fmp(), fetch_news_benzinga() - for streaming
 """
 
 import asyncio
@@ -17,7 +17,6 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import psycopg
-import requests
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -305,11 +304,11 @@ class MoomooStockResolver:
         self.token_generator = MoomooQuoteToken()
         self.waf_token = os.getenv("MOOMOO_WAF_TOKEN", "")
 
-    def search_stock(
+    async def search_stock(
         self, symbol: str, lang: str = "en-us", site: str = "us"
     ) -> Optional[Dict]:
         """
-        Search for stock using header/footer search API
+        Search for stock using header/footer search API.
 
         Args:
             symbol: Stock symbol (e.g., 'AAPL')
@@ -328,9 +327,11 @@ class MoomooStockResolver:
 
         try:
             url = self.base_url + self.search_api
-            proxy_url = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
-            proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
-            response = requests.get(url, params=params, headers=headers, timeout=10, proxies=proxies)
+            client_kwargs = _get_httpx_client_kwargs()
+            async with httpx.AsyncClient(**client_kwargs) as client:
+                response = await client.get(
+                    url, params=params, headers=headers, timeout=10
+                )
 
             if response.status_code == 200:
                 data = response.json()
@@ -375,9 +376,9 @@ class MoomooStockResolver:
         logger.warning(f"Could not find {symbol} in response")
         return None
 
-    def get_stock_info(self, symbol: str) -> Optional[Dict]:
+    async def get_stock_info(self, symbol: str) -> Optional[Dict]:
         """
-        Get complete stock information
+        Get complete stock information.
 
         Returns:
             {
@@ -389,7 +390,7 @@ class MoomooStockResolver:
                 'hasOption': True
             }
         """
-        data = self.search_stock(symbol)
+        data = await self.search_stock(symbol)
         if not data:
             logger.warning(f"No search data returned for {symbol}")
             return None
@@ -442,8 +443,8 @@ class MoomooStockResolver:
         Yields:
             NewsArticle objects one at a time
         """
-        # 1. Get stock info (sync call, can be cached in future)
-        stock_info = await asyncio.to_thread(self.get_stock_info, symbol)
+        # 1. Get stock info (async call, can be cached in future)
+        stock_info = await self.get_stock_info(symbol)
         if not stock_info:
             logger.error(f"Could not find stock info for {symbol}")
             return
@@ -617,74 +618,80 @@ class API_NewsFetchers:
         self.BENZINGA_API_KEY = os.getenv("BENZINGA_API_KEY")
         self.BENZINGA_BASE_URL = "https://api.benzinga.com/api/v2/news"
 
-        self.session = requests.Session()
-        self.session.headers.update(
-            {
-                "User-Agent": "Mozilla/5.0 (compatible; FinancialNewsBot/1.0)",
-                "accept": "application/json",
-            }
-        )
-        
-        # Configure proxy if set
-        proxy_url = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
-        if proxy_url:
-            self.session.proxies = {"http": proxy_url, "https": proxy_url}
-            # logger.debug(f"Session configured with proxy: {proxy_url}")
-
-    def fetch_news_fmp(
-        self, symbol: str, limit: int = 5, timeout: int = 5
-    ) -> List[NewsArticle]:
+    async def fetch_news_fmp(
+        self,
+        symbol: str,
+        limit: int = 5,
+        timeout: int = 10,
+    ) -> AsyncGenerator[NewsArticle, None]:
         """
-        Fetch News from FMP API
+        Async generator that yields FMP news articles one by one.
 
         Args:
             symbol: Stock symbol (e.g., 'AAPL')
-            limit: news results numbers
-            timeout: connection timeout
-        Returns:
-            List of NewsArticle objects
+            limit: Number of news results
+            timeout: Connection timeout in seconds
+
+        Yields:
+            NewsArticle objects one at a time
         """
+        if not self.FMP_API_KEY:
+            logger.error("FMP_API_KEY not found in environment variables")
+            raise ValueError("FMP_API_KEY is required")
+
         params = {"symbols": symbol.upper(), "limit": limit, "apikey": self.FMP_API_KEY}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (compatible; FinancialNewsBot/1.0)",
+            "Accept": "application/json",
+        }
 
         try:
             logger.info(
-                f"Start fetching {symbol} news data using FMP API, limit={limit}"
+                f"Start fetching {symbol} news data using FMP API (async), limit={limit}"
             )
-            response = self.session.get(
-                self.FMP_BASE_URL, params=params, timeout=timeout
-            )
-            response.raise_for_status()
+
+            client_kwargs = _get_httpx_client_kwargs()
+            async with httpx.AsyncClient(**client_kwargs) as client:
+                response = await client.get(
+                    self.FMP_BASE_URL,
+                    params=params,
+                    headers=headers,
+                    timeout=timeout,
+                )
+                response.raise_for_status()
 
             data = response.json()
 
-            # Check return type
             if not isinstance(data, list):
                 raise ValueError(
                     f"API Response data not matched, want List, got: {type(data)}"
                 )
 
-            # Transform into NewsArticle objects
-            articles = []
+            if len(data) == 0:
+                logger.warning(f"No news found for {symbol} from FMP")
+                return
+
+            logger.info(f"Fetched {len(data)} news items from FMP for {symbol}")
+
             for item in data:
                 try:
                     article = NewsArticle.from_fmp_api_response(item)
-                    articles.append(article)
+                    yield article
                 except Exception as e:
                     logger.error(f"Parse news data error: {e}, raw data: {item}")
                     continue
 
-            logger.info(f"Successfully fetched {len(articles)} news articles from FMP")
-            return articles
-
+        except httpx.TimeoutException:
+            logger.error(f"FMP request timeout for {symbol} after {timeout}s")
+            raise
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP error fetching FMP news for {symbol}: {e}")
+            raise
         except Exception as e:
-            logger.error(f"Failed to fetch news for {symbol}: {e}")
+            logger.error(f"fetch_news_fmp - Failed to fetch news for {symbol}: {e}")
             raise
 
-    # ============================================================================
-    # Async Methods for Streaming
-    # ============================================================================
-
-    async def fetch_news_benzinga_async(
+    async def fetch_news_benzinga(
         self,
         symbol: str,
         page_size: int = 5,
@@ -778,7 +785,7 @@ class API_NewsFetchers:
             raise
         except Exception as e:
             logger.error(
-                f"fetch_news_benzinga_async - Failed to fetch news for {symbol}: {e}"
+                f"fetch_news_benzinga - Failed to fetch news for {symbol}: {e}"
             )
             raise
 
@@ -809,16 +816,15 @@ if __name__ == "__main__":
     async def main():
         if args.provider == "fmp":
             fetcher = API_NewsFetchers()
-            articles = fetcher.fetch_news_fmp(args.ticker, limit=args.limit)
-            for i, article in enumerate(articles):
-                print(f"Article {i+1}: {article.title}")
+            async for article in fetcher.fetch_news_fmp(args.ticker, limit=args.limit):
+                print(f"Article: {article.title}")
                 print(f"  URL: {article.url}")
                 print(f"  Published: {article.published_time}")
                 print(f"  Text: {article.text if article.text else 'N/A'}...")
                 print("-" * 40)
         elif args.provider == "benzinga":
             fetcher = API_NewsFetchers()
-            async for article in fetcher.fetch_news_benzinga_async(args.ticker, page_size=args.limit):
+            async for article in fetcher.fetch_news_benzinga(args.ticker, page_size=args.limit):
                 print(f"Article: {article.title}")
                 print(f"  URL: {article.url}")
                 print(f"  Published: {article.published_time}")

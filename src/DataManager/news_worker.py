@@ -96,6 +96,8 @@ class NewsWorker:
         benzinga_delay: float = 0.2,
         content_concurrent: int = 2,
         content_delay: float = 0.3,
+        # news sources config
+        sources: Optional[List[str]] = None,
         # database config
         redis_config: Optional[Dict[str, Any]] = None,
         postgres_config: Optional[Dict[str, Any]] = None,
@@ -116,6 +118,7 @@ class NewsWorker:
             benzinga_delay: Delay between Benzinga requests (seconds)
             content_concurrent: Max concurrent content fetch requests
             content_delay: Delay between content fetch requests (seconds)
+            sources: List of news source names to fetch from (e.g. ['momo', 'benzinga', 'fmp'])
         """
         # Parse redis config (with defaults)
         redis_cfg = redis_config or {}
@@ -167,6 +170,9 @@ class NewsWorker:
         self.benzinga_limiter = AsyncRateLimiter(benzinga_concurrent, benzinga_delay)
         self.content_limiter = AsyncRateLimiter(content_concurrent, content_delay)
 
+        # News sources to fetch from (default: momo + benzinga)
+        self.sources = set(sources or ["momo", "benzinga"])
+
         # Initialize fetchers
         self.momo_news = MoomooStockResolver()
         self.api_news = API_NewsFetchers()
@@ -180,7 +186,7 @@ class NewsWorker:
 
         logger.info(
             f"NewsWorker initialized: mode={self.run_mode}, db_date={self.db_date}, "
-            f"poll_interval={poll_interval}s, batch_size={batch_size}, "
+            f"sources={sorted(self.sources)}, poll_interval={poll_interval}s, batch_size={batch_size}, "
             f"moomoo_concurrent={moomoo_concurrent}, benzinga_concurrent={benzinga_concurrent}"
         )
 
@@ -558,64 +564,94 @@ class NewsWorker:
 
     async def _fetch_news_streaming(self, symbol: str) -> AsyncGenerator:
         """
-        Fetch news from all providers, yielding articles as they arrive.
+        Fetch news from configured providers, yielding articles as they arrive.
 
+        Only fetches from providers listed in self.sources.
         Uses retry logic with exponential backoff.
         Deduplicates by URL within the fetch session.
         """
         seen_urls: Set[str] = set()
 
         # Fetch from Moomoo with retry
-        for attempt in range(RetryConfig.MAX_RETRIES + 1):
-            try:
-                async for article in self.momo_news.get_news_momo_async(
-                    symbol,
-                    pageSize=self.news_limit,
-                    content_limiter=self.content_limiter,
-                ):
-                    if article.url not in seen_urls:
-                        seen_urls.add(article.url)
-                        yield article
-                break  # Success, exit retry loop
-            except Exception as e:
-                if attempt < RetryConfig.MAX_RETRIES:
-                    delay = min(
-                        RetryConfig.BASE_DELAY
-                        * (RetryConfig.EXPONENTIAL_BASE**attempt),
-                        RetryConfig.MAX_DELAY,
-                    )
-                    logger.warning(
-                        f"Moomoo retry {attempt + 1}/{RetryConfig.MAX_RETRIES}: {e}, waiting {delay}s"
-                    )
-                    await asyncio.sleep(delay)
-                else:
-                    logger.error(f"Moomoo fetch failed for {symbol} after retries: {e}")
+        if "momo" in self.sources:
+            for attempt in range(RetryConfig.MAX_RETRIES + 1):
+                try:
+                    async for article in self.momo_news.get_news_momo_async(
+                        symbol,
+                        pageSize=self.news_limit,
+                        content_limiter=self.content_limiter,
+                    ):
+                        if article.url not in seen_urls:
+                            seen_urls.add(article.url)
+                            yield article
+                    break  # Success, exit retry loop
+                except Exception as e:
+                    if attempt < RetryConfig.MAX_RETRIES:
+                        delay = min(
+                            RetryConfig.BASE_DELAY
+                            * (RetryConfig.EXPONENTIAL_BASE**attempt),
+                            RetryConfig.MAX_DELAY,
+                        )
+                        logger.warning(
+                            f"Moomoo retry {attempt + 1}/{RetryConfig.MAX_RETRIES}: {e}, waiting {delay}s"
+                        )
+                        await asyncio.sleep(delay)
+                    else:
+                        logger.error(f"Moomoo fetch failed for {symbol} after retries: {e}")
 
         # Fetch from Benzinga with retry
-        for attempt in range(RetryConfig.MAX_RETRIES + 1):
-            try:
-                async for article in self.api_news.fetch_news_benzinga_async(
-                    symbol, page_size=self.news_limit
-                ):
-                    if article.url not in seen_urls:
-                        seen_urls.add(article.url)
-                        yield article
-                break  # Success, exit retry loop
-            except Exception as e:
-                if attempt < RetryConfig.MAX_RETRIES:
-                    delay = min(
-                        RetryConfig.BASE_DELAY
-                        * (RetryConfig.EXPONENTIAL_BASE**attempt),
-                        RetryConfig.MAX_DELAY,
-                    )
-                    logger.warning(
-                        f"Benzinga retry {attempt + 1}/{RetryConfig.MAX_RETRIES}: {e}, waiting {delay}s"
-                    )
-                    await asyncio.sleep(delay)
-                else:
-                    logger.error(
-                        f"Benzinga fetch failed for {symbol} after retries: {e}"
-                    )
+        if "benzinga" in self.sources:
+            for attempt in range(RetryConfig.MAX_RETRIES + 1):
+                try:
+                    async for article in self.api_news.fetch_news_benzinga(
+                        symbol, page_size=self.news_limit
+                    ):
+                        if article.url not in seen_urls:
+                            seen_urls.add(article.url)
+                            yield article
+                    break  # Success, exit retry loop
+                except Exception as e:
+                    if attempt < RetryConfig.MAX_RETRIES:
+                        delay = min(
+                            RetryConfig.BASE_DELAY
+                            * (RetryConfig.EXPONENTIAL_BASE**attempt),
+                            RetryConfig.MAX_DELAY,
+                        )
+                        logger.warning(
+                            f"Benzinga retry {attempt + 1}/{RetryConfig.MAX_RETRIES}: {e}, waiting {delay}s"
+                        )
+                        await asyncio.sleep(delay)
+                    else:
+                        logger.error(
+                            f"Benzinga fetch failed for {symbol} after retries: {e}"
+                        )
+
+        # Fetch from FMP with retry
+        if "fmp" in self.sources:
+            for attempt in range(RetryConfig.MAX_RETRIES + 1):
+                try:
+                    async for article in self.api_news.fetch_news_fmp(
+                        symbol, limit=self.news_limit
+                    ):
+                        if article.url not in seen_urls:
+                            seen_urls.add(article.url)
+                            yield article
+                    break  # Success, exit retry loop
+                except Exception as e:
+                    if attempt < RetryConfig.MAX_RETRIES:
+                        delay = min(
+                            RetryConfig.BASE_DELAY
+                            * (RetryConfig.EXPONENTIAL_BASE**attempt),
+                            RetryConfig.MAX_DELAY,
+                        )
+                        logger.warning(
+                            f"FMP retry {attempt + 1}/{RetryConfig.MAX_RETRIES}: {e}, waiting {delay}s"
+                        )
+                        await asyncio.sleep(delay)
+                    else:
+                        logger.error(
+                            f"FMP fetch failed for {symbol} after retries: {e}"
+                        )
 
     # ============================================================================
     # Title Normalization, Deduplication & Filtering

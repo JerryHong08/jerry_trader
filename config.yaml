@@ -45,7 +45,9 @@ machines:
   wsl2:
     roles:
       StateEngine:
-        enabled: false
+        enabled: true
+        redis: "redis-a"
+        influxdb: "influxdb-a"
       TickDataServer:
         enabled: true
         host: "0.0.0.0"

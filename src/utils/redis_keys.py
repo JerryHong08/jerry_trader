@@ -62,6 +62,11 @@ def factor_tasks_stream(session_id: str) -> str:
     return f"factor_tasks:{session_id}"
 
 
+def signal_events_stream(session_id: str) -> str:
+    """State-change signal events (ACTIVE / QUIET) → BFF, replay."""
+    return f"signal_events:{session_id}"
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Fixed keys – one per session
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -140,6 +145,16 @@ def news_ticker_prefix(session_id: str) -> str:
     return f"news:ticker:{session_id}"
 
 
+def factor_hset(session_id: str, symbol: str) -> str:
+    """HSET – latest factor snapshot per ticker (from FactorEngine)."""
+    return f"factor:{session_id}:{symbol}"
+
+
+def factor_hset_prefix(session_id: str) -> str:
+    """Prefix for SCAN-discovering all factor HSETs."""
+    return f"factor:{session_id}:"
+
+
 def static_version(session_id: str, symbol: str, domain: str) -> str:
     """STRING counter – monotonic version per (symbol, domain)."""
     return f"static:version:{session_id}:{symbol}:{domain}"
@@ -174,6 +189,7 @@ ALL_STREAM_BUILDERS = [
     static_update_stream,
     news_article_stream,
     factor_tasks_stream,
+    signal_events_stream,
 ]
 
 

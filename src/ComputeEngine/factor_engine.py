@@ -41,6 +41,20 @@ BOOTSTRAP_BATCH_SIZE = 50_000  # max per page
 BOOTSTRAP_MARKET_OPEN_ET = 4  # 4:00 AM ET (pre-market open)
 
 
+# ── Helpers ──────────────────────────────────────────────────────────────
+_ET = ZoneInfo("America/New_York")
+
+
+def _ms_to_et(ms: int) -> str:
+    """Convert epoch-ms to 'HH:MM:SS.mmm ET' for debug logs."""
+    return datetime.fromtimestamp(ms / 1000.0, tz=_ET).strftime("%H:%M:%S.%f")[:-3]
+
+
+def _snap_sec(ms: int) -> int:
+    """Floor epoch-ms down to the nearest clean second boundary."""
+    return (ms // 1000) * 1000
+
+
 # ============================================================================
 # Ticker Context  (minimal — only what factors need)
 # ============================================================================
@@ -65,6 +79,10 @@ class TickerContext:
     # or after BASELINE_LEN compute ticks have passed.
     warm: bool = False
 
+    # True while _bootstrap_ticker is running (REST fetch + warm-up).
+    # Blocks _compute_ticker from emitting until bootstrap completes.
+    bootstrap_in_flight: bool = False
+
     # Last compute-step timestamp covered by bootstrap.
     # Real-time emit starts only for ts_ms > bootstrap_end_ms.
     # 0 = no bootstrap ran (emit freely).
@@ -82,7 +100,7 @@ class TickerContext:
         """Bulk-load historical trades as (ts_ms, price) tuples.
         Called once after REST fetch completes.  Deduplicates against
         any real-time ticks that arrived while the fetch was in flight.
-        NOTE: Does NOT set warm — that is done by _build_baseline."""
+        NOTE: Does NOT set warm — that is done by _warm_baseline."""
         with self.lock:
             existing = {t[0]: t for t in self.trades}  # keyed by ts_ms
             for ts_ms, price in trade_list:
@@ -327,11 +345,10 @@ class FactorManager:
 
         Flow:
         1. REST fetch  (IO-bound, takes seconds)
-        2. Merge into trade_ts deque
-        3. _build_baseline  (fast, in-memory) → fills deques, sets warm +
-           bootstrap_end_ms, returns list of factor dicts
-        4. Real-time compute loop can now emit z-scores immediately
-        5. Background thread writes historical points to InfluxDB (non-blocking)
+        2. Merge into trades deque
+        3. _warm_baseline  (fast) → fills last ~120 baseline samples,
+           sets warm + bootstrap_end_ms.  Real-time can emit z-scores now.
+        4. Background thread walks full grid → InfluxDB (non-blocking)
         """
         ctx = self.contexts.get(symbol)
         if ctx is None:
@@ -342,6 +359,8 @@ class FactorManager:
             logger.warning(f"_bootstrap_ticker - No POLYGON_API_KEY, skipping {symbol}")
             return
 
+        # Block realtime emit while bootstrap is running
+        ctx.bootstrap_in_flight = True
         try:
             trades = self._fetch_polygon_trades(symbol, api_key)
             if not trades:
@@ -350,25 +369,35 @@ class FactorManager:
 
             ctx.bootstrap_trades(trades)
 
-            # Phase 1 (fast): fill baseline deques + set warm
-            points = self._build_baseline(ctx)
+            # Phase 1 (fast): fill baseline deques from tail only → set warm
+            # Returns the SAME snap used for baseline, so emit uses identical data.
+            snap = self._warm_baseline(ctx)
+            first_event = snap[0][0] if snap else 0
+            last_event = snap[-1][0] if snap else 0
             logger.info(
-                f"_bootstrap_ticker - {symbol}: baseline ready, "
-                f"{len(ctx.trade_rate_history)} samples, "
-                f"bootstrap_end_ms={ctx.bootstrap_end_ms}, "
-                f"{len(points)} points to emit"
+                f"_bootstrap_ticker - {symbol}: warm={ctx.warm}, "
+                f"baseline_len={len(ctx.trade_rate_history)}, "
+                f"bootstrap_end_ms={_ms_to_et(ctx.bootstrap_end_ms)}"
+            )
+            logger.debug(
+                f"_bootstrap_ticker - {symbol}: deque event-time range "
+                f"[{_ms_to_et(first_event)} → {_ms_to_et(last_event)}], "
+                f"wall-clock boundary={_ms_to_et(ctx.bootstrap_end_ms)}, "
+                f"gap={ctx.bootstrap_end_ms - last_event}ms"
             )
 
-            # Phase 2 (async): write historical points to InfluxDB
-            if points:
-                Thread(
-                    target=self._emit_bootstrap_points,
-                    args=(symbol, points),
-                    daemon=True,
-                    name=f"bootstrap-emit-{symbol}",
-                ).start()
+            # Phase 2 (background): walk full grid → emit to InfluxDB
+            # Uses the SAME snap as _warm_baseline — no divergence.
+            Thread(
+                target=self._emit_bootstrap_history,
+                args=(symbol, snap, ctx.bootstrap_end_ms),
+                daemon=True,
+                name=f"bootstrap-emit-{symbol}",
+            ).start()
         except Exception as e:
             logger.error(f"_bootstrap_ticker - {symbol}: {e}")
+        finally:
+            ctx.bootstrap_in_flight = False
 
     def _fetch_polygon_trades(
         self, symbol: str, api_key: str
@@ -440,21 +469,98 @@ class FactorManager:
         all_trades.sort(key=lambda t: t[0])
         return all_trades
 
-    def _build_baseline(self, ctx: TickerContext) -> List[dict]:
-        """Fast, in-memory only.  Walk historical trades to fill
-        trade_rate_history / accel_history, set warm + bootstrap_end_ms.
+    def _warm_baseline(self, ctx: TickerContext) -> List[Tuple[int, float]]:
+        """Fast warm-up: walk only the last ~BASELINE_LEN grid steps from the
+        tail of the trades deque to fill trade_rate_history / accel_history,
+        then set warm + bootstrap_end_ms.
 
-        Returns a list of factor dicts for async InfluxDB emit."""
+        Returns the snapshot used, so _emit_bootstrap_history can use the
+        exact same data (no divergence from WS trades arriving in between).
+        """
         with ctx.lock:
             snap = list(ctx.trades)
         if len(snap) < MIN_TRADES_FOR_RATE:
-            return []
+            return snap
 
-        start_ms = snap[0][0] + RATE_WINDOW_MS  # need a full window
-        end_ms = snap[-1][0]
         step_ms = int(COMPUTE_INTERVAL_SEC * 1000)
+        earliest_possible = _snap_sec(snap[0][0] + RATE_WINDOW_MS)
 
-        points: List[dict] = []
+        # Wall-clock snapped to clean second — this will become
+        # bootstrap_end_ms AND the grid endpoint, so ctx deques and
+        # the bootstrap InfluxDB data end at the exact same point.
+        wall_sec = _snap_sec(int(time.time() * 1000))
+
+        # Only need BASELINE_LEN steps back from wall_sec
+        tail_start = max(wall_sec - BASELINE_LEN * step_ms, earliest_possible)
+
+        last_trade_count = 0
+        last_t = tail_start
+        t = tail_start
+        while t <= wall_sec:
+            cutoff = t - RATE_WINDOW_MS
+            half_cutoff = t - RATE_WINDOW_MS // 2
+
+            window = [(ts, p) for ts, p in snap if cutoff <= ts <= t]
+            recent = [(ts, p) for ts, p in window if ts >= half_cutoff]
+            older = [(ts, p) for ts, p in window if ts < half_cutoff]
+
+            if len(window) >= MIN_TRADES_FOR_RATE:
+                trade_rate = len(window) / (RATE_WINDOW_MS / 1000.0)
+                accel = self._price_accel(recent, older)
+                last_trade_count = len(window)
+                last_t = t
+
+                with ctx.lock:
+                    ctx.trade_rate_history.append(trade_rate)
+                    ctx.accel_history.append(accel)
+
+            t += step_ms
+
+        # wall_sec was computed above (same value used as grid endpoint).
+        with ctx.lock:
+            if len(ctx.trade_rate_history) >= MIN_TRADES_FOR_RATE:
+                ctx.warm = True
+            ctx.bootstrap_end_ms = wall_sec
+
+        logger.debug(
+            f"_warm_baseline - {ctx.symbol}: last_grid_t={_ms_to_et(last_t)}, "
+            f"trade_count={last_trade_count}, snap_size={len(snap)}, "
+            f"last_event={_ms_to_et(snap[-1][0])}, "
+            f"wall_sec={_ms_to_et(wall_sec)}"
+        )
+        return snap
+
+    def _emit_bootstrap_history(
+        self, symbol: str, snap: List[Tuple[int, float]], end_wall_ms: int
+    ) -> None:
+        """Background thread: walk the full historical grid, compute factors
+        using LOCAL deques (not ctx), and batch-write to InfluxDB.
+
+        Receives a snapshot list so it never contends with the real-time path.
+        end_wall_ms is the wall-clock boundary set by _warm_baseline — the grid
+        extends to this point so there's no gap before realtime picks up.
+        """
+        if len(snap) < MIN_TRADES_FOR_RATE:
+            return
+
+        step_ms = int(COMPUTE_INTERVAL_SEC * 1000)
+        start_ms = _snap_sec(snap[0][0] + RATE_WINDOW_MS)
+        # end_wall_ms is already snapped to clean second by _warm_baseline.
+        end_ms = end_wall_ms
+        last_event_ms = snap[-1][0]
+        logger.debug(
+            f"_emit_bootstrap_history - {symbol}: "
+            f"grid [{_ms_to_et(start_ms)} → {_ms_to_et(end_ms)}], "
+            f"last_event={_ms_to_et(last_event_ms)}, "
+            f"grid covers {(end_ms - start_ms) / 1000:.1f}s, "
+            f"extends {(end_ms - last_event_ms) / 1000:.1f}s past last trade"
+        )
+
+        # Local deques — mirror the baseline logic but isolated from ctx
+        local_rate_hist: deque = deque(maxlen=BASELINE_LEN)
+        local_accel_hist: deque = deque(maxlen=BASELINE_LEN)
+
+        batch: List[Point] = []
         t = start_ms
         while t <= end_ms:
             cutoff = t - RATE_WINDOW_MS
@@ -465,69 +571,46 @@ class FactorManager:
             older = [(ts, p) for ts, p in window if ts < half_cutoff]
 
             if len(window) >= MIN_TRADES_FOR_RATE:
-                window_sec = RATE_WINDOW_MS / 1000.0
-                trade_rate = len(window) / window_sec
+                trade_rate = len(window) / (RATE_WINDOW_MS / 1000.0)
                 accel = self._price_accel(recent, older)
 
-                with ctx.lock:
-                    ctx.trade_rate_history.append(trade_rate)
-                    ctx.accel_history.append(accel)
+                local_rate_hist.append(trade_rate)
+                local_accel_hist.append(accel)
 
-                trade_rate_z = self._z_score(trade_rate, ctx.trade_rate_history)
-                accel_z = self._z_score(accel, ctx.accel_history)
+                trade_rate_z = self._z_score(trade_rate, local_rate_hist)
+                accel_z = self._z_score(accel, local_accel_hist)
 
-                points.append(
-                    {
-                        "ts_ms": t,
-                        "trade_rate": trade_rate,
-                        "accel": accel,
-                        "trade_rate_z": trade_rate_z,
-                        "accel_z": accel_z,
-                        "trade_count": len(window),
-                    }
+                pt = (
+                    Point("trade_activity")
+                    .tag("symbol", symbol)
+                    .tag("session_id", self.session_id)
+                    .tag("source", "bootstrap")
+                    .field("trade_rate", round(trade_rate, 4))
+                    .field("accel", round(accel, 4))
+                    .field("trade_count", len(window))
+                    .field("warm", True)
                 )
+                if trade_rate_z is not None:
+                    pt = pt.field("trade_rate_z", round(trade_rate_z, 4))
+                if accel_z is not None:
+                    pt = pt.field("accel_z", round(accel_z, 4))
+                pt = pt.time(t, WritePrecision.MS)
+                batch.append(pt)
 
             t += step_ms
 
-        # ── Set warm + handoff boundary under lock ───────────────────────
-        with ctx.lock:
-            if len(ctx.trade_rate_history) >= MIN_TRADES_FOR_RATE:
-                ctx.warm = True
-            ctx.bootstrap_end_ms = end_ms
-
-        return points
-
-    def _emit_bootstrap_points(self, symbol: str, points: List[dict]) -> None:
-        """Write historical factor points to InfluxDB in a background thread.
-        Does NOT touch Redis HSET (that is real-time only)."""
-        batch: List[Point] = []
-        for p in points:
-            pt = (
-                Point("trade_activity")
-                .tag("symbol", symbol)
-                .tag("session_id", self.session_id)
-                .tag("source", "bootstrap")
-                .field("trade_rate", round(p["trade_rate"], 4))
-                .field("accel", round(p["accel"], 4))
-                .field("trade_count", p["trade_count"])
-                .field("warm", True)
-            )
-            if p["trade_rate_z"] is not None:
-                pt = pt.field("trade_rate_z", round(p["trade_rate_z"], 4))
-            if p["accel_z"] is not None:
-                pt = pt.field("accel_z", round(p["accel_z"], 4))
-            pt = pt.time(p["ts_ms"], WritePrecision.MS)
-            batch.append(pt)
+        if not batch:
+            return
 
         try:
             self.write_api.write(
                 bucket=self.influx_bucket, org=self.influx_org, record=batch
             )
             logger.info(
-                f"_emit_bootstrap_points - {symbol}: queued {len(batch)} points"
+                f"_emit_bootstrap_history - {symbol}: wrote {len(batch)} points"
             )
         except Exception as exc:
-            logger.error(f"_emit_bootstrap_points - {symbol}: {exc}")
+            logger.error(f"_emit_bootstrap_history - {symbol}: {exc}")
 
     def remove_ticker(self, symbol):
         if symbol not in self.active_tickers:
@@ -614,21 +697,55 @@ class FactorManager:
         logger.info("_compute_loop - Stopped")
 
     def _compute_ticker(self, ctx: TickerContext) -> None:
-        """Compute trade_rate, price accel, z-scores for one ticker."""
+        """Compute trade_rate, price accel, z-scores for one ticker.
+
+        Time model:
+          compute_ts  = wall-clock ms (sampling grid, written to InfluxDB)
+          event_ts    = trade's SIP timestamp (used for window lookback)
+          bootstrap uses event-time grid; real-time uses wall-clock grid.
+          compute_ts is always > bootstrap_end_ms → no overlap.
+        """
+        # Wall-clock compute timestamp, snapped to clean second boundary
+        # to align with the bootstrap grid (both at ...00.000, ...01.000, ...)
+        compute_ts = _snap_sec(int(time.time() * 1000))
+
         with ctx.lock:
             if len(ctx.trades) < MIN_TRADES_FOR_RATE:
                 return
             # snapshot the deque under the lock
             snap = list(ctx.trades)
 
-        now_ms = snap[-1][0]  # latest trade timestamp as reference
-        cutoff = now_ms - RATE_WINDOW_MS
-        half_cutoff = now_ms - RATE_WINDOW_MS // 2
+        # Skip while bootstrap REST fetch + warm-up is in progress
+        if ctx.bootstrap_in_flight:
+            return
 
-        # Trades in the full window and each half
-        window = [(ts, p) for ts, p in snap if ts >= cutoff]
+        # Skip if bootstrap finished but we haven't passed the boundary yet
+        if ctx.bootstrap_end_ms and compute_ts <= ctx.bootstrap_end_ms:
+            return
+
+        # Window lookback uses event-time of the trades, bounded by compute_ts
+        # to match the bootstrap filter (cutoff <= ts <= t).
+        cutoff = compute_ts - RATE_WINDOW_MS
+        half_cutoff = compute_ts - RATE_WINDOW_MS // 2
+
+        window = [(ts, p) for ts, p in snap if cutoff <= ts <= compute_ts]
         recent = [(ts, p) for ts, p in window if ts >= half_cutoff]
         older = [(ts, p) for ts, p in window if ts < half_cutoff]
+
+        # Log the first realtime emit after bootstrap handoff
+        if ctx.bootstrap_end_ms and not getattr(ctx, "_rt_logged", False):
+            w_first = _ms_to_et(window[0][0]) if window else "n/a"
+            w_last = _ms_to_et(window[-1][0]) if window else "n/a"
+            logger.debug(
+                f"_compute_ticker - {ctx.symbol}: first realtime emit at "
+                f"{_ms_to_et(compute_ts)}, "
+                f"bootstrap_end={_ms_to_et(ctx.bootstrap_end_ms)}, "
+                f"delta={compute_ts - ctx.bootstrap_end_ms}ms, "
+                f"snap_size={len(snap)}, trade_count={len(window)}, "
+                f"window=[{w_first} → {w_last}], "
+                f"cutoff={_ms_to_et(cutoff)}"
+            )
+            ctx._rt_logged = True
 
         if len(window) < MIN_TRADES_FOR_RATE:
             return
@@ -655,14 +772,10 @@ class FactorManager:
         trade_rate_z = self._z_score(trade_rate, ctx.trade_rate_history)
         accel_z = self._z_score(accel, ctx.accel_history)
 
-        # ── skip emit for timestamps already covered by bootstrap ────────
-        if ctx.bootstrap_end_ms and now_ms <= ctx.bootstrap_end_ms:
-            return
-
         # ── emit ─────────────────────────────────────────────────────────
         self._emit_factors(
             symbol=ctx.symbol,
-            ts_ms=now_ms,
+            ts_ms=compute_ts,
             trade_rate=trade_rate,
             accel=accel,
             trade_rate_z=trade_rate_z,

@@ -22,23 +22,38 @@ class OrderRequest(BaseModel):
             order_type="LMT",
             limit_price=250.00
         )
+
+        # 按百分比下单 (使用购买力的10%)
+        req = OrderRequest(
+            symbol="AAPL",
+            action="BUY",
+            pct=10.0,
+            price=150.0,
+            order_type="LMT",
+            limit_price=150.0
+        )
     """
 
     symbol: str  # 股票代码
     sec_type: str = "STK"  # 证券类型（STK=股票, OPT=期权, FUT=期货）
     action: str = "BUY"  # 操作（BUY/SELL）
-    quantity: int = 1  # 数量
+    quantity: Optional[int] = None  # 数量 (如果提供 pct，则由后端计算)
     order_type: str = "MKT"  # 订单类型（MKT=市价, LMT=限价）
     limit_price: Optional[float] = None  # 限价价格（限价单必填）
     tif: str = "DAY"  # 有效期（DAY=当日有效, GTC=撤销前有效）
     OutsideRth: bool = True  # Outside of the regular hour
     reason: Optional[str] = None  # 用户备注/下单原因（用于审计/持久化/回放）
 
+    # Percentage-based ordering
+    pct: Optional[float] = None  # 购买力百分比 (1-100)，与 quantity 互斥
+    price: Optional[float] = None  # 用于计算 quantity 的价格 (如果 pct 提供)
+
     @field_validator("quantity", mode="before")
     @classmethod
     def validate_quantity(cls, v):
+        # Allow None for percentage-based orders (quantity will be calculated later)
         if v is None:
-            raise ValueError("quantity is required")
+            return None
         return int(v)
 
     def validate(self):
@@ -49,8 +64,18 @@ class OrderRequest(BaseModel):
         if self.action not in ["BUY", "SELL"]:
             raise ValueError(f"Invalid action: {self.action}")
 
-        if self.quantity is None or self.quantity <= 0:
+        # Either quantity or pct must be provided
+        if self.quantity is None and self.pct is None:
+            raise ValueError("Either quantity or pct must be provided")
+
+        if self.quantity is not None and self.quantity <= 0:
             raise ValueError(f"Invalid quantity: {self.quantity}")
+
+        if self.pct is not None:
+            if self.pct <= 0 or self.pct > 100:
+                raise ValueError(f"Invalid pct: {self.pct} (must be 1-100)")
+            if self.price is None or self.price <= 0:
+                raise ValueError("price is required when using pct")
 
 
 @dataclass
@@ -103,6 +128,7 @@ class OrderState:
             "action": req.get("action"),
             "quantity": req.get("quantity"),
             "order_type": req.get("order_type"),
+            "limit_price": req.get("limit_price"),
             "OutsideRth": req.get("OutsideRth"),
             "reason": req.get("reason"),
         }

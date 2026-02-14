@@ -27,3 +27,5 @@ node_modules/
 /assets/index-*.js
 /assets/
 public/build/
+
+*.pkl

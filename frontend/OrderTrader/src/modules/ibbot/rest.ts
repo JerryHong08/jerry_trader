@@ -3,18 +3,22 @@ import type { OrderStatusEventData } from '../../types/ibbot';
 export type PlaceOrderRequest = {
   symbol: string;
   action: 'BUY' | 'SELL';
-  quantity: number;
+  quantity?: number | null;  // Either quantity or pct must be provided
   order_type: 'MKT' | 'LMT';
   limit_price?: number | null;
   tif?: string;
   OutsideRth?: boolean;
   sec_type?: string;
   reason?: string | null;
+  // Percentage-based ordering
+  pct?: number | null;  // Buying power percentage (1-100)
+  price?: number | null;  // Price for quantity calculation
 };
 
 export type PlaceOrderResponse = {
   status: 'ok' | string;
   order_id: number;
+  quantity?: number;  // Calculated quantity (useful for pct orders)
   message?: string;
 };
 

@@ -48,12 +48,24 @@ def place_order(req: OrderRequest):
             "order_type": "MKT",
             "OutsideRth": True
         }
+
+        # Or using percentage of buying power:
+        {
+            "symbol": "AAPL",
+            "action": "BUY",
+            "pct": 10.0,
+            "price": 150.0,
+            "order_type": "LMT",
+            "limit_price": 150.0,
+            "OutsideRth": True
+        }
     """
     try:
         order_id = order_service.place_order(req)
         return {
             "status": "ok",
             "order_id": order_id,
+            "quantity": req.quantity,  # Return calculated quantity for pct orders
             "message": f"Order placed: {req.action} {req.quantity} {req.symbol}",
         }
     except Exception as e:

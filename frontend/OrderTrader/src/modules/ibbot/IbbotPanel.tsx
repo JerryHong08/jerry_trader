@@ -159,6 +159,7 @@ export default function IbbotPanel({ chartSymbol, lastTradePrice }: IbbotPanelPr
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>('');
+  const [showPortfolio, setShowPortfolio] = useState(false);
 
   const wsClientRef = useRef<IbbotWsClient | null>(null);
 
@@ -171,6 +172,9 @@ export default function IbbotPanel({ chartSymbol, lastTradePrice }: IbbotPanelPr
     });
   }, [cfg.restBaseUrl]);
 
+  // Order mode: 'quantity' or 'pct'
+  const [orderMode, setOrderMode] = useState<'quantity' | 'pct'>('pct');
+
   const [form, setForm] = useState<PlaceOrderRequest>({
     symbol: chartSymbol || 'AAPL',
     action: 'BUY',
@@ -181,6 +185,8 @@ export default function IbbotPanel({ chartSymbol, lastTradePrice }: IbbotPanelPr
     OutsideRth: true,
     sec_type: 'STK',
     reason: '',
+    pct: 60,
+    price: lastTradePrice ?? null,  // Price for pct calculation
   });
 
   // Track if price has been manually set (to avoid overwriting user input)
@@ -195,10 +201,15 @@ export default function IbbotPanel({ chartSymbol, lastTradePrice }: IbbotPanelPr
     }
   }, [chartSymbol, form.symbol]);
 
-  // Sync limit price from last trade price (only on first load or after refresh)
+  // Sync limit price and pct price from last trade price (only on first load or after refresh)
   useEffect(() => {
     if (lastTradePrice && !priceInitializedRef.current && form.order_type === 'LMT') {
-      setForm((p) => ({ ...p, limit_price: Math.round(lastTradePrice * 100) / 100 }));
+      const roundedPrice = Math.round(lastTradePrice * 100) / 100;
+      setForm((p) => ({
+        ...p,
+        limit_price: roundedPrice,
+        price: roundedPrice,  // Also sync the price for pct calculation
+      }));
       priceInitializedRef.current = true;
     }
   }, [lastTradePrice, form.order_type]);
@@ -206,9 +217,20 @@ export default function IbbotPanel({ chartSymbol, lastTradePrice }: IbbotPanelPr
   // Function to refresh limit price from latest trade
   const syncPriceFromTrade = () => {
     if (lastTradePrice) {
-      setForm((p) => ({ ...p, limit_price: Math.round(lastTradePrice * 100) / 100 }));
+      const roundedPrice = Math.round(lastTradePrice * 100) / 100;
+      setForm((p) => ({
+        ...p,
+        limit_price: roundedPrice,
+        price: roundedPrice,
+      }));
     }
   };
+
+  // Get buying power from portfolio summary for display
+  const buyingPower = useMemo(() => {
+    const bp = portfolioSummary?.account?.['BuyingPower'];
+    return typeof bp === 'number' ? bp : null;
+  }, [portfolioSummary]);
 
   const [cancelReason, setCancelReason] = useState<string>('');
 
@@ -334,10 +356,32 @@ export default function IbbotPanel({ chartSymbol, lastTradePrice }: IbbotPanelPr
       const req: PlaceOrderRequest = {
         ...form,
         symbol: form.symbol.trim().toUpperCase(),
-        quantity: Number(form.quantity),
         limit_price: form.order_type === 'LMT' ? Number(form.limit_price ?? 0) : null,
         reason: (form.reason ?? '').trim() || null,
       };
+
+      // Handle quantity vs pct mode
+      if (orderMode === 'pct') {
+        // Use pct mode: send pct and price, backend calculates quantity
+        if (!form.pct || form.pct <= 0 || form.pct > 100) {
+          throw new Error('Percentage must be between 1 and 100');
+        }
+        const priceForCalc = form.price ?? form.limit_price;
+        if (!priceForCalc || priceForCalc <= 0) {
+          throw new Error('Price is required for percentage-based orders');
+        }
+        req.quantity = null;
+        req.pct = form.pct;
+        req.price = priceForCalc;
+      } else {
+        // Use quantity mode
+        req.quantity = Number(form.quantity);
+        req.pct = null;
+        req.price = null;
+        if (!req.quantity || req.quantity <= 0) {
+          throw new Error('Quantity must be greater than 0');
+        }
+      }
 
       if (req.order_type === 'LMT' && (!req.limit_price || Number.isNaN(req.limit_price))) {
         throw new Error('Limit order requires a valid limit_price');
@@ -436,7 +480,16 @@ export default function IbbotPanel({ chartSymbol, lastTradePrice }: IbbotPanelPr
 
       <div style={{ display: 'grid', gap: 16, gridTemplateColumns: '1fr', marginBottom: 16 }}>
         <section style={{ padding: 12, border: '1px solid', borderRadius: 10 }}>
-          <h3 style={{ marginTop: 0 }}>Place Order</h3>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+            <h3 style={{ marginTop: 0, marginBottom: 0 }}>Place Order</h3>
+            {buyingPower !== null && (
+              <span style={{ fontSize: 12, opacity: 0.8 }}>
+                Buying Power: {showPortfolio
+                  ? `$${buyingPower.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+                  : '****'}
+              </span>
+            )}
+          </div>
 
           <div style={{ display: 'grid', gap: 10, gridTemplateColumns: 'repeat(6, minmax(0, 1fr))' }}>
             <label style={{ gridColumn: 'span 2' }}>
@@ -460,16 +513,45 @@ export default function IbbotPanel({ chartSymbol, lastTradePrice }: IbbotPanelPr
               </select>
             </label>
 
+            {/* Mode selector: Quantity vs Percentage */}
             <label style={{ gridColumn: 'span 1' }}>
-              Qty
-              <input
+              Mode
+              <select
                 style={{ width: '100%' }}
-                type="number"
-                min={100}
-                value={form.quantity}
-                onChange={(e) => setForm((p) => ({ ...p, quantity: Number(e.target.value) }))}
-              />
+                value={orderMode}
+                onChange={(e) => setOrderMode(e.target.value as 'quantity' | 'pct')}
+              >
+                <option value="quantity">Qty</option>
+                <option value="pct">Pct %</option>
+              </select>
             </label>
+
+            {orderMode === 'quantity' ? (
+              <label style={{ gridColumn: 'span 1' }}>
+                Qty
+                <input
+                  style={{ width: '100%' }}
+                  type="number"
+                  min={1}
+                  value={form.quantity ?? ''}
+                  onChange={(e) => setForm((p) => ({ ...p, quantity: e.target.value === '' ? null : Number(e.target.value) }))}
+                />
+              </label>
+            ) : (
+              <label style={{ gridColumn: 'span 1' }}>
+                Pct %
+                <input
+                  style={{ width: '100%' }}
+                  type="number"
+                  min={1}
+                  max={100}
+                  step={1}
+                  value={form.pct ?? ''}
+                  onChange={(e) => setForm((p) => ({ ...p, pct: e.target.value === '' ? null : Number(e.target.value) }))}
+                  placeholder="1-100"
+                />
+              </label>
+            )}
 
             <label style={{ gridColumn: 'span 1' }}>
               Type
@@ -580,7 +662,7 @@ export default function IbbotPanel({ chartSymbol, lastTradePrice }: IbbotPanelPr
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
                 <tr>
-                  {['ID', 'Symbol', 'Action', 'Type', 'Status', 'Filled', 'Remaining', 'AvgPx', 'Commission', 'Actions'].map((h) => (
+                  {['ID', 'Symbol', 'Action', 'Type', 'LmtPx', 'Status', 'Filled', 'Remaining', 'AvgPx', 'Commission', 'Actions'].map((h) => (
                     <th key={h} style={{ textAlign: 'left', borderBottom: '1px solid', padding: '6px 8px' }}>
                       {h}
                     </th>
@@ -594,6 +676,11 @@ export default function IbbotPanel({ chartSymbol, lastTradePrice }: IbbotPanelPr
                     <td style={{ padding: '6px 8px', borderBottom: '1px solid' }}>{o.symbol ?? '—'}</td>
                     <td style={{ padding: '6px 8px', borderBottom: '1px solid' }}>{o.action ?? '—'}</td>
                     <td style={{ padding: '6px 8px', borderBottom: '1px solid' }}>{o.order_type ?? '—'}</td>
+                    <td style={{ padding: '6px 8px', borderBottom: '1px solid' }}>
+                      {o.order_type === 'LMT' && o.limit_price != null
+                        ? `$${Number(o.limit_price).toFixed(2)}`
+                        : '—'}
+                    </td>
                     <td style={{ padding: '6px 8px', borderBottom: '1px solid' }}>{o.status}</td>
                     <td style={{ padding: '6px 8px', borderBottom: '1px solid' }}>{o.filled}</td>
                     <td style={{ padding: '6px 8px', borderBottom: '1px solid' }}>{o.remaining}</td>
@@ -611,7 +698,7 @@ export default function IbbotPanel({ chartSymbol, lastTradePrice }: IbbotPanelPr
                 ))}
                 {ordersList.length === 0 ? (
                   <tr>
-                    <td colSpan={10} style={{ padding: 10, opacity: 0.7 }}>
+                    <td colSpan={11} style={{ padding: 10, opacity: 0.7 }}>
                       No orders yet
                     </td>
                   </tr>
@@ -623,7 +710,23 @@ export default function IbbotPanel({ chartSymbol, lastTradePrice }: IbbotPanelPr
 
         <section style={{ padding: 12, border: '1px solid', borderRadius: 10 }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <h3 style={{ marginTop: 0 }}>Portfolio</h3>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <h3 style={{ marginTop: 0, marginBottom: 0 }}>Portfolio</h3>
+              <button
+                onClick={() => setShowPortfolio((v) => !v)}
+                title={showPortfolio ? 'Hide portfolio' : 'Show portfolio'}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  cursor: 'pointer',
+                  fontSize: 16,
+                  padding: '2px 4px',
+                  opacity: 0.7,
+                }}
+              >
+                {showPortfolio ? '👁️' : '👁️‍🗨️'}
+              </button>
+            </div>
             <div style={{ display: 'flex', gap: 10 }}>
               <button disabled={loading} onClick={doRefreshPortfolio}>
                 Refresh
@@ -631,6 +734,7 @@ export default function IbbotPanel({ chartSymbol, lastTradePrice }: IbbotPanelPr
             </div>
           </div>
 
+          {showPortfolio && (
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
             <div>
               <h4 style={{ marginTop: 0 }}>Account (snapshot)</h4>
@@ -679,6 +783,7 @@ export default function IbbotPanel({ chartSymbol, lastTradePrice }: IbbotPanelPr
               </div>
             </div>
           </div>
+          )}
         </section>
       </div>
     </div>

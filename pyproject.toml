@@ -27,6 +27,8 @@ dependencies = [
     "databento (>=0.68.2,<0.69.0)",
     "openai (>=2.15.0,<3.0.0)",
     "lxml (>=6.0.2,<7.0.0)",
+    "lightgbm (>=4.6.0,<5.0.0)",
+    "scikit-learn (>=1.8.0,<2.0.0)",
 ]
 
 [tool.poetry]

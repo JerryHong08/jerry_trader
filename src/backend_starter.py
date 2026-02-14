@@ -27,10 +27,13 @@ import os
 import signal
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from threading import Thread
 from typing import Any, Dict, Optional
+from zoneinfo import ZoneInfo
 
+import exchange_calendars as xcals
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -328,6 +331,10 @@ class GridTraderBackendStarter:
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
 
+        # Trading calendar for market hours check
+        self.tz = ZoneInfo("America/New_York")
+        self.calendar = xcals.get_calendar("XNYS")
+
         # Initialize only enabled services based on roles
         self._init_services()
 
@@ -534,6 +541,11 @@ class GridTraderBackendStarter:
 
         logger.info(f"Initialized {len(self._services)} services")
 
+    def is_trading_day_today(self) -> bool:
+        """Check if today is a valid trading day."""
+        today = datetime.now(self.tz).date()
+        return self.calendar.is_session(today)
+
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals."""
         logger.info(f"Received signal {signum}, shutting down...")
@@ -627,6 +639,12 @@ class GridTraderBackendStarter:
         logger.info("Starting GridTrader Backend")
         logger.info(f"Enabled roles: {list(self.roles.keys())}")
         logger.info("=" * 70)
+
+        # Check if it's a trading day (only in live mode)
+        if not self.replay_date:
+            if not self.is_trading_day_today():
+                logger.info("🚫 Not a trading day in live mode. Exiting.")
+                return
 
         logger.info(f"Session: {self.session_id}")
 

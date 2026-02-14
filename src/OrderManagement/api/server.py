@@ -100,8 +100,8 @@ async def lifespan(app: FastAPI):
 
     # 2. Initialize services FIRST (so they can subscribe to events)
     logger.info("🔧 Initializing services...")
-    order_service = OrderService(ib_gateway)
     portfolio_service = PortfolioService(ib_gateway)
+    order_service = OrderService(ib_gateway, portfolio_service=portfolio_service)
 
     # init for routes
     init_order_service(order_service)
@@ -122,30 +122,30 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("lifespan - ❌  DATABASE_URL not set; DB persistence disabled")
 
-    # 3. NOW connect to IB Gateway (services are ready to receive events)
-    host = os.getenv("IB_GATEWAY_HOST", "127.0.0.1")
-    port = int(os.getenv("IB_GATEWAY_PORT", "4002"))
+    # 3. NOW connect to IB (services are ready to receive events)
+    host = os.getenv("IB_HOST", "127.0.0.1")
+    port = int(os.getenv("IB_PORT", "4002"))
     # port = int(os.getenv("IB_GATEWAY_PORT", "7497"))
     client_id = int(os.getenv("IB_CLIENT_ID", "1"))
 
-    logger.info(f"📡 Connecting to IB Gateway at {host}:{port}...")
+    logger.info(f"📡 Connecting to IB at {host}:{port}...")
     ib_gateway.connect(host, port, client_id)
 
     # wait for connected
     await asyncio.sleep(2)
 
     if ib_gateway.is_connected:
-        logger.info("lifespan - ✅ Connected to IB Gateway")
+        logger.info("lifespan - ✅ Connected to IB")
     else:
         logger.error(
-            "lifespan - ⚠️  Failed to connect to IB Gateway - some features may not work"
+            "lifespan - ⚠️  Failed to connect to IB - some features may not work"
         )
 
     # request portfolio data
     if ib_gateway.is_connected:
         logger.info("lifespan - 🔄 Requesting initial portfolio data...")
         portfolio_service.refresh()
-        await asyncio.sleep(2)  # 等待数据返回
+        await asyncio.sleep(2)
         logger.info(
             f"lifespan - ✅ Portfolio loaded: {len(portfolio_service.get_positions())} positions"
         )

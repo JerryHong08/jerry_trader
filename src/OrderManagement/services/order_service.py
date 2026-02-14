@@ -4,7 +4,8 @@ Order Service - 订单管理服务
 """
 
 import logging
-from typing import Dict, List
+import math
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 from OrderManagement.adapter.event_bus import get_event_bus
 from OrderManagement.adapter.ib_gateway import IBGateway
@@ -13,6 +14,9 @@ from OrderManagement.models.event_models import OrderStatusEvent
 from OrderManagement.models.order import from_request as order_from_request
 from OrderManagement.models.order_models import OrderRequest, OrderState
 from utils.logger import setup_logger
+
+if TYPE_CHECKING:
+    from OrderManagement.services.portfolio_service import PortfolioService
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.INFO)
 
@@ -27,20 +31,71 @@ class OrderService:
     - 通过事件总线发布订单更新
     """
 
-    def __init__(self, ib: IBGateway):
+    def __init__(
+        self, ib: IBGateway, portfolio_service: Optional["PortfolioService"] = None
+    ):
         """
         初始化订单服务
 
         Args:
             ib: IB Gateway 实例
+            portfolio_service: Portfolio Service 实例 (用于获取购买力计算 pct 订单)
         """
         self.ib = ib
+        self.portfolio_service = portfolio_service
         self.orders: Dict[int, OrderState] = {}
         self._syncing_startup_orders = True  # flag for if it' the first logging time.
         self.event_bus = get_event_bus()
 
         # subscribe using event bus
         self.event_bus.subscribe(OrderStatusEvent, self._on_order_update)
+
+    def set_portfolio_service(self, portfolio_service: "PortfolioService"):
+        """Set portfolio service reference (for deferred initialization)."""
+        self.portfolio_service = portfolio_service
+
+    def _calculate_quantity_from_pct(self, req: OrderRequest) -> int:
+        """
+        Calculate quantity from percentage of buying power.
+
+        Args:
+            req: Order request with pct and price
+
+        Returns:
+            Calculated quantity (integer for OutsideRth, can be fractional otherwise)
+        """
+        if self.portfolio_service is None:
+            raise ValueError("Portfolio service not available for pct-based orders")
+
+        account = self.portfolio_service.get_account()
+        buying_power = account.BuyingPower
+
+        if buying_power <= 0:
+            raise ValueError(f"Insufficient buying power: {buying_power}")
+
+        # Calculate: quantity = (buying_power * pct/100) / price
+        dollar_amount = buying_power * (req.pct / 100.0)
+        quantity = dollar_amount / req.price
+
+        # OutsideRth requires integer quantities (no fractional shares)
+        if req.OutsideRth:
+            quantity = math.floor(quantity)
+        else:
+            # Even for regular hours, IB usually requires integer for stocks
+            quantity = math.floor(quantity)
+
+        if quantity <= 0:
+            raise ValueError(
+                f"Calculated quantity is 0 (buying_power={buying_power}, "
+                f"pct={req.pct}, price={req.price})"
+            )
+
+        logger.info(
+            f"_calculate_quantity_from_pct - BuyingPower=${buying_power:.2f}, "
+            f"pct={req.pct}%, price=${req.price:.2f} -> quantity={quantity}"
+        )
+
+        return int(quantity)
 
     def place_order(self, req: OrderRequest) -> int:
         """
@@ -58,10 +113,26 @@ class OrderService:
         Example:
             req = OrderRequest(symbol="AAPL", action="BUY", quantity=100)
             order_id = order_service.place_order(req)
+
+            # Or using percentage
+            req = OrderRequest(symbol="AAPL", action="BUY", pct=10.0, price=150.0)
+            order_id = order_service.place_order(req)
         """
+        # Calculate quantity from pct if needed
+        if req.pct is not None and req.quantity is None:
+            calculated_qty = self._calculate_quantity_from_pct(req)
+            req.quantity = calculated_qty
+            logger.info(
+                f"place_order - Calculated quantity from pct: {req.pct}% -> {calculated_qty} shares"
+            )
+
+        # Validate the request
+        req.validate()
+
         # Log the request for debugging
         logger.info(
-            f"place_order - Request: {req.symbol} {req.action} {req.quantity}, OutsideRth={req.OutsideRth}"
+            f"place_order - Request: {req.symbol} {req.action} {req.quantity}, "
+            f"OutsideRth={req.OutsideRth}, pct={req.pct}, price={req.price}"
         )
 
         # 转换为 IBKR Contract / Order（集中在 models 层）

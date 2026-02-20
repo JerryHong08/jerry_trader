@@ -566,6 +566,7 @@ class GridTraderBFF:
         """Send initial data to a newly connected client."""
         await self._emit_rank_list_update(client_id)
         await self._emit_overview_chart_update(client_id)
+        await self._send_bootstrap_data(client_id)
 
     async def _send_stock_detail(self, client_id: str, ticker: str):
         """Send stock detail to a client."""
@@ -599,6 +600,136 @@ class GridTraderBFF:
             await self.manager.send_personal_message(
                 {"type": "error", "message": f"Stock {ticker} not found"}, client_id
             )
+
+    async def _send_bootstrap_data(self, client_id: str):
+        """Send bootstrap data (news and fundamentals) to newly connected client.
+
+        This provides initial news and fundamental data for all tracked symbols
+        to populate the frontend cache on connection.
+        """
+        logger.info(f"Sending bootstrap data to client {client_id}")
+
+        # Get all tracked symbols from the chart manager
+        tracked_symbols = self.chart_manager.get_subscribed_tickers()
+
+        if not tracked_symbols:
+            logger.debug("No tracked symbols for bootstrap")
+            return
+
+        logger.info(
+            f"Bootstrapping {len(tracked_symbols)} symbols: {tracked_symbols[:10]}..."
+        )
+
+        # Fetch news and fundamental data for tracked symbols
+        bootstrap_data = {
+            "type": "bootstrap_data",
+            "symbols": {},
+            "timestamp": datetime.now().isoformat(),
+        }
+
+        # Use Redis pipeline for efficient batch fetch
+        pipe = self.r.pipeline()
+
+        # Queue up all fetches
+        symbol_keys = {}
+        for symbol in tracked_symbols:
+            symbol_keys[symbol] = {
+                "summary": f"{self.STATIC_SUMMARY_PREFIX}:{symbol}",
+                "profile": f"{self.STATIC_PROFILE_PREFIX}:{symbol}",
+                "news_ticker": f"{self.NEWS_TICKER_PREFIX}:{symbol}",
+            }
+            pipe.hgetall(symbol_keys[symbol]["summary"])
+            pipe.hgetall(symbol_keys[symbol]["profile"])
+            pipe.zrevrange(
+                symbol_keys[symbol]["news_ticker"], 0, 9
+            )  # Get top 10 news IDs
+
+        # Execute all fetches at once
+        results = pipe.execute()
+
+        # Process results (3 results per symbol)
+        for idx, symbol in enumerate(tracked_symbols):
+            summary_data = results[idx * 3]
+            profile_data = results[idx * 3 + 1]
+            news_ids = results[idx * 3 + 2]
+
+            symbol_data = {}
+
+            # Parse summary data (fundamentals)
+            if summary_data:
+                summary_parsed = {}
+                for field, value in summary_data.items():
+                    if field in ["marketCap", "float"]:
+                        try:
+                            summary_parsed[field] = float(value)
+                        except (ValueError, TypeError):
+                            summary_parsed[field] = value
+                    elif field == "hasNews":
+                        summary_parsed[field] = value == "1"
+                    else:
+                        summary_parsed[field] = value
+                symbol_data["summary"] = summary_parsed
+
+            # Parse profile data
+            if profile_data:
+                profile_parsed = {}
+                for field, value in profile_data.items():
+                    if field in [
+                        "marketCap",
+                        "float",
+                        "averageVolume",
+                        "fullTimeEmployees",
+                    ]:
+                        try:
+                            profile_parsed[field] = float(value)
+                        except (ValueError, TypeError):
+                            profile_parsed[field] = value
+                    else:
+                        profile_parsed[field] = value
+                symbol_data["profile"] = profile_parsed
+
+            # Fetch news articles
+            if news_ids:
+                news_articles = []
+                news_pipe = self.r.pipeline()
+                for news_id in news_ids:
+                    item_key = f"{self.NEWS_ITEM_PREFIX}:{news_id}"
+                    news_pipe.hgetall(item_key)
+
+                news_results = news_pipe.execute()
+
+                for article_idx, article in enumerate(news_results):
+                    if article:
+                        news_articles.append(
+                            {
+                                "id": f"{symbol}-news-{article_idx}",
+                                "title": article.get("title", ""),
+                                "source": article.get("sources", ""),
+                                "publishedAt": article.get("published_time", ""),
+                                "url": article.get("url", ""),
+                                "summary": (
+                                    article.get("text", "")[:500]
+                                    if article.get("text")
+                                    else ""
+                                ),
+                                "isNew": False,
+                            }
+                        )
+
+                if news_articles:
+                    symbol_data["news"] = news_articles
+
+            # Only include symbols with data
+            if symbol_data:
+                bootstrap_data["symbols"][symbol] = symbol_data
+
+        logger.info(
+            f"Bootstrap complete: {len(bootstrap_data['symbols'])} symbols with data, "
+            f"sending to {client_id}"
+        )
+
+        # Send bootstrap data to the client
+        await self.manager.send_personal_message(bootstrap_data, client_id)
 
     def _get_static_summaries(self, symbols: List[str]) -> Dict[str, Dict]:
         """Batch fetch static summaries for multiple symbols.

@@ -479,6 +479,53 @@ function handleMessage(message: WebSocketMessage) {
       }
       break;
 
+    case 'bootstrap_data':
+      // Bootstrap data sent on connection - bulk load all cached data
+      if (message.symbols) {
+        console.log('[WebSocket] Received bootstrap data for', Object.keys(message.symbols).length, 'symbols');
+
+        Object.entries(message.symbols).forEach(([symbol, data]: [string, any]) => {
+          // Process summary data (fundamentals)
+          if (data.summary) {
+            store.patchStaticData(symbol, data.summary);
+          }
+
+          // Process profile data
+          if (data.profile && Object.keys(data.profile).length > 0) {
+            staticProfileCache.set(symbol, data.profile);
+            setDataStatus(symbol, 'profile', 'ready');
+          }
+
+          // Process news data
+          if (data.news && Array.isArray(data.news)) {
+            const newsArticles = data.news.map((item: any) => ({
+              id: item.id || `${symbol}-news-${Date.now()}`,
+              title: item.title || '',
+              source: item.source || '',
+              publishedAt: item.publishedAt || '',
+              url: item.url || '',
+              summary: item.summary || '',
+              isNew: false,
+            })) as NewsArticle[];
+
+            staticNewsCache.set(symbol, newsArticles);
+            setDataStatus(symbol, 'news', 'ready');
+            store.patchStaticData(symbol, { hasNews: newsArticles.length > 0 });
+          }
+        });
+
+        // Save all updated caches to localStorage
+        saveMapToStorage(PROFILE_CACHE_KEY, staticProfileCache);
+        saveMapToStorage(NEWS_CACHE_KEY, staticNewsCache);
+        saveMapToStorage(DATA_STATUS_KEY, dataStatusMap);
+
+        console.log('[WebSocket] Bootstrap complete:', {
+          profiles: staticProfileCache.size,
+          news: staticNewsCache.size,
+        });
+      }
+      break;
+
     case 'news_article':
       if (message.symbol && message.article) {
         const symbol = message.symbol as string;

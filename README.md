@@ -34,11 +34,11 @@ this file have my tarding system module summary and roadmap from very early expe
   - first start with the Top Gainers column data.
     - ✅first we test with basic direct emit columns like ['symbol', 'rank', 'price', 'change', 'changePercent', 'volume', 'relativeVolume5min', 'relativeVolumeDaily'].
     - ✅then we test the state column
-    - 📌then we test the passively fetched and emitted columns like ['float_share','marketCap','news'].
+    - ✅then we test the passively fetched and emitted columns like ['float_share','marketCap','news'].
   - ✅after that or during test of column data, we can test the overviewchartdata emit, which needs to normalize the frontend chart and get_chart_data in overviewchartdataManager.py.
   - ✅then Stock Detail. the data request is driven by top gainers and backend data management, so it should use cache, and also the data request can be driven by the frontend button. it's basic the same as the static data column update in top gainers column.
-  - then the Portfolio and Order Management. this module is isolated, so it's easier to integrate.
-  - the last one is the Chart module, based on tradingview lightweight chart, the focus is balance between the real-time update and historical data retrival.
+  - 📌then the Portfolio and Order Management. this module is isolated, so it's easier to integrate.
+  - 📌the last one is the Chart module, based on tradingview lightweight chart, the focus is balance between the real-time update and historical data retrival.
 
 ### Stage3
 
@@ -47,3 +47,8 @@ this file have my tarding system module summary and roadmap from very early expe
 - visualization of factors in chart module.
 - Rewrite StateEngine in Rust.
 - ✅separated works to other computuers using ssh. configured in config.yaml.
+
+### Current frontend preview
+
+_the portfolio, order history and chart is using mockdata_
+![/assets/gridtrader.png](/assets/gridtrader.png)

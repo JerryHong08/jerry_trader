@@ -25,7 +25,7 @@ node_modules/
 
 # Vite/Rollup build assets
 /assets/index-*.js
-/assets/
+# /assets/
 public/build/
 
 *.pkl

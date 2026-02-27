@@ -2,35 +2,44 @@
 
 ### Feat
 
-- **src**: add config.yaml, patch tasks for different machines
-- **src-&-frontend**: separate news from static update and to async update
-- **src-&-frontend-stock-detail-module**: stock detail update done. add news llm classificator, need to refactor in the future for better performance
-- **src-&-frontend**: before static data update backup
-- **src/DataSupply**: collector write full raw snapshot data into .parquet, not csv anymore
-- **frontend-&-src**: frontend columns update decoupled. add zustand. collector rewrite backup
-- **frontend-&-src**: feature:1.bff connected frontend and backend. 2.frontend top gainers snapshot data columns update. 3.frontend overviewchart update. but has performance issuse, need to optimize. 4.replayer add logger and replayer start-from param
-- **frontend-&-src**: initialization of grid trader frontend and backend. bff, chartdataManger, stateEngine, backendStarter, staticdataSupply
-- **src/FactorEngine**: add factor engine
-- **src/IBBot-frontend**: 1. add postgres as database, alembic for database manage 2. build a trading console frontend, embedded with orderbook, order placer and so on
-- **src/IBBot-frontend**: 1. add postgres as database, alembic for database manage 2. build a trading console frontend, embedded with orderbook, order placer and so on
-- **src/IBBot**: establish basic ib trading app functionalities including orderplace, orderstatus callback, portfolio and position upd a te and callback, build a event bus system. SQL and frontend needed to be added in the future
-- **src/**: add thetadata, but not work for its speeded replay terminal. unified all the DataSupply to server.py
-- **src/-&&-frontend**: support for multiple event_type ['Q', 'T']
-- **OrderBook&frontend**: multi-ticker version
-- **OrderBook**: add backend debug
+#### Backend
+
+- **config**: multi-machine support via `config.yaml` and `machine_config.yaml` for SSH-separated workloads
+- **BackendForFrontend**: BFF layer (`bff.py`) connecting backend data pipeline to frontend over WebSocket
+- **DataSupply/snapshotDataSupply**: `collector.py` writes full raw market snapshots to `.parquet` (migrated from CSV); `replayer.py` supports `start-from` param and structured logging
+- **DataSupply/staticdataSupply**: static data fetch workers for fundamentals (`fundamentals_fetch.py`), borrow fee (`borrow_fee_fetch.py`), and news (`news_fetch.py`)
+- **DataSupply/tickDataSupply**: unified tick data manager (`unified_tick_manager.py`) integrating Polygon and ThetaData sources; supports multiple event types `['Q', 'T']`
+- **DataManager**: `overviewchartdat_manager.py`, `static_data_worker.py`, `news_worker.py`, `tickdata_server.py` for backend data orchestration
+- **ComputeEngine/StateEngine**: real-time state engine (`state_engine.py`) for market state tracking and top gainers ranking
+- **ComputeEngine/FactorEngine**: factor engine (`factor_engine.py`) for computing derived market factors
+- **ComputeEngine/NewsProcessor**: LLM-based news classifier (`news_processor.py`) with versioned prompts; news update decoupled from static data stream and runs asynchronously
+- **OrderManagement**: full order lifecycle management — order placement, status callbacks, portfolio & position updates; backed by PostgreSQL via SQLAlchemy + Alembic
+- **OrderManagement/persistence**: database bootstrap migration (`20251215_01`) for order and portfolio persistence
+- **IBBot**: established core IB trading app — event bus system, order placement, order status callbacks, portfolio and position update callbacks
+
+#### Frontend (`GridTrader`)
+
+- **GridTrader**: initialized grid-layout React (Vite + TypeScript) trading dashboard; each module is independently developed and customizable
+- **Layout**: draggable/resizable grid system (`GridContainer`, `GridItem`), layout import/export via `SettingsMenu`
+- **RankList**: Top Gainers module — real-time columns: `symbol`, `rank`, `price`, `change`, `changePercent`, `volume`, `relativeVolume5min`, `relativeVolumeDaily`, `float_share`, `marketCap`, `news`, state column
+- **OverviewChartModule**: normalized chart data emission from backend; overview chart connected to live data
+- **StockDetail**: stock detail module driven by top gainers selection and frontend button; uses backend cache
+- **OrderManagement**: order management module integrated with backend order service (portfolio + order history)
+- **ChartModule**: TradingView lightweight chart skeleton (in progress — historical data bootstrap pending)
+- **stores**: Zustand state management added; frontend column updates decoupled from backend emit cycle
 
 ### Fix
 
-- **src/OrderManagement**: sell order pct to qty calculation fixed
-- **src**: 1.readme update. 2. file name refactor. 3.change replay_date&suffix_id -> session_id 4. rename data_discrepancy_fixed to manual_fixed_data
-- **src/NewsProcessor.py**: preparation for 2rd machine git version
-- **src-&-frontend**: decouple static update stream
-- **src/**: reconstuced for upgrade
+- **OrderManagement**: sell order percentage-to-quantity calculation corrected
+- **DataSupply**: renamed `replay_date` & `suffix_id` → `session_id`; renamed `data_discrepancy_fixed` → `manual_fixed_data`
+- **DataSupply**: static update stream decoupled for independent column refresh
+- **src**: file name refactoring and module restructuring pass
 
 ### Refactor
 
-- frontend backup
+- **src**: full module restructure — `BackendForFrontend`, `ComputeEngine`, `DataManager`, `DataSupply`, `OrderManagement`, `MachineLearning`, `utils` layout established
+- **frontend**: GridTrader frontend migrated from figma prototype to production component structure
 
 ### Perf
 
-- **src/IBGateway**: IBTrading app preparation
+- **IBGateway**: IB trading app connection and gateway initialisation improvements

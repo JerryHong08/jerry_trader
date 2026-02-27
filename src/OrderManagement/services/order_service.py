@@ -56,17 +56,47 @@ class OrderService:
 
     def _calculate_quantity_from_pct(self, req: OrderRequest) -> int:
         """
-        Calculate quantity from percentage of buying power.
+        Calculate quantity from percentage.
+
+        For BUY:  pct of buying power / price
+        For SELL: pct of current position size
 
         Args:
             req: Order request with pct and price
 
         Returns:
-            Calculated quantity (integer for OutsideRth, can be fractional otherwise)
+            Calculated quantity (always integer)
         """
         if self.portfolio_service is None:
             raise ValueError("Portfolio service not available for pct-based orders")
 
+        if req.action.upper() == "SELL":
+            # SELL pct = percentage of current position
+            try:
+                position = self.portfolio_service.get_position(req.symbol)
+            except KeyError:
+                raise ValueError(
+                    f"No position found for {req.symbol} — cannot sell by pct"
+                )
+
+            pos_qty = abs(position.quantity)
+            if pos_qty <= 0:
+                raise ValueError(f"Position size is 0 for {req.symbol}")
+
+            quantity = math.floor(pos_qty * (req.pct / 100.0))
+
+            if quantity <= 0:
+                raise ValueError(
+                    f"Calculated sell quantity is 0 (position={pos_qty}, pct={req.pct}%)"
+                )
+
+            logger.info(
+                f"_calculate_quantity_from_pct (SELL) - Position={pos_qty}, "
+                f"pct={req.pct}%, -> quantity={quantity}"
+            )
+            return int(quantity)
+
+        # BUY pct = percentage of buying power
         account = self.portfolio_service.get_account()
         buying_power = account.BuyingPower
 
@@ -77,12 +107,8 @@ class OrderService:
         dollar_amount = buying_power * (req.pct / 100.0)
         quantity = dollar_amount / req.price
 
-        # OutsideRth requires integer quantities (no fractional shares)
-        if req.OutsideRth:
-            quantity = math.floor(quantity)
-        else:
-            # Even for regular hours, IB usually requires integer for stocks
-            quantity = math.floor(quantity)
+        # IB usually requires integer quantities for stocks
+        quantity = math.floor(quantity)
 
         if quantity <= 0:
             raise ValueError(
@@ -91,7 +117,7 @@ class OrderService:
             )
 
         logger.info(
-            f"_calculate_quantity_from_pct - BuyingPower=${buying_power:.2f}, "
+            f"_calculate_quantity_from_pct (BUY) - BuyingPower=${buying_power:.2f}, "
             f"pct={req.pct}%, price=${req.price:.2f} -> quantity={quantity}"
         )
 

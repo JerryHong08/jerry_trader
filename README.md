@@ -6,6 +6,8 @@ this file have my trading system module summary and roadmap from very early expe
 
 ### Stage 1 & Initial Start
 
+mainly focus on basic function test and expriment.
+
 ✅IBKR Order Placement & Realtime Order Book Web App (Python + React)
 
 - ✅React frontend + backend
@@ -19,6 +21,8 @@ this file have my trading system module summary and roadmap from very early expe
   - Basic IB Classes like Contract, Order...
 
 ### Stage2(Current)
+
+mainly focus on basic modules development and strcuture buidling.
 
 - ✅using figma make frontend code package.
   this frontend layout of trading system is gird layout, and each grid/module is seperated for easy to develop and customize.
@@ -42,15 +46,26 @@ this file have my trading system module summary and roadmap from very early expe
 
 ### Stage3
 
-- Add more modules, like Agent module to monitor the global staus also focus on one ticker at the same time.
-- Rewrite FactorEngine in Rust.
-- visualization of factors in chart module.
-- Rewrite StateEngine in Rust.
+mainly focus on factor computing and advanced integration of system.
+
 - ✅separated works to other computuers using ssh. configured in config.yaml.
-- Developing Machine Learning module.
+- visualization of factors in chart module.
+- rewrite stateEngine in rust.
+- real-time risk management engine/trigger.
+  - risk manage rule
+- developing machine learning module.
   - build breakout-compute-analyze oriented Context Model using current recored files.
   - simulate market_snapshot replay using historical trade&quote bulk file.
   - build historical context model.
+- rewrite factorEegine in Rust.
+
+### optional features
+
+some other features to make it better.
+
+- historical orders analysis modules.
+- Add more modules, like Agent module to monitor the global staus also focus on one ticker at the same time.
+- news room
 
 ### Current frontend preview
 

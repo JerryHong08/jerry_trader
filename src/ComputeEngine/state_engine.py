@@ -26,7 +26,7 @@ from influxdb_client.client.write_api import WriteOptions, WriteType
 
 from utils.logger import setup_logger
 from utils.redis_keys import factor_hset_prefix, signal_events_stream
-from utils.session import make_session_id, parse_session_id
+from utils.session import make_session_id, parse_session_id, session_to_influx_tags
 
 logger = setup_logger("state_engine", log_to_file=True, level=logging.DEBUG)
 
@@ -237,10 +237,12 @@ class StateEngine:
         """Write a state-change event to InfluxDB and Redis Stream."""
 
         # ── InfluxDB point ───────────────────────────────────────────
+        date_tag, mode_tag = session_to_influx_tags(self.session_id)
         point = (
             Point("signal_events")
             .tag("symbol", symbol)
-            .tag("session_id", self.session_id)
+            .tag("date", date_tag)
+            .tag("mode", mode_tag)
             .field("state", new_state.value)
             .field("trade_rate", float(factors.get("trade_rate", 0)))
             .field("accel", float(factors.get("accel", 0)))

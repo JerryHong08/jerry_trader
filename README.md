@@ -1,6 +1,6 @@
 # Introduction
 
-this file have my tarding system module summary and roadmap from very early experimental stage to mature stage.
+this file have my trading system module summary and roadmap from very early experimental stage to mature stage.
 
 ## roadmap
 
@@ -47,6 +47,10 @@ this file have my tarding system module summary and roadmap from very early expe
 - visualization of factors in chart module.
 - Rewrite StateEngine in Rust.
 - ✅separated works to other computuers using ssh. configured in config.yaml.
+- Developing Machine Learning module.
+  - build breakout-compute-analyze oriented Context Model using current recored files.
+  - simulate market_snapshot replay using historical trade&quote bulk file.
+  - build historical context model.
 
 ### Current frontend preview
 

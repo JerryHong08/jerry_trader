@@ -60,6 +60,32 @@ def parse_session_id(session_id: str) -> Tuple[str, str]:
     return db_date, run_mode
 
 
+def session_to_influx_tags(session_id: str) -> Tuple[str, str]:
+    """
+    Extract date and mode tags for InfluxDB from session_id.
+
+    Args:
+        session_id: Session ID (e.g. "20260120_live", "20260120_replay_v2").
+
+    Returns:
+        (date_tag, mode_tag) tuple where:
+        - date_tag is in YYYY-MM-DD format (e.g. "2026-01-20")
+        - mode_tag is everything after position 9 (e.g. "live", "replay_v2")
+
+    Examples:
+        session_to_influx_tags("20260120_live") -> ("2026-01-20", "live")
+        session_to_influx_tags("20260120_replay_v2") -> ("2026-01-20", "replay_v2")
+    """
+    # Extract date portion (first 8 chars) and format as YYYY-MM-DD
+    date_str = session_id[:8]
+    date_tag = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+
+    # Extract mode (everything after the underscore at position 8)
+    mode_tag = session_id[9:] if len(session_id) > 9 else "unknown"
+
+    return date_tag, mode_tag
+
+
 def db_date_to_date(db_date: str) -> date:
     """
     Parse a YYYYMMDD string into a :class:`datetime.date`.

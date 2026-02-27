@@ -42,7 +42,12 @@ from utils.redis_keys import (
     state_cursor,
     static_pending,
 )
-from utils.session import db_date_to_date, make_session_id, parse_session_id
+from utils.session import (
+    db_date_to_date,
+    make_session_id,
+    parse_session_id,
+    session_to_influx_tags,
+)
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
 
@@ -690,10 +695,12 @@ class SnapshotProcessor:
 
             # Dynamically build stream data and InfluxDB point
             stream_data = {"symbol": ticker}
+            date_tag, mode_tag = session_to_influx_tags(self.session_id)
             point = (
                 influxdb_client.Point("market_snapshot")
                 .tag("symbol", ticker)
-                .tag("session_id", self.session_id)
+                .tag("date", date_tag)
+                .tag("mode", mode_tag)
             )
 
             # Process all fields dynamically

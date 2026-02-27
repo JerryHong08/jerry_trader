@@ -22,7 +22,7 @@ from influxdb_client.client.write_api import WriteOptions, WriteType
 from DataSupply.tickDataSupply.unified_tick_manager import UnifiedTickManager
 from utils.logger import setup_logger
 from utils.redis_keys import factor_tasks_stream
-from utils.session import make_session_id, parse_session_id
+from utils.session import make_session_id, parse_session_id, session_to_influx_tags
 
 logger = setup_logger("factor_engine", log_to_file=True, level=logging.DEBUG)
 
@@ -580,10 +580,12 @@ class FactorManager:
                 trade_rate_z = self._z_score(trade_rate, local_rate_hist)
                 accel_z = self._z_score(accel, local_accel_hist)
 
+                date_tag, mode_tag = session_to_influx_tags(self.session_id)
                 pt = (
                     Point("trade_activity")
                     .tag("symbol", symbol)
-                    .tag("session_id", self.session_id)
+                    .tag("date", date_tag)
+                    .tag("mode", mode_tag)
                     .tag("source", "bootstrap")
                     .field("trade_rate", round(trade_rate, 4))
                     .field("accel", round(accel, 4))
@@ -848,10 +850,12 @@ class FactorManager:
         """Write factor snapshot to InfluxDB and Redis."""
 
         # ── InfluxDB point ───────────────────────────────────────────────
+        date_tag, mode_tag = session_to_influx_tags(self.session_id)
         point = (
             Point("trade_activity")
             .tag("symbol", symbol)
-            .tag("session_id", self.session_id)
+            .tag("date", date_tag)
+            .tag("mode", mode_tag)
             .tag("source", source)
             .field("trade_rate", round(trade_rate, 4))
             .field("accel", round(accel, 4))

@@ -6,6 +6,9 @@ import { SettingsMenu } from './components/SettingsMenu';
 import { TimelineClock } from './components/TimelineClock';
 import { moduleRegistry } from './config/moduleRegistry';
 import { LAYOUT_TEMPLATES } from './config/layoutTemplates';
+import { useIbbotStore } from './stores/ibbotStore';
+import { useTickDataStore } from './stores/tickDataStore';
+import { PinDialog } from './components/PinDialog';
 import type { ModuleType, GridItemConfig } from './types';
 
 // Default values
@@ -179,6 +182,16 @@ export default function App() {
     localStorage.setItem('trading-system-gap', String(gridGap));
   }, [gridGap]);
 
+  // Initialize backend stores on mount
+  useEffect(() => {
+    useTickDataStore.getState().init();
+    useIbbotStore.getState().init();
+    return () => {
+      useTickDataStore.getState().dispose();
+      useIbbotStore.getState().dispose();
+    };
+  }, []);
+
   const addModule = (moduleType: ModuleType) => {
     const defaultSize = moduleRegistry[moduleType].defaultSize;
     const position = findAutoPosition(defaultSize.width, defaultSize.height, items);
@@ -239,6 +252,9 @@ export default function App() {
 
   return (
     <div className="h-screen bg-black text-white flex">
+      {/* Privacy PIN dialog (global) */}
+      <PinDialog />
+
       {/* Sidebar */}
       <ModuleSidebar
         isOpen={sidebarOpen}

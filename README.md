@@ -37,8 +37,8 @@ this file have my trading system module summary and roadmap from very early expe
     - ✅then we test the passively fetched and emitted columns like ['float_share','marketCap','news'].
   - ✅after that or during test of column data, we can test the overviewchartdata emit, which needs to normalize the frontend chart and get_chart_data in overviewchartdataManager.py.
   - ✅then Stock Detail. the data request is driven by top gainers and backend data management, so it should use cache, and also the data request can be driven by the frontend button. it's basic the same as the static data column update in top gainers column.
-  - 📌then the Portfolio and Order Management. this module is isolated, so it's easier to integrate.
-  - 📌the last one is the Chart module, based on tradingview lightweight chart, the focus is balance between the real-time update and historical data retrival.
+  - ✅then the Portfolio and Order Management. this module is isolated, so it's easier to integrate.
+  - 📌the last one is the Chart module, based on tradingview lightweight chart, the focus is balance between the real-time update and historical data retrival. **data management and historical data bootstrap.**
 
 ### Stage3
 
@@ -54,5 +54,22 @@ this file have my trading system module summary and roadmap from very early expe
 
 ### Current frontend preview
 
-_the portfolio, order history and chart is using mockdata_
-![/assets/gridtrader.png](/assets/gridtrader.png)
+#### Overview Layout Set
+
+<p align="center">
+  <img src="./assets/gridtrader.png" alt="gridtrader" width="600">
+  <br><em>Portfolio, order history and chart are using mock data</em>
+</p>
+
+#### Trade Layout Set
+
+<p align="center">
+  <img src="./assets/trade_layout01.png" alt="trade_layout01" width="800">
+</p>
+
+#### Layout Setting
+
+<p align="center">
+  <img src="./assets/layout_setting.png" alt="layout_setting" width="450">
+  <br><em>Import, load and customize your layout in the setting panel</em>
+</p>

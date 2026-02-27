@@ -1,271 +1,280 @@
-import React, { useState, useEffect } from 'react';
-import { ComposedChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
-import { Clock } from 'lucide-react';
-import type { ModuleProps, ChartTimeframe } from '../types';
-import { SymbolSearch } from './common/SymbolSearch';
+/**
+ * ChartModule – Real-time line chart powered by lightweight-charts
+ *
+ * Consumes live trade data from the TickDataServer WebSocket via
+ * useTickDataStore.  Replaces the previous recharts mock implementation.
+ *
+ * Features:
+ *  - Symbol tabs with add / remove (shared subscription via store)
+ *  - Sync-group symbol selection
+ *  - Real-time trade line chart (same approach as OrderTrader ChartPanel)
+ *  - Quote overlay (bid / ask from store)
+ */
 
-// Timeframe configurations
-const TIMEFRAME_CONFIG: Record<ChartTimeframe, { label: string; bars: number; dateFormat: (date: Date) => string }> = {
-  '1m': { label: '1m', bars: 60, dateFormat: (d) => `${d.getHours()}:${d.getMinutes().toString().padStart(2, '0')}` },
-  '5m': { label: '5m', bars: 78, dateFormat: (d) => `${d.getHours()}:${d.getMinutes().toString().padStart(2, '0')}` },
-  '15m': { label: '15m', bars: 26, dateFormat: (d) => `${d.getHours()}:${d.getMinutes().toString().padStart(2, '0')}` },
-  '30m': { label: '30m', bars: 48, dateFormat: (d) => `${d.getHours()}:${d.getMinutes().toString().padStart(2, '0')}` },
-  '1h': { label: '1h', bars: 24, dateFormat: (d) => `${d.getHours()}:00` },
-  '4h': { label: '4h', bars: 42, dateFormat: (d) => `${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:00` },
-  '1D': { label: '1D', bars: 60, dateFormat: (d) => `${d.getMonth() + 1}/${d.getDate()}` },
-  '1W': { label: '1W', bars: 52, dateFormat: (d) => `${d.getMonth() + 1}/${d.getDate()}` },
-  '1M': { label: '1M', bars: 24, dateFormat: (d) => `${d.getMonth() + 1}/${d.getFullYear().toString().slice(2)}` },
-};
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  createChart,
+  ColorType,
+  LineSeries,
+  CrosshairMode,
+} from 'lightweight-charts';
+import type {
+  IChartApi,
+  ISeriesApi,
+  LineData,
+  Time,
+} from 'lightweight-charts';
+import { Wifi, WifiOff } from 'lucide-react';
+import type { ModuleProps } from '../types';
+import { useTickDataStore, type Trade, type Quote } from '../stores/tickDataStore';
 
-const TIMEFRAME_ORDER: ChartTimeframe[] = ['1m', '5m', '15m', '30m', '1h', '4h', '1D', '1W', '1M'];
+export function ChartModule({
+  onRemove,
+  selectedSymbol,
+  onSymbolSelect,
+  settings,
+  onSettingsChange,
+}: ModuleProps) {
+  // ── Symbol & subscription ──────────────────────────────────────────────
+  const [symbol, setSymbol] = useState(selectedSymbol || '');
+  const [input, setInput] = useState('');
 
-// Generate mock candlestick data for different symbols and timeframes
-const generateCandlestickData = (symbol: string, timeframe: ChartTimeframe): any[] => {
-  const config = TIMEFRAME_CONFIG[timeframe];
-  const data: any[] = [];
-  const basePrice = Math.random() * 200 + 50;
-  let currentPrice = basePrice;
-  const now = Date.now();
+  const symbols = useTickDataStore((s) => s.symbols);
+  const connected = useTickDataStore((s) => s.connected);
+  const addSymbols = useTickDataStore((s) => s.addSymbols);
+  const removeSymbolFromStore = useTickDataStore((s) => s.removeSymbol);
+  const symbolData = useTickDataStore((s) => s.symbolData);
 
-  // Calculate time step based on timeframe
-  const timeSteps: Record<ChartTimeframe, number> = {
-    '1m': 60 * 1000,
-    '5m': 5 * 60 * 1000,
-    '15m': 15 * 60 * 1000,
-    '30m': 30 * 60 * 1000,
-    '1h': 60 * 60 * 1000,
-    '4h': 4 * 60 * 60 * 1000,
-    '1D': 24 * 60 * 60 * 1000,
-    '1W': 7 * 24 * 60 * 60 * 1000,
-    '1M': 30 * 24 * 60 * 60 * 1000,
-  };
-
-  const timeStep = timeSteps[timeframe];
-
-  for (let i = config.bars; i >= 0; i--) {
-    const date = new Date(now - i * timeStep);
-    const volatility = 0.02;
-    const change = (Math.random() - 0.5) * currentPrice * volatility;
-
-    const open = currentPrice;
-    const close = currentPrice + change;
-    const high = Math.max(open, close) * (1 + Math.random() * 0.01);
-    const low = Math.min(open, close) * (1 - Math.random() * 0.01);
-
-    data.push({
-      date: config.dateFormat(date),
-      timestamp: date.getTime(),
-      open,
-      high,
-      low,
-      close,
-      isGreen: close > open,
-    });
-
-    currentPrice = close;
-  }
-
-  return data;
-};
-
-const AVAILABLE_SYMBOLS = [
-  'AAPL', 'TSLA', 'NVDA', 'MSFT', 'GOOGL', 'AMZN', 'META', 'AMD',
-  'NFLX', 'COIN', 'PLTR', 'RIVN', 'LCID', 'SOFI', 'BABA', 'NIO'
-];
-
-// Custom Candlestick Shape
-const CandlestickShape = (props: any) => {
-  const { x, y, width, height, payload } = props;
-
-  if (!payload || width < 1) return null;
-
-  const isGreen = payload.isGreen;
-  const color = isGreen ? '#10b981' : '#ef4444';
-
-  // Calculate scale from the parent chart
-  const chartHeight = props.height || 300;
-  const yMin = props.yMin || 0;
-  const yMax = props.yMax || 100;
-
-  const scale = (value: number) => {
-    const ratio = (value - yMin) / (yMax - yMin);
-    return chartHeight - (ratio * chartHeight);
-  };
-
-  // Positions
-  const wickX = x + width / 2;
-  const bodyWidth = Math.max(width * 0.7, 2);
-  const bodyX = x + (width - bodyWidth) / 2;
-
-  const highY = scale(payload.high);
-  const lowY = scale(payload.low);
-  const openY = scale(payload.open);
-  const closeY = scale(payload.close);
-
-  const bodyTop = Math.min(openY, closeY);
-  const bodyHeight = Math.abs(openY - closeY) || 1;
-
-  return (
-    <g>
-      {/* Wick */}
-      <line
-        x1={wickX}
-        y1={highY}
-        x2={wickX}
-        y2={lowY}
-        stroke={color}
-        strokeWidth={1}
-      />
-      {/* Body */}
-      <rect
-        x={bodyX}
-        y={bodyTop}
-        width={bodyWidth}
-        height={bodyHeight}
-        fill={color}
-      />
-    </g>
-  );
-};
-
-export function ChartModule({ onRemove, selectedSymbol, onSymbolSelect, settings, onSettingsChange }: ModuleProps) {
-  const [symbol, setSymbol] = useState(selectedSymbol || 'AAPL');
-  const [chartData, setChartData] = useState<any[]>([]);
-  const [timeframe, setTimeframe] = useState<ChartTimeframe>(settings?.chart?.timeframe || '1D');
-
-  // Update symbol when selectedSymbol changes from sync
+  // Sync from external sync group
   useEffect(() => {
     if (selectedSymbol && selectedSymbol !== symbol) {
       setSymbol(selectedSymbol);
     }
   }, [selectedSymbol]);
 
-  // Update timeframe from settings
+  // ── Chart refs ─────────────────────────────────────────────────────────
+  const chartContainerRef = useRef<HTMLDivElement>(null);
+  const chartRef = useRef<IChartApi | null>(null);
+  const seriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  const dataRef = useRef<LineData<Time>[]>([]);
+  const currentSymbolRef = useRef<string | null>(null);
+
+  // Initialise lightweight-charts once
   useEffect(() => {
-    if (settings?.chart?.timeframe && settings.chart.timeframe !== timeframe) {
-      setTimeframe(settings.chart.timeframe);
+    if (!chartContainerRef.current) return;
+
+    const chart = createChart(chartContainerRef.current, {
+      width: chartContainerRef.current.clientWidth,
+      height: chartContainerRef.current.clientHeight,
+      layout: {
+        background: { type: ColorType.Solid, color: '#18181b' },
+        textColor: '#a1a1aa',
+      },
+      grid: {
+        vertLines: { color: '#27272a' },
+        horzLines: { color: '#27272a' },
+      },
+      timeScale: {
+        borderColor: '#3f3f46',
+        timeVisible: true,
+        secondsVisible: true,
+      },
+      rightPriceScale: { borderColor: '#3f3f46' },
+      crosshair: { mode: CrosshairMode.Normal },
+    });
+
+    chartRef.current = chart;
+
+    const series = chart.addSeries(LineSeries, {
+      color: '#2962FF',
+      lineWidth: 2,
+      priceLineVisible: true,
+      lastValueVisible: true,
+      crosshairMarkerVisible: true,
+      crosshairMarkerRadius: 4,
+    });
+    seriesRef.current = series;
+
+    const ro = new ResizeObserver(() => {
+      if (chartContainerRef.current && chartRef.current) {
+        chartRef.current.applyOptions({
+          width: chartContainerRef.current.clientWidth,
+          height: chartContainerRef.current.clientHeight,
+        });
+      }
+    });
+    ro.observe(chartContainerRef.current);
+
+    return () => {
+      ro.disconnect();
+      chart.remove();
+      chartRef.current = null;
+      seriesRef.current = null;
+      dataRef.current = [];
+    };
+  }, []);
+
+  // Reset chart data when symbol changes
+  useEffect(() => {
+    if (!seriesRef.current) return;
+    if (symbol !== currentSymbolRef.current) {
+      dataRef.current = [];
+      seriesRef.current.setData([]);
+      currentSymbolRef.current = symbol;
     }
-  }, [settings?.chart?.timeframe]);
+  }, [symbol]);
 
-  // Update chart data when symbol or timeframe changes
+  // Consume latest trade from store
+  const latestTrade = symbol
+    ? (symbolData[symbol]?.T as Trade | undefined) ?? null
+    : null;
+
   useEffect(() => {
-    const data = generateCandlestickData(symbol, timeframe);
-    setChartData(data);
-  }, [symbol, timeframe]);
+    if (!seriesRef.current || !latestTrade || latestTrade.symbol !== symbol) return;
+    if (typeof latestTrade.price !== 'number' || typeof latestTrade.timestamp !== 'number') return;
 
-  const handleSymbolChange = (newSymbol: string) => {
-    setSymbol(newSymbol);
-    onSymbolSelect?.(newSymbol);
-  };
+    const newTime = Math.floor(latestTrade.timestamp / 1000) as Time;
+    const lastPoint = dataRef.current[dataRef.current.length - 1];
 
-  const handleTimeframeChange = (newTimeframe: ChartTimeframe) => {
-    setTimeframe(newTimeframe);
-    onSettingsChange?.({ chart: { timeframe: newTimeframe } });
-  };
+    // Skip exact duplicate
+    if (lastPoint && lastPoint.time === newTime && lastPoint.value === latestTrade.price) return;
 
-  const CustomTooltip = ({ active, payload }: any) => {
-    if (active && payload && payload.length) {
-      const data = payload[0].payload;
-      return (
-        <div className="bg-zinc-800 border border-zinc-700 p-2 text-xs">
-          <div className="mb-1">{data.date}</div>
-          <div>O: ${data.open.toFixed(2)}</div>
-          <div>H: ${data.high.toFixed(2)}</div>
-          <div>L: ${data.low.toFixed(2)}</div>
-          <div>C: ${data.close.toFixed(2)}</div>
-        </div>
+    // Same second, different price → update in place
+    if (lastPoint && lastPoint.time === newTime) {
+      lastPoint.value = latestTrade.price;
+      try { seriesRef.current.update(lastPoint); } catch { /* ignore */ }
+      return;
+    }
+
+    const newPoint: LineData<Time> = { time: newTime, value: latestTrade.price };
+
+    try {
+      seriesRef.current.update(newPoint);
+      dataRef.current.push(newPoint);
+
+      if (dataRef.current.length > 1000) {
+        dataRef.current = dataRef.current.slice(-1000);
+        seriesRef.current.setData(dataRef.current);
+      }
+    } catch {
+      // Out-of-order data — deduplicate and rebuild
+      dataRef.current.push(newPoint);
+      const deduped = new Map<number, LineData<Time>>();
+      for (const pt of dataRef.current) deduped.set(pt.time as number, pt);
+      dataRef.current = Array.from(deduped.values()).sort(
+        (a, b) => (a.time as number) - (b.time as number),
       );
+      seriesRef.current!.setData(dataRef.current);
     }
-    return null;
+  }, [latestTrade, symbol]);
+
+  // ── Quote data ─────────────────────────────────────────────────────────
+  const quote = symbol ? (symbolData[symbol]?.Q as Quote | undefined) : undefined;
+
+  // ── Handlers ───────────────────────────────────────────────────────────
+  const handleAdd = () => {
+    const newSyms = input
+      .split(',')
+      .map((s) => s.trim().toUpperCase())
+      .filter(Boolean);
+    if (newSyms.length > 0) {
+      addSymbols(newSyms, ['Q', 'T']);
+      const last = newSyms[newSyms.length - 1];
+      setSymbol(last);
+      onSymbolSelect?.(last);
+    }
+    setInput('');
   };
 
-  // Calculate Y-axis domain
-  const yMin = Math.min(...chartData.map(d => d.low)) * 0.99;
-  const yMax = Math.max(...chartData.map(d => d.high)) * 1.01;
+  const handleRemove = (sym: string) => {
+    removeSymbolFromStore(sym);
+    if (sym === symbol) {
+      const remaining = symbols.filter((s) => s !== sym);
+      const next = remaining.length > 0 ? remaining[remaining.length - 1] : '';
+      setSymbol(next);
+      if (next) onSymbolSelect?.(next);
+    }
+  };
 
-  const currentPrice = chartData.length > 0 ? chartData[chartData.length - 1].close : 0;
-  const firstPrice = chartData.length > 0 ? chartData[0].open : 0;
-  const priceChange = currentPrice - firstPrice;
-  const priceChangePercent = firstPrice > 0 ? (priceChange / firstPrice) * 100 : 0;
-  const isPositive = priceChange >= 0;
+  const handleSelectSymbol = (sym: string) => {
+    setSymbol(sym);
+    onSymbolSelect?.(sym);
+  };
 
+  // ── Render ─────────────────────────────────────────────────────────────
   return (
-    <div className="h-full flex flex-col bg-zinc-900">
-      {/* Header with Symbol Info and Controls */}
-      <div className="p-3 border-b border-zinc-800">
-        <div className="flex items-start gap-3">
-          {/* Symbol Info and Timeframe - Left side */}
-          <div className="flex-1 min-w-0">
-            {/* Symbol Label and Price Info */}
-            {chartData.length > 0 && (
-              <div className="flex items-center gap-3 mb-2">
-                <div className="text-sm text-gray-400">Symbol: <span className="text-white">{symbol}</span></div>
-                <div className="flex items-baseline gap-2">
-                  <span className="text-lg">${currentPrice.toFixed(2)}</span>
-                  <span className={`text-sm ${isPositive ? 'text-green-500' : 'text-red-500'}`}>
-                    {isPositive ? '+' : ''}{priceChange.toFixed(2)} ({isPositive ? '+' : ''}{priceChangePercent.toFixed(2)}%)
-                  </span>
-                </div>
-              </div>
-            )}
+    <div className="h-full flex flex-col bg-zinc-900 relative">
+      {/* Header bar */}
+      <div className="p-2 border-b border-zinc-800 flex flex-col gap-1">
+        {/* Connection + Symbol tabs */}
+        <div className="flex items-center gap-2 flex-wrap">
+          {connected ? (
+            <Wifi className="w-3.5 h-3.5 text-green-500 flex-shrink-0" />
+          ) : (
+            <WifiOff className="w-3.5 h-3.5 text-red-500 flex-shrink-0" />
+          )}
 
-            {/* Timeframe Selector */}
-            <div className="flex items-center gap-1 flex-wrap">
-              {TIMEFRAME_ORDER.map((tf) => (
-                <button
-                  key={tf}
-                  onClick={() => handleTimeframeChange(tf)}
-                  className={`px-2 py-1 text-xs transition-colors ${
-                    timeframe === tf
-                      ? 'bg-white text-black'
-                      : 'bg-zinc-800 hover:bg-zinc-700'
-                  }`}
-                >
-                  {tf}
-                </button>
-              ))}
-            </div>
-          </div>
+          {symbols.map((s) => (
+            <button
+              key={s}
+              onClick={() => handleSelectSymbol(s)}
+              className={`px-2 py-0.5 text-xs transition-colors ${
+                s === symbol
+                  ? 'bg-white text-black'
+                  : 'bg-zinc-800 hover:bg-zinc-700 text-gray-300'
+              }`}
+            >
+              {s}
+              <span
+                className="ml-1 text-red-400 hover:text-red-300 cursor-pointer"
+                onClick={(e) => { e.stopPropagation(); handleRemove(s); }}
+              >
+                ✕
+              </span>
+            </button>
+          ))}
 
-          {/* Search Bar - Right side with responsive width */}
-          <div className="flex-shrink-0" style={{ width: '180px', minWidth: '140px', maxWidth: '280px' }}>
-            <SymbolSearch
-              value={symbol}
-              onChange={handleSymbolChange}
-              availableSymbols={AVAILABLE_SYMBOLS}
-              placeholder="Symbol..."
-              useConfirmButton={true}
-            />
-          </div>
+          <input
+            className="bg-black border border-zinc-700 px-2 py-0.5 text-xs w-28 focus:outline-none focus:border-zinc-500"
+            placeholder="AAPL, NVDA"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
+          />
+          <button
+            onClick={handleAdd}
+            className="px-2 py-0.5 text-xs bg-blue-600 hover:bg-blue-700 transition-colors"
+          >
+            Add
+          </button>
         </div>
+
+        {/* Price info */}
+        {symbol && latestTrade && (
+          <div className="flex items-center gap-3 text-xs">
+            <span className="text-gray-400">
+              {symbol} — Last:{' '}
+              <span className="text-white">${latestTrade.price.toFixed(2)}</span>
+              <span className="text-gray-500 ml-1">({latestTrade.size} shares)</span>
+            </span>
+            {quote && (
+              <span className="text-gray-500">
+                Bid: <span className="text-green-400">{quote.bid}</span>
+                {' '}Ask: <span className="text-red-400">{quote.ask}</span>
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
-      {/* Chart */}
-      <div className="flex-1 p-2" style={{ minHeight: 0, height: '100%' }}>
-        <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart data={chartData} margin={{ top: 10, right: 20, left: 10, bottom: 10 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
-            <XAxis
-              dataKey="date"
-              stroke="#71717a"
-              tick={{ fill: '#a1a1aa', fontSize: 11 }}
-              interval="preserveStartEnd"
-            />
-            <YAxis
-              domain={[yMin, yMax]}
-              stroke="#71717a"
-              tick={{ fill: '#a1a1aa', fontSize: 11 }}
-              tickFormatter={(value) => `$${value.toFixed(0)}`}
-            />
-            <Tooltip content={<CustomTooltip />} />
-            <Bar
-              dataKey="high"
-              shape={(props) => <CandlestickShape {...props} yMin={yMin} yMax={yMax} />}
-              isAnimationActive={false}
-            />
-          </ComposedChart>
-        </ResponsiveContainer>
-      </div>
+      {/* Chart area */}
+      <div className="flex-1 min-h-0" ref={chartContainerRef} />
+
+      {!symbol && (
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+          <span className="text-gray-600 text-sm">Add a symbol to see real-time trades</span>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,131 +1,116 @@
-import React, { useState, useEffect } from "react";
-import { RefreshCw, Calendar } from "lucide-react";
-import type {
-  ModuleProps,
-  Order,
-  HistoricalOrder,
-  OrderManagementView,
-  OrderStatus,
-  TimeInForce,
-} from "../types";
-import { useBackendTimestamp } from '../hooks/useBackendTimestamps';
+/**
+ * OrderManagement – Real IB order placement & order history
+ *
+ * Connected to the OrderManagement backend (port 8888) via ibbotStore.
+ * Features ported from OrderTrader IbbotPanel:
+ *  - Place Order form with pct / qty mode
+ *  - Price sync from latest trade (TickDataStore)
+ *  - Scrollable price input with ±1%/±5% buttons
+ *  - Order reason field
+ *  - LMT/MKT, TIF, OutsideRTH
+ *  - Live order table with cancel (with reason)
+ *  - WS connection status indicator
+ *  - Buying power display
+ */
 
-// Generate mock historical orders
-const generateMockOrders = (
-  date: string,
-): HistoricalOrder[] => {
-  const symbols = [
-    "AAPL",
-    "TSLA",
-    "NVDA",
-    "MSFT",
-    "GOOGL",
-    "AMZN",
-    "META",
-    "AMD",
-  ];
-  const statuses: OrderStatus[] = [
-    "filled",
-    "pending",
-    "cancelled",
-    "rejected",
-    "partial",
-  ];
-  const tifs: TimeInForce[] = ["day", "gtc", "ioc", "fok"];
-  const sides: Array<"buy" | "sell"> = ["buy", "sell"];
-  const orderTypes: Array<
-    "market" | "limit" | "stop" | "stop-limit"
-  > = ["market", "limit", "stop", "stop-limit"];
+import React, { useState, useEffect, useRef } from 'react';
+import { RefreshCw, Wifi, WifiOff, Eye, EyeOff, X } from 'lucide-react';
+import type { ModuleProps, OrderManagementView } from '../types';
+import type { PlaceOrderRequest, OrderStatusEventData } from '../types/ibbot';
+import { useIbbotStore } from '../stores/ibbotStore';
+import { useTickDataStore, type Trade } from '../stores/tickDataStore';
+import { usePrivacyStore } from '../stores/privacyStore';
 
-  const orders: HistoricalOrder[] = [];
-  const baseDate = new Date(date);
+// ============================================================================
+// Helpers
+// ============================================================================
 
-  for (let i = 0; i < 15; i++) {
-    const symbol =
-      symbols[Math.floor(Math.random() * symbols.length)];
-    const side =
-      sides[Math.floor(Math.random() * sides.length)];
-    const orderType =
-      orderTypes[Math.floor(Math.random() * orderTypes.length)];
-    const quantity = Math.floor(Math.random() * 500) + 10;
-    const price = Math.random() * 500 + 50;
-    const status =
-      statuses[Math.floor(Math.random() * statuses.length)];
-    const filledQuantity =
-      status === "filled"
-        ? quantity
-        : status === "partial"
-          ? Math.floor(quantity * 0.5)
-          : 0;
-    const outsideRth = Math.random() > 0.7;
-    const tif = tifs[Math.floor(Math.random() * tifs.length)];
+function canCancelOrder(status: string): boolean {
+  const s = (status || '').toLowerCase();
+  if (['filled', 'cancelled', 'apicancelled', 'inactive', 'error', 'pendingcancel'].includes(s)) return false;
+  return true;
+}
 
-    const submittedAt = new Date(
-      baseDate.getTime() +
-        i * 3600000 +
-        Math.random() * 3600000,
-    );
-    const filledAt =
-      status === "filled" || status === "partial"
-        ? new Date(
-            submittedAt.getTime() + Math.random() * 600000,
-          )
-        : undefined;
+// ============================================================================
+// PriceInput — scrollable with ±1%/±5% quick-adjust
+// ============================================================================
 
-    orders.push({
-      id: `order-${date}-${i}`,
-      symbol,
-      side,
-      orderType,
-      quantity,
-      price,
-      filledQuantity,
-      status,
-      outsideRth,
-      tif,
-      submittedAt: submittedAt.toISOString(),
-      filledAt: filledAt?.toISOString(),
-    });
-  }
+function PriceInput({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: number | null;
+  onChange: (v: number | null) => void;
+  disabled?: boolean;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const currentPrice = value ?? 0;
 
-  return orders.sort(
-    (a, b) =>
-      new Date(b.submittedAt).getTime() -
-      new Date(a.submittedAt).getTime(),
-  );
-};
-
-const formatTimestampET = (isoDate: string): string => {
-  const date = new Date(isoDate);
-  const formatted = date.toLocaleString("en-US", {
-    timeZone: "America/New_York",
-    month: "2-digit",
-    day: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
+  // Attach a native wheel listener with { passive: false } so we can
+  // preventDefault + stopPropagation without React's synthetic-event
+  // limitations. This prevents the parent grid from scrolling while
+  // the user adjusts the price.
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el || disabled) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const step = (value ?? 0) * 0.001;
+      const delta = e.deltaY < 0 ? step : -step;
+      onChange(Math.max(0.01, Math.round(((value ?? 0) + delta) * 100) / 100));
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
   });
-  return `${formatted} ET`;
-};
 
-const getStatusColor = (status: OrderStatus): string => {
-  switch (status) {
-    case "filled":
-      return "bg-green-600";
-    case "pending":
-      return "bg-blue-600";
-    case "cancelled":
-      return "bg-gray-600";
-    case "rejected":
-      return "bg-red-600";
-    case "partial":
-      return "bg-yellow-600";
-    default:
-      return "bg-gray-600";
-  }
-};
+  const adjustByPercent = (percent: number) => {
+    if (disabled) return;
+    onChange(Math.max(0.01, Math.round(currentPrice * (1 + percent / 100) * 100) / 100));
+  };
+
+  return (
+    <div className="flex gap-1 items-center">
+      {[-5, -1].map((p) => (
+        <button
+          key={p}
+          type="button"
+          disabled={disabled}
+          onClick={() => adjustByPercent(p)}
+          className="px-1.5 py-0.5 text-[10px] bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40"
+        >
+          {p}%
+        </button>
+      ))}
+      <input
+        ref={inputRef}
+        className="flex-1 bg-black border border-zinc-700 px-2 py-1 text-sm focus:outline-none focus:border-zinc-500 cursor-ns-resize"
+        type="number"
+        step="0.01"
+        title="Scroll to adjust price"
+        value={value ?? ''}
+        onChange={(e) => onChange(e.target.value === '' ? null : Number(e.target.value))}
+        disabled={disabled}
+      />
+      {[1, 5].map((p) => (
+        <button
+          key={p}
+          type="button"
+          disabled={disabled}
+          onClick={() => adjustByPercent(p)}
+          className="px-1.5 py-0.5 text-[10px] bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40"
+        >
+          +{p}%
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ============================================================================
+// Main Component
+// ============================================================================
 
 export function OrderManagement({
   onRemove,
@@ -133,401 +118,453 @@ export function OrderManagement({
   settings,
   onSettingsChange,
 }: ModuleProps) {
-  const [order, setOrder] = useState<Order>({
-    symbol: "",
-    side: "buy",
-    type: "limit",
-    quantity: "",
-    price: "",
+  // ── Store ──────────────────────────────────────────────────────────────
+  const wsStatus = useIbbotStore((s) => s.wsStatus);
+  const wsInfo = useIbbotStore((s) => s.wsInfo);
+  const loading = useIbbotStore((s) => s.loading);
+  const error = useIbbotStore((s) => s.error);
+  const ordersById = useIbbotStore((s) => s.ordersById);
+  const buyingPower = useIbbotStore((s) => s.buyingPower);
+  const submitOrder = useIbbotStore((s) => s.submitOrder);
+  const doCancelOrder = useIbbotStore((s) => s.doCancelOrder);
+  const loadInitial = useIbbotStore((s) => s.loadInitial);
+  const restBaseUrl = useIbbotStore((s) => s.restBaseUrl);
+
+  // TickData for price sync
+  const symbolData = useTickDataStore((s) => s.symbolData);
+
+  // Privacy
+  const privacyMode = usePrivacyStore((s) => s.privacyMode);
+  const togglePrivacy = usePrivacyStore((s) => s.toggle);
+
+  // ── Local form state ───────────────────────────────────────────────────
+  const [activeView, setActiveView] = useState<OrderManagementView>(
+    settings?.orderManagement?.view || 'placement',
+  );
+
+  const [orderMode, setOrderMode] = useState<'quantity' | 'pct'>('pct');
+  const [cancelReason, setCancelReason] = useState('');
+  const [cancellingIds, setCancellingIds] = useState<Set<number>>(new Set());
+  const [showBuyingPower, setShowBuyingPower] = useState(false);
+
+  const [form, setForm] = useState<PlaceOrderRequest>({
+    symbol: selectedSymbol || 'AAPL',
+    action: 'BUY',
+    quantity: 100,
+    order_type: 'LMT',
+    limit_price: null,
+    tif: 'DAY',
+    OutsideRth: true,
+    sec_type: 'STK',
+    reason: '',
+    pct: 60,
+    price: null,
   });
 
-  const [orders, setOrders] = useState<HistoricalOrder[]>([]);
-  const [selectedDate, setSelectedDate] = useState(() => {
-    const today = new Date();
-    return today.toISOString().split("T")[0];
-  });
-  const [isLoadingOrders, setIsLoadingOrders] = useState(false);
-  const [activeView, setActiveView] =
-    useState<OrderManagementView>(
-      settings?.orderManagement?.view || "placement",
-    );
-  const [outsideRth, setOutsideRth] = useState(false);
-  const [tif, setTif] = useState<TimeInForce>("day");
+  const priceInitializedRef = useRef(false);
 
-  // Backend timestamp for orders domain
-  const backendTimestamp = useBackendTimestamp('orders');
-
-  // Update symbol when selectedSymbol changes from sync
+  // ── Sync symbol from external selection ────────────────────────────────
   useEffect(() => {
-    if (selectedSymbol) {
-      setOrder((prev) => ({ ...prev, symbol: selectedSymbol }));
+    if (selectedSymbol && selectedSymbol !== form.symbol) {
+      setForm((p) => ({ ...p, symbol: selectedSymbol }));
+      priceInitializedRef.current = false;
     }
   }, [selectedSymbol]);
 
-  // Update view from settings
+  // ── Sync view from settings ────────────────────────────────────────────
   useEffect(() => {
     if (settings?.orderManagement?.view) {
       setActiveView(settings.orderManagement.view);
     }
   }, [settings?.orderManagement?.view]);
 
-  // Auto-load orders when switching to orders view
+  // ── Price from latest trade ────────────────────────────────────────────
+  const latestTrade = form.symbol
+    ? (symbolData[form.symbol]?.T as Trade | undefined) ?? null
+    : null;
+  const lastTradePrice = latestTrade?.price ?? null;
+
+  // Auto-sync price on first load
   useEffect(() => {
-    if (activeView === "orders" && orders.length === 0) {
-      fetchOrders();
+    if (lastTradePrice && !priceInitializedRef.current && form.order_type === 'LMT') {
+      const rounded = Math.round(lastTradePrice * 100) / 100;
+      setForm((p) => ({ ...p, limit_price: rounded, price: rounded }));
+      priceInitializedRef.current = true;
     }
-  }, [activeView]);
+  }, [lastTradePrice, form.order_type]);
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    console.log("Order submitted:", {
-      ...order,
-      outsideRth,
-      tif,
-    });
-    // Handle order submission logic here
-    alert(
-      `Order submitted: ${order.side.toUpperCase()} ${order.quantity} ${order.symbol} at ${order.type === "limit" ? "$" + order.price : "MARKET"}`,
-    );
+  const syncPriceFromTrade = () => {
+    if (lastTradePrice) {
+      const rounded = Math.round(lastTradePrice * 100) / 100;
+      setForm((p) => ({ ...p, limit_price: rounded, price: rounded }));
+    }
   };
 
-  const updateOrder = (updates: Partial<Order>) => {
-    setOrder({ ...order, ...updates });
-  };
-
+  // ── Handlers ───────────────────────────────────────────────────────────
   const handleViewChange = (view: OrderManagementView) => {
     setActiveView(view);
     onSettingsChange?.({ orderManagement: { view } });
+  };
 
-    // Auto-fetch orders when switching to orders view if not already loaded
-    if (view === "orders" && orders.length === 0) {
-      fetchOrders();
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await submitOrder(form, orderMode);
+  };
+
+  const handleCancel = async (orderId: number) => {
+    setCancellingIds((prev) => new Set(prev).add(orderId));
+    try {
+      await doCancelOrder(orderId, cancelReason);
+    } finally {
+      setCancellingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(orderId);
+        return next;
+      });
     }
   };
 
-  const fetchOrders = () => {
-    setIsLoadingOrders(true);
+  // ── Derived ────────────────────────────────────────────────────────────
+  const orders = Object.values(ordersById).sort((a, b) => b.order_id - a.order_id);
+  const bp = buyingPower();
+  const wsConnected = wsStatus === 'connected';
 
-    // Simulate API call to local database
-    setTimeout(() => {
-      const mockOrders = generateMockOrders(selectedDate);
-      setOrders(mockOrders);
-      setIsLoadingOrders(false);
-    }, 500);
-  };
-
-  const handleDateChange = (
-    e: React.ChangeEvent<HTMLInputElement>,
-  ) => {
-    setSelectedDate(e.target.value);
-  };
-
+  // ── Render ─────────────────────────────────────────────────────────────
   return (
     <div className="h-full flex flex-col bg-zinc-900">
-      {/* Content Area */}
-      <div className="flex-1 overflow-auto p-4">
-        {activeView === "placement" && (
-          <form onSubmit={handleSubmit} className="space-y-4">
-            {/* Symbol */}
-            <div>
-              <label className="block text-sm text-gray-400 mb-1">
-                Symbol
-              </label>
-              <input
-                type="text"
-                value={order.symbol}
-                onChange={(e) =>
-                  updateOrder({
-                    symbol: e.target.value.toUpperCase(),
-                  })
-                }
-                placeholder="AAPL"
-                className="w-full bg-black border border-zinc-700 px-3 py-2 text-sm focus:outline-none focus:border-white transition-colors"
-              />
-            </div>
+      {/* Connection header */}
+      <div className="px-3 py-1.5 border-b border-zinc-800 flex items-center justify-between text-xs text-gray-400">
+        <div className="flex items-center gap-2">
+          {wsConnected ? (
+            <Wifi className="w-3 h-3 text-green-500" />
+          ) : (
+            <WifiOff className="w-3 h-3 text-red-500" />
+          )}
+          <span>{restBaseUrl}</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={togglePrivacy}
+            className="p-0.5 hover:bg-zinc-700 rounded transition-colors"
+            title={privacyMode ? 'Show numbers' : 'Hide numbers'}
+          >
+            {privacyMode ? <EyeOff className="w-3.5 h-3.5 text-yellow-500" /> : <Eye className="w-3.5 h-3.5" />}
+          </button>
+          <span>
+            {wsStatus === 'connected' ? 'Connected' : wsStatus === 'error' ? 'Error' : 'Disconnected'}
+            {wsInfo ? ` (${wsInfo})` : ''}
+          </span>
+        </div>
+      </div>
 
-            {/* Side */}
-            <div>
-              <label className="block text-sm text-gray-400 mb-1">
-                Side
-              </label>
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => updateOrder({ side: "buy" })}
-                  className={`py-2 text-sm transition-colors ${
-                    order.side === "buy"
-                      ? "bg-green-600 text-white"
-                      : "bg-zinc-800 text-gray-400 hover:bg-zinc-700"
-                  }`}
-                >
-                  Buy
-                </button>
-                <button
-                  type="button"
-                  onClick={() => updateOrder({ side: "sell" })}
-                  className={`py-2 text-sm transition-colors ${
-                    order.side === "sell"
-                      ? "bg-red-600 text-white"
-                      : "bg-zinc-800 text-gray-400 hover:bg-zinc-700"
-                  }`}
-                >
-                  Sell
-                </button>
+      {/* Error banner */}
+      {error && (
+        <div className="px-3 py-1.5 bg-red-900/30 border-b border-red-800 text-xs text-red-300">
+          {error}
+        </div>
+      )}
+
+      {/* Content */}
+      <div className="flex-1 overflow-auto p-3">
+        {activeView === 'placement' && (
+          <form onSubmit={handleSubmit} className="space-y-3">
+            {/* Buying power */}
+            {bp !== null && (
+              <div className="text-xs text-gray-400 flex items-center gap-2">
+                Buying Power:{' '}
+                <span className="cursor-pointer" onClick={() => setShowBuyingPower((v) => !v)}>
+                  {privacyMode
+                    ? '••••'
+                    : showBuyingPower
+                      ? `$${bp.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+                      : '****'}
+                </span>
+              </div>
+            )}
+
+            {/* Row 1: Symbol + Action */}
+            <div className="grid grid-cols-3 gap-2">
+              <div className="col-span-2">
+                <label className="block text-xs text-gray-400 mb-0.5">Symbol</label>
+                <input
+                  className="w-full bg-black border border-zinc-700 px-2 py-1.5 text-sm focus:outline-none focus:border-white"
+                  value={form.symbol}
+                  onChange={(e) => setForm((p) => ({ ...p, symbol: e.target.value }))}
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-400 mb-0.5">Action</label>
+                <div className="grid grid-cols-2 gap-1">
+                  <button
+                    type="button"
+                    onClick={() => { setOrderMode('pct'); setForm((p) => ({ ...p, action: 'BUY', pct: 60 })); }}
+                    className={`py-1.5 text-xs ${form.action === 'BUY' ? 'bg-green-600' : 'bg-zinc-800 hover:bg-zinc-700 text-gray-400'}`}
+                  >
+                    BUY
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setOrderMode('pct'); setForm((p) => ({ ...p, action: 'SELL', pct: 100 })); }}
+                    className={`py-1.5 text-xs ${form.action === 'SELL' ? 'bg-red-600' : 'bg-zinc-800 hover:bg-zinc-700 text-gray-400'}`}
+                  >
+                    SELL
+                  </button>
+                </div>
               </div>
             </div>
 
-            {/* Type */}
-            <div>
-              <label className="block text-sm text-gray-400 mb-1">
-                Order Type
-              </label>
-              <select
-                value={order.type}
-                onChange={(e) =>
-                  updateOrder({
-                    type: e.target.value as "market" | "limit",
-                  })
-                }
-                className="w-full bg-black border border-zinc-700 px-3 py-2 text-sm focus:outline-none focus:border-white transition-colors"
-              >
-                <option value="market">Market</option>
-                <option value="limit">Limit</option>
-              </select>
-            </div>
-
-            {/* Quantity */}
-            <div>
-              <label className="block text-sm text-gray-400 mb-1">
-                Quantity
-              </label>
-              <input
-                type="number"
-                value={order.quantity}
-                onChange={(e) =>
-                  updateOrder({ quantity: e.target.value })
-                }
-                placeholder="100"
-                className="w-full bg-black border border-zinc-700 px-3 py-2 text-sm focus:outline-none focus:border-white transition-colors"
-              />
-            </div>
-
-            {/* Price (only for limit orders) */}
-            {order.type === "limit" && (
+            {/* Row 2: Mode + Qty/Pct + Type + TIF */}
+            <div className="grid grid-cols-4 gap-2">
               <div>
-                <label className="block text-sm text-gray-400 mb-1">
-                  Price
+                <label className="block text-xs text-gray-400 mb-0.5">Mode</label>
+                <select
+                  className="w-full bg-black border border-zinc-700 px-2 py-1.5 text-sm focus:outline-none"
+                  value={orderMode}
+                  onChange={(e) => setOrderMode(e.target.value as 'quantity' | 'pct')}
+                >
+                  <option value="quantity">Qty</option>
+                  <option value="pct">Pct %</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs text-gray-400 mb-0.5">
+                  {orderMode === 'quantity' ? 'Qty' : 'Pct %'}
                 </label>
-                <input
-                  type="number"
-                  step="0.01"
-                  value={order.price}
+                {orderMode === 'quantity' ? (
+                  <input
+                    className="w-full bg-black border border-zinc-700 px-2 py-1.5 text-sm focus:outline-none"
+                    type={privacyMode ? 'password' : 'number'}
+                    min={1}
+                    value={form.quantity ?? ''}
+                    onChange={(e) => setForm((p) => ({ ...p, quantity: e.target.value === '' ? null : Number(e.target.value) }))}
+                  />
+                ) : (
+                  <input
+                    className="w-full bg-black border border-zinc-700 px-2 py-1.5 text-sm focus:outline-none"
+                    type="number"
+                    min={1}
+                    max={100}
+                    step={1}
+                    value={form.pct ?? ''}
+                    onChange={(e) => setForm((p) => ({ ...p, pct: e.target.value === '' ? null : Number(e.target.value) }))}
+                    placeholder="1-100"
+                  />
+                )}
+              </div>
+
+              <div>
+                <label className="block text-xs text-gray-400 mb-0.5">Type</label>
+                <select
+                  className="w-full bg-black border border-zinc-700 px-2 py-1.5 text-sm focus:outline-none"
+                  value={form.order_type}
                   onChange={(e) =>
-                    updateOrder({ price: e.target.value })
+                    setForm((p) => ({
+                      ...p,
+                      order_type: e.target.value as 'MKT' | 'LMT',
+                      limit_price: e.target.value === 'LMT' ? p.limit_price : null,
+                    }))
                   }
-                  placeholder="150.00"
-                  className="w-full bg-black border border-zinc-700 px-3 py-2 text-sm focus:outline-none focus:border-white transition-colors"
+                >
+                  <option value="MKT">MKT</option>
+                  <option value="LMT">LMT</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs text-gray-400 mb-0.5">TIF</label>
+                <select
+                  className="w-full bg-black border border-zinc-700 px-2 py-1.5 text-sm focus:outline-none"
+                  value={form.tif}
+                  onChange={(e) => setForm((p) => ({ ...p, tif: e.target.value }))}
+                >
+                  <option value="DAY">DAY</option>
+                  <option value="GTC">GTC</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Limit price (only for LMT) */}
+            {form.order_type === 'LMT' && (
+              <div>
+                <div className="flex items-center gap-2 mb-1">
+                  <label className="text-xs text-gray-400">Limit Price</label>
+                  <button
+                    type="button"
+                    disabled={loading || !lastTradePrice}
+                    onClick={syncPriceFromTrade}
+                    className="px-2 py-0.5 text-[10px] bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40"
+                  >
+                    ↻ Sync
+                  </button>
+                  {lastTradePrice && (
+                    <span className="text-[10px] text-gray-500">
+                      (Last: ${lastTradePrice.toFixed(2)})
+                    </span>
+                  )}
+                </div>
+                <PriceInput
+                  value={form.limit_price ?? null}
+                  onChange={(v) => setForm((p) => ({ ...p, limit_price: v }))}
+                  disabled={loading}
                 />
               </div>
             )}
 
-            {/* Time In Force */}
-            <div>
-              <label className="block text-sm text-gray-400 mb-1">
-                Time In Force (TIF)
-              </label>
-              <select
-                value={tif}
-                onChange={(e) =>
-                  setTif(e.target.value as TimeInForce)
-                }
-                className="w-full bg-black border border-zinc-700 px-3 py-2 text-sm focus:outline-none focus:border-white transition-colors"
-              >
-                <option value="day">Day</option>
-                <option value="gtc">
-                  Good 'Til Canceled (GTC)
-                </option>
-                <option value="ioc">
-                  Immediate or Cancel (IOC)
-                </option>
-                <option value="fok">Fill or Kill (FOK)</option>
-              </select>
-            </div>
-
             {/* Outside RTH */}
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={Boolean(form.OutsideRth)}
+                onChange={(e) => setForm((p) => ({ ...p, OutsideRth: e.target.checked }))}
+                className="w-3.5 h-3.5"
+              />
+              <span className="text-xs text-gray-400">Outside Regular Trading Hours</span>
+            </label>
+
+            {/* Reason */}
             <div>
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={outsideRth}
-                  onChange={(e) =>
-                    setOutsideRth(e.target.checked)
-                  }
-                  className="w-4 h-4"
-                />
-                <span className="text-sm text-gray-400">
-                  Allow Outside Regular Trading Hours
-                </span>
-              </label>
+              <label className="block text-xs text-gray-400 mb-0.5">Reason (optional)</label>
+              <input
+                className="w-full bg-black border border-zinc-700 px-2 py-1.5 text-sm focus:outline-none focus:border-zinc-500"
+                value={String(form.reason ?? '')}
+                onChange={(e) => setForm((p) => ({ ...p, reason: e.target.value }))}
+                placeholder="e.g. Rebalance / manual test / strategy-xyz"
+              />
             </div>
 
-            {/* Submit Button */}
-            <button
-              type="submit"
-              className={`w-full py-3 text-sm transition-colors ${
-                order.side === "buy"
-                  ? "bg-green-600 hover:bg-green-700"
-                  : "bg-red-600 hover:bg-red-700"
-              } text-white`}
-            >
-              Place {order.side === "buy" ? "Buy" : "Sell"}{" "}
-              Order
-            </button>
+            {/* Submit */}
+            <div className="flex gap-2">
+              <button
+                type="submit"
+                disabled={loading}
+                className={`flex-1 py-2 text-sm transition-colors ${
+                  form.action === 'BUY'
+                    ? 'bg-green-600 hover:bg-green-700'
+                    : 'bg-red-600 hover:bg-red-700'
+                } disabled:opacity-50`}
+              >
+                {loading ? 'Working...' : `Place ${form.action} Order`}
+              </button>
+              <button
+                type="button"
+                disabled={loading}
+                onClick={() => loadInitial()}
+                className="px-3 py-2 text-sm bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50"
+              >
+                <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+              </button>
+            </div>
           </form>
         )}
 
-        {activeView === "orders" && (
-          <>
-            {/* Orders Controls */}
-            <div className="mb-4">
-              <div className="flex items-center justify-between mb-2">
-                <div className="text-xs text-gray-500">
-                  Updated: {backendTimestamp}
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="flex items-center gap-2 flex-1">
-                  <Calendar className="w-4 h-4 text-gray-500" />
-                  <input
-                    type="date"
-                    value={selectedDate}
-                    onChange={handleDateChange}
-                    className="px-3 py-1.5 bg-zinc-800 border border-zinc-700 text-sm focus:outline-none focus:border-zinc-600"
-                  />
-                </div>
-                <button
-                  onClick={fetchOrders}
-                  disabled={isLoadingOrders}
-                  className="flex items-center gap-2 px-4 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:bg-zinc-700 disabled:cursor-not-allowed transition-colors text-sm"
-                >
-                  <RefreshCw
-                    className={`w-4 h-4 ${isLoadingOrders ? "animate-spin" : ""}`}
-                  />
-                  {isLoadingOrders ? "Loading..." : "Refresh"}
-                </button>
-              </div>
+        {activeView === 'orders' && (
+          <div>
+            {/* Cancel reason input */}
+            <div className="mb-3">
+              <label className="block text-xs text-gray-400 mb-0.5">Cancel reason (optional)</label>
+              <input
+                className="w-full bg-black border border-zinc-700 px-2 py-1.5 text-sm focus:outline-none focus:border-zinc-500"
+                value={cancelReason}
+                onChange={(e) => setCancelReason(e.target.value)}
+                placeholder="Used when clicking Cancel"
+              />
             </div>
 
-            {/* Orders Table */}
+            {/* Refresh button */}
+            <div className="flex justify-between items-center mb-2">
+              <span className="text-xs text-gray-500">Orders: {orders.length}</span>
+              <button
+                onClick={() => loadInitial()}
+                disabled={loading}
+                className="flex items-center gap-1 px-3 py-1 text-xs bg-blue-600 hover:bg-blue-700 disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
+                Refresh
+              </button>
+            </div>
+
+            {/* Orders table */}
             <div className="overflow-x-auto">
               <table className="w-full text-xs">
                 <thead className="sticky top-0 bg-zinc-800 border-b border-zinc-700">
                   <tr>
-                    <th className="text-left p-2 text-gray-400">
-                      Symbol
-                    </th>
-                    <th className="text-left p-2 text-gray-400">
-                      Side
-                    </th>
-                    <th className="text-left p-2 text-gray-400">
-                      Type
-                    </th>
-                    <th className="text-right p-2 text-gray-400">
-                      Qty
-                    </th>
-                    <th className="text-right p-2 text-gray-400">
-                      Filled
-                    </th>
-                    <th className="text-right p-2 text-gray-400">
-                      Price
-                    </th>
-                    <th className="text-left p-2 text-gray-400">
-                      Status
-                    </th>
-                    <th className="text-center p-2 text-gray-400">
-                      RTH
-                    </th>
-                    <th className="text-left p-2 text-gray-400">
-                      TIF
-                    </th>
-                    <th className="text-left p-2 text-gray-400">
-                      Submitted
-                    </th>
-                    <th className="text-left p-2 text-gray-400">
-                      Filled At
-                    </th>
+                    {['ID', 'Symbol', 'Action', 'Type', 'LmtPx', 'Status', 'Filled', 'Rem', 'AvgPx', 'Comm', ''].map(
+                      (h) => (
+                        <th key={h} className="text-left p-1.5 text-gray-400 whitespace-nowrap">
+                          {h}
+                        </th>
+                      ),
+                    )}
                   </tr>
                 </thead>
                 <tbody>
-                  {orders.length === 0 && !isLoadingOrders && (
+                  {orders.map((o) => {
+                    const cancelable = canCancelOrder(o.status);
+                    return (
+                      <tr key={o.order_id} className="border-b border-zinc-800 hover:bg-zinc-800/50">
+                        <td className="p-1.5">{o.order_id}</td>
+                        <td className="p-1.5">{o.symbol ?? '—'}</td>
+                        <td className="p-1.5">
+                          <span className={o.action === 'BUY' ? 'text-green-500' : 'text-red-500'}>
+                            {o.action ?? '—'}
+                          </span>
+                        </td>
+                        <td className="p-1.5 text-gray-400">{o.order_type ?? '—'}</td>
+                        <td className="p-1.5">
+                          {privacyMode
+                            ? '••••'
+                            : o.order_type === 'LMT' && o.limit_price != null
+                              ? `$${Number(o.limit_price).toFixed(2)}`
+                              : '—'}
+                        </td>
+                        <td className="p-1.5">{o.status}</td>
+                        <td className="p-1.5">{privacyMode ? '••••' : o.filled}</td>
+                        <td className="p-1.5">{privacyMode ? '••••' : o.remaining}</td>
+                        <td className="p-1.5">{privacyMode ? '••••' : (o.avg_fill_price ?? '—')}</td>
+                        <td className="p-1.5">{privacyMode ? '••••' : (o.commission ?? '—')}</td>
+                        <td className="p-1.5">
+                          {(() => {
+                            const isCancelling = cancellingIds.has(o.order_id);
+                            const isPending = o.status?.toLowerCase() === 'pendingcancel';
+                            if (isCancelling || isPending) {
+                              return (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-gray-500">
+                                  <RefreshCw className="w-3 h-3 animate-spin" />
+                                  Cancelling…
+                                </span>
+                              );
+                            }
+                            if (!cancelable) return null;
+                            return (
+                              <button
+                                onClick={() => handleCancel(o.order_id)}
+                                className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded
+                                  bg-red-600 hover:bg-red-500 active:bg-red-700
+                                  border-none outline-none focus:outline-none
+                                  text-white shadow-sm shadow-red-900/50
+                                  transition-all duration-100"
+                              >
+                                <X className="w-3 h-3" />
+                                Cancel
+                              </button>
+                            );
+                          })()}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {orders.length === 0 && (
                     <tr>
-                      <td
-                        colSpan={11}
-                        className="text-center text-gray-500 py-8"
-                      >
-                        No orders found for {selectedDate}
+                      <td colSpan={11} className="text-center text-gray-500 py-6">
+                        No orders yet
                       </td>
                     </tr>
                   )}
-
-                  {orders.map((order) => (
-                    <tr
-                      key={order.id}
-                      className="border-b border-zinc-800 hover:bg-zinc-800/50 transition-colors"
-                    >
-                      <td className="p-2">{order.symbol}</td>
-                      <td className="p-2">
-                        <span
-                          className={
-                            order.side === "buy"
-                              ? "text-green-500"
-                              : "text-red-500"
-                          }
-                        >
-                          {order.side.toUpperCase()}
-                        </span>
-                      </td>
-                      <td className="p-2 text-gray-400">
-                        {order.orderType}
-                      </td>
-                      <td className="p-2 text-right">
-                        {order.quantity}
-                      </td>
-                      <td className="p-2 text-right">
-                        {order.filledQuantity > 0
-                          ? order.filledQuantity
-                          : "-"}
-                      </td>
-                      <td className="p-2 text-right">
-                        ${order.price.toFixed(2)}
-                      </td>
-                      <td className="p-2">
-                        <span
-                          className={`px-2 py-0.5 ${getStatusColor(order.status)} rounded text-xs`}
-                        >
-                          {order.status}
-                        </span>
-                      </td>
-                      <td className="p-2 text-center">
-                        {order.outsideRth ? "✓" : "✗"}
-                      </td>
-                      <td className="p-2 text-gray-400">
-                        {order.tif.toUpperCase()}
-                      </td>
-                      <td className="p-2 text-gray-400 text-xs whitespace-nowrap">
-                        {formatTimestampET(order.submittedAt)}
-                      </td>
-                      <td className="p-2 text-gray-400 text-xs whitespace-nowrap">
-                        {order.filledAt
-                          ? formatTimestampET(order.filledAt)
-                          : "-"}
-                      </td>
-                    </tr>
-                  ))}
                 </tbody>
               </table>
             </div>
-          </>
+          </div>
         )}
       </div>
     </div>

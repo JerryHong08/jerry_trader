@@ -369,193 +369,98 @@ export const MINIMAL_TEMPLATE: LayoutTemplate = {
   ],
 };
 
-// Template 3: Test-Layout
-export const Test_TEMPLATE: LayoutTemplate = {
-  id: "test layout",
-  name: "Test-Layout",
-  description: "test layout for my laptop.",
+// Template 3: Trade-Layout
+export const Trade_TEMPLATE: LayoutTemplate = {
+  id: "trade layout",
+  name: "Trade-Layout",
+  description: "trade layout for my laptop.",
   layout: [
-    {
-      "id": "order-1",
-      "moduleType": "order-management",
-      "position": {
-        "x": 10,
-        "y": 350
-      },
-      "size": {
-        "width": 360,
-        "height": 630
-      },
-      "syncGroup": "group-1",
-      "settings": {
-        "orderManagement": {
-          "view": "placement"
-        }
-      }
+  {
+    "id": "order-1",
+    "moduleType": "order-management",
+    "position": {
+      "x": 760,
+      "y": 0
     },
-    {
-      "id": "rank-1",
-      "moduleType": "rank-list",
-      "position": {
-        "x": 380,
-        "y": 350
-      },
-      "size": {
-        "width": 1000,
-        "height": 840
-      },
-      "syncGroup": "group-1",
-      "settings": {
-        "rankList": {
-          "sortColumn": "changePercent",
-          "sortDirection": "desc",
-          "visibleColumns": [
-            "news",
-            "price",
-            "changePercent",
-            "volume",
-            "float",
-            "relativeVolumeDaily",
-            "relativeVolume5min",
-            "marketCap",
-            "vwap",
-            "state",
-            "symbol"
-          ],
-          "columnWidths": {
-            "#": 50,
-            "symbol": 50,
-            "state": 99,
-            "news": 50,
-            "price": 50,
-            "change": 50,
-            "changePercent": 110,
-            "volume": 50,
-            "float": 50,
-            "relativeVolumeDaily": 108,
-            "relativeVolume5min": 110,
-            "vwap": 50,
-            "marketCap": 110
-          },
-          "columnOrder": [
-            "symbol",
-            "state",
-            "news",
-            "price",
-            "vwap",
-            "changePercent",
-            "float",
-            "change",
-            "volume",
-            "relativeVolumeDaily",
-            "relativeVolume5min",
-            "marketCap"
-          ]
-        }
-      }
+    "size": {
+      "width": 350,
+      "height": 620
     },
-    {
-      "id": "stock-detail-1",
-      "moduleType": "stock-detail",
-      "position": {
-        "x": 10,
-        "y": 990
-      },
-      "size": {
-        "width": 360,
-        "height": 1450
-      },
-      "syncGroup": "group-1",
-      "settings": {
-        "stockDetail": {
-          "view": "fundamentals"
-        }
-      }
-    },
-    {
-      "id": "order-management-2",
-      "moduleType": "order-management",
-      "position": {
-        "x": 630,
-        "y": 0
-      },
-      "size": {
-        "width": 750,
-        "height": 340
-      },
-      "syncGroup": "group-5",
-      "settings": {
-        "orderManagement": {
-          "view": "orders"
-        }
-      }
-    },
-    {
-      "id": "portfolio-1767513971231",
-      "moduleType": "portfolio",
-      "position": {
-        "x": 10,
-        "y": 0
-      },
-      "size": {
-        "width": 610,
-        "height": 340
-      },
-      "syncGroup": "group-5"
-    },
-    {
-      "id": "overview-chart-1768823876522",
-      "moduleType": "overview-chart",
-      "position": {
-        "x": 380,
-        "y": 1200
-      },
-      "size": {
-        "width": 1000,
-        "height": 680
-      },
-      "syncGroup": "group-1",
-      "settings": {
-        "overviewChart": {
-          "selectedStates": [
-            "Best",
-            "Good",
-            "OnWatch",
-            "NotGood",
-            "Bad"
-          ],
-          "focusMode": true,
-          "timeRange": "30m"
-        }
-      }
-    },
-    {
-      "id": "overview-chart-1768826532211",
-      "moduleType": "overview-chart",
-      "position": {
-        "x": 380,
-        "y": 1890
-      },
-      "size": {
-        "width": 1000,
-        "height": 550
-      },
-      "syncGroup": "group-1",
-      "settings": {
-        "overviewChart": {
-          "selectedStates": [
-            "Best",
-            "Good",
-            "OnWatch",
-            "NotGood",
-            "Bad"
-          ],
-          "focusMode": false,
-          "timeRange": "30m"
-        }
+    "syncGroup": "group-2",
+    "settings": {
+      "orderManagement": {
+        "view": "placement"
       }
     }
-  ],
+  },
+  {
+    "id": "stock-detail-1",
+    "moduleType": "stock-detail",
+    "position": {
+      "x": 1120,
+      "y": 0
+    },
+    "size": {
+      "width": 550,
+      "height": 620
+    },
+    "syncGroup": "group-2",
+    "settings": {
+      "stockDetail": {
+        "view": "fundamentals"
+      }
+    }
+  },
+  {
+    "id": "chart-2",
+    "moduleType": "chart",
+    "position": {
+      "x": 0,
+      "y": 400
+    },
+    "size": {
+      "width": 750,
+      "height": 520
+    },
+    "syncGroup": "group-2",
+    "settings": {
+      "chart": {
+        "timeframe": "1m"
+      }
+    }
+  },
+  {
+    "id": "portfolio-1767537783678",
+    "moduleType": "portfolio",
+    "position": {
+      "x": 0,
+      "y": 0
+    },
+    "size": {
+      "width": 750,
+      "height": 390
+    },
+    "syncGroup": "group-2"
+  },
+  {
+    "id": "order-management-1772196836934",
+    "moduleType": "order-management",
+    "position": {
+      "x": 760,
+      "y": 630
+    },
+    "size": {
+      "width": 910,
+      "height": 290
+    },
+    "syncGroup": "group-2",
+    "settings": {
+      "orderManagement": {
+        "view": "orders"
+      }
+    }
+    }
+  ]
 };
 
 // Export all templates as a Record (object) instead of array
@@ -563,7 +468,7 @@ export const LAYOUT_TEMPLATES: Record<string, LayoutTemplate> =
   {
     "default-trading": DEFAULT_TRADING_TEMPLATE,
     "minimal layout": MINIMAL_TEMPLATE,
-    "test layout": Test_TEMPLATE,
+    "trade layout": Trade_TEMPLATE,
   };
 
 // Get all templates as an array for UI rendering

@@ -11,10 +11,10 @@ import time
 
 import numpy as np
 
-from .dataset import build_feature_matrix, split_dataset
-from .evaluate import evaluate_model, run_inference_demo
-from .mock_data import FEATURE_COLS, generate_mock_dataset
-from .model import create_model, predict, save_model
+from MachineLearning.dataset import build_feature_matrix, split_dataset
+from MachineLearning.evaluate import evaluate_model, run_inference_demo
+from MachineLearning.mock_data import FEATURE_COLS, generate_mock_dataset
+from MachineLearning.model import create_model, predict, save_model
 
 
 # ── core training step ───────────────────────────────────────────────────────

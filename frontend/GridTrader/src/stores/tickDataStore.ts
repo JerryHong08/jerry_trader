@@ -1,0 +1,235 @@
+/**
+ * TickData Zustand Store
+ *
+ * Manages the TickDataServer WebSocket (wsl2 machine, default port 8000).
+ * Provides real-time quote (Q) and trade (T) data for:
+ *   - OrderBook / quote display
+ *   - ChartModule (real-time line chart)
+ *
+ * The WebSocket protocol matches OrderTrader's existing implementation:
+ *   subscribe:   { subscriptions: [{ symbol, events: ["Q","T"] }] }
+ *   unsubscribe: { action: "unsubscribe", symbol, events: ["Q","T"] }
+ *   messages:    { event_type: "Q"|"T", symbol, ...fields }
+ */
+
+import { create } from 'zustand';
+
+// ============================================================================
+// Types
+// ============================================================================
+
+export interface Quote {
+  symbol: string;
+  bid: number;
+  ask: number;
+  bid_size: number;
+  ask_size: number;
+  timestamp: number;
+}
+
+export interface Trade {
+  symbol: string;
+  price: number;
+  size: number;
+  timestamp: number;
+}
+
+export type SymbolData = Record<
+  string,
+  Partial<Record<'Q' | 'T', Quote | Trade>>
+>;
+
+type TickDataState = {
+  // Data
+  symbols: string[];
+  symbolData: SymbolData;
+  perSymbolEvents: Record<string, string[]>;
+
+  // Connection
+  connected: boolean;
+
+  // Derived
+  getLatestTrade: (symbol: string) => Trade | null;
+  getLatestQuote: (symbol: string) => Quote | null;
+
+  // Actions
+  init: () => void;
+  dispose: () => void;
+  addSymbols: (newSyms: string[], events: string[]) => void;
+  removeSymbol: (symbol: string) => void;
+};
+
+// ============================================================================
+// Config
+// ============================================================================
+
+function getTickDataWsUrl(): string {
+  const defaultHost =
+    typeof window !== 'undefined' ? window.location.hostname : 'localhost';
+  const base =
+    (import.meta.env.VITE_TICKDATA_URL as string | undefined) ??
+    `http://${defaultHost}:8000`;
+  const url = new URL(base);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  url.pathname = '/ws/tickdata';
+  url.search = '';
+  url.hash = '';
+  return url.toString();
+}
+
+// ============================================================================
+// Persistent state helpers (localStorage)
+// ============================================================================
+
+function loadSymbols(): string[] {
+  try {
+    const saved = localStorage.getItem('tickdata-symbols');
+    return saved ? JSON.parse(saved) : [];
+  } catch {
+    return [];
+  }
+}
+
+function loadPerSymbolEvents(): Record<string, string[]> {
+  try {
+    const saved = localStorage.getItem('tickdata-perSymbolEvents');
+    return saved ? JSON.parse(saved) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveSymbols(symbols: string[]) {
+  localStorage.setItem('tickdata-symbols', JSON.stringify(symbols));
+}
+
+function savePerSymbolEvents(events: Record<string, string[]>) {
+  localStorage.setItem('tickdata-perSymbolEvents', JSON.stringify(events));
+}
+
+// ============================================================================
+// Store
+// ============================================================================
+
+let ws: WebSocket | null = null;
+
+export const useTickDataStore = create<TickDataState>()((set, get) => ({
+  symbols: loadSymbols(),
+  symbolData: {},
+  perSymbolEvents: loadPerSymbolEvents(),
+  connected: false,
+
+  // Derived
+  getLatestTrade: (symbol: string) => {
+    const d = get().symbolData[symbol]?.T;
+    return d ? (d as Trade) : null;
+  },
+
+  getLatestQuote: (symbol: string) => {
+    const d = get().symbolData[symbol]?.Q;
+    return d ? (d as Quote) : null;
+  },
+
+  // ========================================================================
+  // Lifecycle
+  // ========================================================================
+
+  init: () => {
+    ws?.close();
+
+    const wsUrl = getTickDataWsUrl();
+    const socket = new WebSocket(wsUrl);
+    ws = socket;
+
+    socket.onopen = () => {
+      console.log('✅ TickData WS connected');
+      set({ connected: true });
+
+      // Re-subscribe saved symbols
+      const { symbols, perSymbolEvents } = get();
+      if (symbols.length > 0) {
+        const subs = symbols.map((s) => ({
+          symbol: s,
+          events: perSymbolEvents[s] || ['Q', 'T'],
+        }));
+        socket.send(JSON.stringify({ subscriptions: subs }));
+      }
+    };
+
+    socket.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      const ev = data.event_type as 'Q' | 'T';
+      const sym = data.symbol as string;
+
+      set((s) => {
+        const prevSym = s.symbolData[sym] || {};
+        return {
+          symbolData: {
+            ...s.symbolData,
+            [sym]: { ...prevSym, [ev]: data },
+          },
+        };
+      });
+    };
+
+    socket.onclose = () => {
+      console.log('❌ TickData WS disconnected');
+      set({ connected: false });
+    };
+
+    socket.onerror = () => {
+      set({ connected: false });
+    };
+  },
+
+  dispose: () => {
+    ws?.close();
+    ws = null;
+    set({ connected: false });
+  },
+
+  addSymbols: (newSyms, events) => {
+    const { symbols, perSymbolEvents } = get();
+    const merged = Array.from(new Set([...symbols, ...newSyms]));
+
+    const newPer = { ...perSymbolEvents };
+    newSyms.forEach((s) => {
+      newPer[s] = events;
+    });
+
+    set({ symbols: merged, perSymbolEvents: newPer });
+    saveSymbols(merged);
+    savePerSymbolEvents(newPer);
+
+    // Send subscribe
+    const subs = newSyms.map((s) => ({ symbol: s, events }));
+    if (subs.length > 0 && ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ subscriptions: subs }));
+    }
+  },
+
+  removeSymbol: (symbol) => {
+    const { symbols, perSymbolEvents, symbolData } = get();
+    const updated = symbols.filter((s) => s !== symbol);
+    const events = perSymbolEvents[symbol] || ['Q'];
+
+    // Send unsubscribe
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ action: 'unsubscribe', symbol, events }));
+    }
+
+    const newPer = { ...perSymbolEvents };
+    delete newPer[symbol];
+
+    const newData = { ...symbolData };
+    delete newData[symbol];
+
+    set({
+      symbols: updated,
+      perSymbolEvents: newPer,
+      symbolData: newData,
+    });
+    saveSymbols(updated);
+    savePerSymbolEvents(newPer);
+  },
+}));

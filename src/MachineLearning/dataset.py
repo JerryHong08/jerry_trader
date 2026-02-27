@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
-from .mock_data import FEATURE_COLS, LABEL_COL
+from MachineLearning.mock_data import FEATURE_COLS, LABEL_COL
 
 
 # ── schema dataclass (for documentation / type-safety) ───────────────────────

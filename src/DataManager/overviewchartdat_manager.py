@@ -31,7 +31,12 @@ from utils.redis_keys import (
     movers_subscribed_set,
     state_cursor,
 )
-from utils.session import db_date_to_date, make_session_id, parse_session_id
+from utils.session import (
+    db_date_to_date,
+    make_session_id,
+    parse_session_id,
+    session_to_influx_tags,
+)
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
 
@@ -192,12 +197,14 @@ class GridTraderChartDataManager:
         else:
             range_start, range_end = self._get_intraday_time_range()
 
+        date_tag, mode_tag = session_to_influx_tags(self.session_id)
         query = f"""
         from(bucket: "{self.bucket}")
             |> range(start: {range_start}, stop: {range_end})
             |> filter(fn: (r) => r["_measurement"] == "market_snapshot")
             |> filter(fn: (r) => r["symbol"] == "{ticker}")
-            |> filter(fn: (r) => r["session_id"] == "{self.session_id}")
+            |> filter(fn: (r) => r["date"] == "{date_tag}")
+            |> filter(fn: (r) => r["mode"] == "{mode_tag}")
             |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
             |> sort(columns: ["_time"])
         """
@@ -228,12 +235,14 @@ class GridTraderChartDataManager:
         """
         range_start, range_end = self._get_intraday_time_range()
 
+        date_tag, mode_tag = session_to_influx_tags(self.session_id)
         query = f"""
         from(bucket: "{self.bucket}")
             |> range(start: {range_start}, stop: {range_end})
             |> filter(fn: (r) => r["_measurement"] == "movers_state")
             |> filter(fn: (r) => r["symbol"] == "{ticker}")
-            |> filter(fn: (r) => r["session_id"] == "{self.session_id}")
+            |> filter(fn: (r) => r["date"] == "{date_tag}")
+            |> filter(fn: (r) => r["mode"] == "{mode_tag}")
             |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
             |> sort(columns: ["_time"])
         """

@@ -772,13 +772,15 @@ class SnapshotProcessor:
             f"(range: {range_start} to {range_end})..."
         )
 
+        date_tag, mode_tag = session_to_influx_tags(self.session_id)
         for ticker in subscribed:
             query = f"""
             from(bucket: "{self.bucket}")
                 |> range(start: {range_start}, stop: {range_end})
                 |> filter(fn: (r) => r["_measurement"] == "market_snapshot")
                 |> filter(fn: (r) => r["symbol"] == "{ticker}")
-                |> filter(fn: (r) => r["session_id"] == "{self.session_id}")
+                |> filter(fn: (r) => r["date"] == "{date_tag}")
+                |> filter(fn: (r) => r["mode"] == "{mode_tag}")
                 |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
                 |> sort(columns: ["_time"], desc: false)
             """

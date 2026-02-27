@@ -1,6 +1,6 @@
 [project]
 name = "jerryib_trade"
-version = "0.1.0"
+version = "0.2.0"
 description = ""
 authors = [
     {name = "JerryHong",email = "huntcamilla06@gmail.com"}
@@ -48,7 +48,7 @@ isort = "^7.0.0"
 name = "cz_conventional_commits"
 tag_format = "$version"
 version_scheme = "semver"
-version_provider = "poetry"
+version_provider = "pep621"
 update_changelog_on_bump = true
 major_version_zero = true
 

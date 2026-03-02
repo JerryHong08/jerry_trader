@@ -33,9 +33,6 @@ from OrderManagement.models.event_models import (
 from OrderManagement.services.database_service import DatabaseService
 from OrderManagement.services.order_service import OrderService
 from OrderManagement.services.portfolio_service import PortfolioService
-from RiskManagement.api.routes_risk import init_risk_manager
-from RiskManagement.api.routes_risk import router as risk_router
-from RiskManagement.risk_manager import RiskManager
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__, log_to_file=True)
@@ -82,7 +79,6 @@ ib_gateway: IBGateway = None
 order_service: OrderService = None
 portfolio_service: PortfolioService = None
 database_service: DatabaseService | None = None
-risk_manager: RiskManager | None = None
 websocket_clients: Set[WebSocket] = set()
 
 
@@ -91,7 +87,7 @@ async def lifespan(app: FastAPI):
     """
     lifespan for app start and disconnect
     """
-    global ib_gateway, order_service, portfolio_service, database_service, risk_manager
+    global ib_gateway, order_service, portfolio_service, database_service
 
     logger.info("🚀 Starting IBKR Bot API Server")
 
@@ -111,16 +107,6 @@ async def lifespan(app: FastAPI):
     init_order_service(order_service)
     init_portfolio_service(portfolio_service)
     logger.info("✅ Services initialized and subscribed to events")
-
-    # 2.3 Initialize RiskManager (subscribes to fill events via EventBus)
-    async def _broadcast_pnl(msg: dict):
-        """Push PnL updates to all WebSocket clients."""
-        await broadcast_to_websockets("pnl_update", msg)
-
-    risk_manager = RiskManager(broadcast_callback=_broadcast_pnl)
-    risk_manager.start()
-    init_risk_manager(risk_manager)
-    logger.info("lifespan - ✅ RiskManager initialized and listening for fills")
 
     # 2.5 Optional: database persistence (best-effort)
     database_url = os.getenv("LOCAL_DATABASE_URL")
@@ -246,8 +232,6 @@ async def lifespan(app: FastAPI):
 
     # shut down and clean up, disconnect from the ibkr.
     logger.info("\nlifespan - 🛑 Shutting down...")
-    if risk_manager:
-        risk_manager.stop()
     if database_service:
         try:
             database_service.unsubscribe()
@@ -283,7 +267,6 @@ app.add_middleware(
 
 app.include_router(orders_router, prefix="/orders")
 app.include_router(portfolio_router, prefix="/portfolio")
-app.include_router(risk_router, prefix="/risk")
 
 
 # ===== 基础路由 =====
@@ -369,7 +352,6 @@ def start_server(host="0.0.0.0", port=8888):
     print(f"\n🌐 Starting server on http://{host}:{port}")
     print(f"📚 API Documentation: http://{host}:{port}/docs")
     print(f"🔌 WebSocket: ws://{host}:{port}/ws\n")
-    print(f"📊 Risk PnL: http://{host}:{port}/risk/pnl\n")
 
     uvicorn.run(
         app,

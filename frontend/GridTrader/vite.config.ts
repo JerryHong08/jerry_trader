@@ -58,4 +58,5 @@
       open: true,
       hmr: false,
     },
+    base: '/jerryib_trader/',
   });

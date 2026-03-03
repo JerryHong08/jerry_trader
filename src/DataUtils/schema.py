@@ -89,6 +89,38 @@ class FloatShares(BaseModel):
     )
 
 
+# Canonical Polars schema for processed snapshot DataFrames.
+# All numeric columns are pinned to Float64 so that concat / vertical
+# operations never hit Int64-vs-Float64 mismatches (e.g. changePercent=0
+# being inferred as Int64 by pl.read_json).
+SNAPSHOT_NUMERIC_SCHEMA: Dict[str, pl.DataType] = {
+    "changePercent": pl.Float64,
+    "volume": pl.Float64,
+    "price": pl.Float64,
+    "prev_close": pl.Float64,
+    "prev_volume": pl.Float64,
+    "vwap": pl.Float64,
+    "bid": pl.Float64,
+    "ask": pl.Float64,
+    "bid_size": pl.Float64,
+    "ask_size": pl.Float64,
+}
+
+
+def enforce_snapshot_schema(df: pl.DataFrame) -> pl.DataFrame:
+    """Cast columns to the canonical SNAPSHOT_NUMERIC_SCHEMA types.
+
+    Normalises an incoming DataFrame so that downstream concat / vertical
+    operations never hit schema mismatches.
+    """
+    casts = {
+        col: dtype
+        for col, dtype in SNAPSHOT_NUMERIC_SCHEMA.items()
+        if col in df.columns and df.schema[col] != dtype
+    }
+    return df.cast(casts) if casts else df
+
+
 class SnapshotMessage(BaseModel):
     ticker: str = Field(..., description="Stock ticker symbol")
     changePercent: float = Field(

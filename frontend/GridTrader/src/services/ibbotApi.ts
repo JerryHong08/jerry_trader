@@ -21,7 +21,7 @@ export function getIbbotBaseUrl(): string {
   const defaultHost =
     typeof window !== 'undefined' ? window.location.hostname : 'localhost';
   return (
-    (import.meta.env.VITE_IBBOT_URL as string | undefined) ??
+    (import.meta.env.VITE_IBBOT_URL as string | undefined) ||
     `http://${defaultHost}:8888`
   );
 }

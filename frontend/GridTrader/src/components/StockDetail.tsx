@@ -13,9 +13,11 @@ const patchStaticData = (symbol: string, data: { float?: number; marketCap?: num
 
 // Configuration - use Vite env variable or default
 const BFF_HTTP_URL =
-  typeof import.meta !== 'undefined' && import.meta.env?.VITE_BFF_URL
+  (typeof import.meta !== 'undefined' && import.meta.env?.VITE_BFF_URL)
     ? (import.meta.env.VITE_BFF_URL as string)
     : 'http://localhost:5001';
+// Fallback for empty string from .env.ghpages
+const BFF_URL = BFF_HTTP_URL || 'http://localhost:5001';
 
 interface StockFundamentals {
   symbol: string;
@@ -52,7 +54,7 @@ interface BackendNewsArticle {
 // Fetch stock profile from backend
 const fetchStockProfile = async (symbol: string): Promise<StockFundamentals | null> => {
   try {
-    const response = await fetch(`${BFF_HTTP_URL}/api/stock/${symbol}/profile`);
+    const response = await fetch(`${BFF_URL}/api/stock/${symbol}/profile`);
     if (!response.ok) {
       console.warn(`Failed to fetch profile for ${symbol}: ${response.status}`);
       return null;
@@ -79,7 +81,7 @@ const fetchStockNews = async (
   refresh: boolean = false
 ): Promise<{ articles: NewsArticle[]; queued: boolean }> => {
   try {
-    const url = `${BFF_HTTP_URL}/api/stock/${symbol}/news?limit=${limit}${refresh ? '&refresh=true' : ''}`;
+    const url = `${BFF_URL}/api/stock/${symbol}/news?limit=${limit}${refresh ? '&refresh=true' : ''}`;
     const response = await fetch(url);
     if (!response.ok) {
       console.warn(`Failed to fetch news for ${symbol}: ${response.status}`);

@@ -67,7 +67,7 @@ function getTickDataWsUrl(): string {
   const defaultHost =
     typeof window !== 'undefined' ? window.location.hostname : 'localhost';
   const base =
-    (import.meta.env.VITE_TICKDATA_URL as string | undefined) ??
+    (import.meta.env.VITE_TICKDATA_URL as string | undefined) ||
     `http://${defaultHost}:8000`;
   const url = new URL(base);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -138,7 +138,14 @@ export const useTickDataStore = create<TickDataState>()((set, get) => ({
     ws?.close();
 
     const wsUrl = getTickDataWsUrl();
-    const socket = new WebSocket(wsUrl);
+    let socket: WebSocket;
+    try {
+      socket = new WebSocket(wsUrl);
+    } catch (e) {
+      console.warn('[TickData] Failed to connect (mixed content or invalid URL):', e);
+      set({ connected: false });
+      return;
+    }
     ws = socket;
 
     socket.onopen = () => {

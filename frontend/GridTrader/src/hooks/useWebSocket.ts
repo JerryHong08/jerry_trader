@@ -24,10 +24,13 @@ const BFF_HTTP_URL =
     ? (import.meta.env.VITE_BFF_URL as string)
     : 'http://localhost:5001';
 
-console.debug('[WebSocket] Using BFF URL:', BFF_HTTP_URL);
+// Also handle empty string from .env.ghpages
+const BFF_URL_RESOLVED = BFF_HTTP_URL || 'http://localhost:5001';
+
+console.debug('[WebSocket] Using BFF URL:', BFF_URL_RESOLVED);
 
 // Convert HTTP URL to WebSocket URL
-const BFF_WS_URL = BFF_HTTP_URL.replace(/^http/, 'ws');
+const BFF_WS_URL = BFF_URL_RESOLVED.replace(/^http/, 'ws');
 
 // Generate unique client ID
 const CLIENT_ID = `gridtrader_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -596,7 +599,13 @@ function getWebSocket(): WebSocket {
     const wsUrl = `${BFF_WS_URL}/ws/${CLIENT_ID}`;
     console.log('[WebSocket] Connecting to:', wsUrl);
 
-    wsInstance = new WebSocket(wsUrl);
+    try {
+      wsInstance = new WebSocket(wsUrl);
+    } catch (e) {
+      console.warn('[WebSocket] Failed to connect (mixed content or invalid URL):', e);
+      store.setConnectionStatus('error');
+      return null as unknown as WebSocket;
+    }
 
     wsInstance.onopen = () => {
       console.log('[WebSocket] Connected to BFF');

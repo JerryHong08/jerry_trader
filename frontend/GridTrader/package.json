@@ -63,6 +63,7 @@
     "scripts": {
         "dev": "vite",
         "build": "vite build",
-        "deploy": "gh-pages -d build"
+        "deploy": "bash deploy.sh",
+        "deploy:skip-build": "bash deploy.sh --skip-build"
     }
 }

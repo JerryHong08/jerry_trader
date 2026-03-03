@@ -32,6 +32,7 @@ from influxdb_client.client.write_api import SYNCHRONOUS
 load_dotenv()
 from config import cache_dir
 from DataUtils.data_utils import get_common_stocks
+from DataUtils.schema import enforce_snapshot_schema
 from DataUtils.transforms import _parse_transfrom_timetamp
 from utils.logger import setup_logger
 from utils.redis_keys import (
@@ -419,6 +420,10 @@ class SnapshotProcessor:
 
     def _prepare_data(self, df: pl.DataFrame) -> pl.DataFrame:
         """Filter common stocks and fill missing data."""
+        # Normalise column types up-front so every downstream
+        # operation (concat, arithmetic) sees a consistent schema.
+        df = enforce_snapshot_schema(df)
+
         # Convert timestamp
         lf = df.lazy().with_columns(
             pl.from_epoch(pl.col("timestamp"), time_unit="ms").dt.convert_time_zone(

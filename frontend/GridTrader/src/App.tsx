@@ -8,7 +8,17 @@ import { moduleRegistry } from './config/moduleRegistry';
 import { LAYOUT_TEMPLATES } from './config/layoutTemplates';
 import { useIbbotStore } from './stores/ibbotStore';
 import { useTickDataStore } from './stores/tickDataStore';
+import { useMarketDataStore } from './stores/marketDataStore';
 import { PinDialog } from './components/PinDialog';
+import {
+  IS_DEMO,
+  getMockRankEntities,
+  getMockSeriesData,
+  getMockOrders,
+  getMockPositions,
+  getMockAccount,
+  getMockPortfolioSummary,
+} from './data/mockData';
 import type { ModuleType, GridItemConfig } from './types';
 
 // Default values
@@ -135,26 +145,13 @@ export default function App() {
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
-        // Migrate old 'order-placement' to 'order-management'
-        const migrated = parsed.map((item: GridItemConfig) => {
-          if (item.moduleType === 'order-placement') {
-            return {
-              ...item,
-              moduleType: 'order-management',
-              settings: {
-                ...item.settings,
-                orderManagement: item.settings?.orderManagement || { view: 'placement' },
-              },
-            };
-          }
-          return item;
-        });
-        return migrated;
+        // parsed.map((item: GridItemConfig);
+        return parsed;
       } catch (e) {
         console.error('Failed to parse saved layout:', e);
       }
     }
-    return LAYOUT_TEMPLATES['default-trading'].layout;
+    return LAYOUT_TEMPLATES['minimal layout'].layout;
   };
 
   const loadInitialGap = (): number => {
@@ -182,8 +179,38 @@ export default function App() {
     localStorage.setItem('trading-system-gap', String(gridGap));
   }, [gridGap]);
 
-  // Initialize backend stores on mount
+  // Initialize backend stores on mount (or seed mock data in demo mode)
   useEffect(() => {
+    if (IS_DEMO) {
+      // Demo mode: seed all stores with mock data
+      const entities = getMockRankEntities();
+      const seriesData = getMockSeriesData();
+      const tickers = Array.from(entities.keys());
+
+      useMarketDataStore.setState({
+        entities,
+        rankTimestamp: new Date().toISOString(),
+        seriesData,
+        chartTimestamp: new Date().toISOString(),
+        connectionStatus: 'connected',
+      });
+      useMarketDataStore.getState().syncVisibility(tickers);
+
+      useIbbotStore.setState({
+        ordersById: getMockOrders(),
+        positionsBySymbol: getMockPositions(),
+        account: getMockAccount(),
+        portfolioSummary: getMockPortfolioSummary(),
+        wsStatus: 'connected',
+        loading: false,
+      });
+
+      useTickDataStore.setState({ connected: true });
+
+      console.log('[Demo] Seeded stores with mock data for', tickers.length, 'tickers');
+      return;
+    }
+
     useTickDataStore.getState().init();
     useIbbotStore.getState().init();
     return () => {

@@ -17,6 +17,7 @@ import {
   type LWSeriesData,
   type ConnectionStatus,
 } from '../stores/marketDataStore';
+import { IS_DEMO } from '../data/mockData';
 
 // Configuration - use Vite env variable or default
 const BFF_HTTP_URL =
@@ -368,9 +369,11 @@ function unregisterStockDetailHandler(ticker: string) {
 }
 
 /**
- * Send a message via WebSocket. Queues if not connected.
+ * Send a message via WebSocket. Queues if not connected. No-op in demo mode.
  */
 function sendMessage(message: WebSocketMessage) {
+  if (IS_DEMO) return;
+
   if (wsInstance && wsInstance.readyState === WebSocket.OPEN) {
     wsInstance.send(JSON.stringify(message));
   } else {
@@ -590,8 +593,15 @@ function handleMessage(message: WebSocketMessage) {
 
 /**
  * Get or create WebSocket connection.
+ * Returns null in demo mode (no backend available).
  */
-function getWebSocket(): WebSocket {
+function getWebSocket(): WebSocket | null {
+  if (IS_DEMO) {
+    // Demo mode: stores are already seeded from App.tsx
+    useMarketDataStore.getState().setConnectionStatus('connected');
+    return null;
+  }
+
   if (!wsInstance || wsInstance.readyState === WebSocket.CLOSED) {
     const store = useMarketDataStore.getState();
     store.setConnectionStatus('connecting');
@@ -701,6 +711,9 @@ export function useWebSocketConnection(): ConnectionStatus {
   const status = useMarketDataStore((s) => s.connectionStatus);
 
   useEffect(() => {
+    // In demo mode, skip WebSocket entirely - stores already seeded
+    if (IS_DEMO) return;
+
     // Reload cached static data into store on first mount (before WebSocket connects)
     // This ensures RankList shows cached float/marketCap/hasNews immediately
     if (!cacheReloadedToStore) {

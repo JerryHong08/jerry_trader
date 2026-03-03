@@ -13,6 +13,7 @@
  */
 
 import { create } from 'zustand';
+import { IS_DEMO } from '../data/mockData';
 
 // ============================================================================
 // Types
@@ -135,6 +136,11 @@ export const useTickDataStore = create<TickDataState>()((set, get) => ({
   // ========================================================================
 
   init: () => {
+    if (IS_DEMO) {
+      set({ connected: true });
+      return;
+    }
+
     ws?.close();
 
     const wsUrl = getTickDataWsUrl();

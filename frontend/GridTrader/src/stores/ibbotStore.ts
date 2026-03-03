@@ -26,6 +26,7 @@ import {
   getPortfolioSummary,
 } from '../services/ibbotApi';
 import { connectIbbotWs, type IbbotWsClient } from '../services/ibbotWs';
+import { IS_DEMO } from '../data/mockData';
 
 // ============================================================================
 // Types
@@ -136,6 +137,12 @@ export const useIbbotStore = create<IbbotState>()((set, get) => {
     // ========================================================================
 
     init: () => {
+      if (IS_DEMO) {
+        // Demo mode: stores are seeded from App.tsx, skip all network calls
+        set({ wsStatus: 'connected', loading: false });
+        return;
+      }
+
       const state = get();
       state.loadInitial();
 

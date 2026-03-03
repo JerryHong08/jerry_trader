@@ -5,6 +5,7 @@ import { SymbolSearch } from './common/SymbolSearch';
 import { useBackendTimestamp } from '../hooks/useBackendTimestamps';
 import { useMarketDataStore } from '../stores/marketDataStore';
 import { getCachedProfile, getCachedNews, setCachedProfile, setCachedNews, setDataStatus, subscribeNewsUpdates } from '../hooks/useWebSocket';
+import { IS_DEMO, MOCK_PROFILES, getMockNews } from '../data/mockData';
 
 // Get patchStaticData action for updating RankList when profile is fetched
 const patchStaticData = (symbol: string, data: { float?: number; marketCap?: number; hasNews?: boolean }) => {
@@ -51,8 +52,11 @@ interface BackendNewsArticle {
   text?: string;
 }
 
-// Fetch stock profile from backend
+// Fetch stock profile from backend (or return mock in demo mode)
 const fetchStockProfile = async (symbol: string): Promise<StockFundamentals | null> => {
+  if (IS_DEMO) {
+    return (MOCK_PROFILES[symbol] as StockFundamentals | undefined) ?? null;
+  }
   try {
     const response = await fetch(`${BFF_URL}/api/stock/${symbol}/profile`);
     if (!response.ok) {
@@ -74,12 +78,15 @@ const fetchStockProfile = async (symbol: string): Promise<StockFundamentals | nu
   }
 };
 
-// Fetch stock news from backend
+// Fetch stock news from backend (or return mock in demo mode)
 const fetchStockNews = async (
   symbol: string,
   limit: number = 10,
   refresh: boolean = false
 ): Promise<{ articles: NewsArticle[]; queued: boolean }> => {
+  if (IS_DEMO) {
+    return { articles: getMockNews(symbol).slice(0, limit), queued: false };
+  }
   try {
     const url = `${BFF_URL}/api/stock/${symbol}/news?limit=${limit}${refresh ? '&refresh=true' : ''}`;
     const response = await fetch(url);

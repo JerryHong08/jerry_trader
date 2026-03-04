@@ -28,6 +28,7 @@ import signal
 import sys
 import time
 from datetime import datetime
+from datetime import time as dtime
 from pathlib import Path
 from threading import Thread
 from typing import Any, Dict, Optional
@@ -158,6 +159,9 @@ def build_runtime_config(
 
     # Start with defaults (these become top-level in runtime config)
     runtime = copy.deepcopy(yaml_cfg.get("defaults", {}))
+
+    # Add machine-level limit (market_open | market_close | null)
+    runtime["limit"] = machine_cfg.get("limit", None)
 
     # Add LLM config
     runtime["llm"] = copy.deepcopy(yaml_cfg.get("llm", {}))
@@ -315,6 +319,7 @@ class GridTraderBackendStarter:
         self.replay_date = config.get("replay_date")
         self.suffix_id = config.get("suffix_id")
         self.load_history = config.get("load_history")
+        self.limit = config.get("limit")  # market_open | market_close | None
 
         # Unified session ID for all Redis keys and InfluxDB tags
         self.session_id = make_session_id(
@@ -546,6 +551,41 @@ class GridTraderBackendStarter:
         today = datetime.now(self.tz).date()
         return self.calendar.is_session(today)
 
+    def in_limit_window(self) -> bool:
+        """
+        Check if the current time is within the configured limit window.
+
+        Returns True if services should keep running:
+        - limit=None         -> always True (never auto-stop)
+        - limit="market_open" -> True during 04:00–09:30 ET
+        - limit="market_close"-> True during 04:00–16:00 ET
+        """
+        if self.limit is None:
+            return True
+        now = datetime.now(self.tz).time()
+        if self.limit == "market_open":
+            return dtime(4, 0) <= now < dtime(9, 30)
+        if self.limit == "market_close":
+            return dtime(4, 0) <= now < dtime(16, 0)
+        return True  # unknown limit value -> never stop
+
+    def _limit_watchdog(self):
+        """
+        Background thread that monitors the limit window.
+        When the window closes, triggers a graceful shutdown.
+        """
+        logger.info(f"Limit watchdog started (limit={self.limit})")
+        while self._running:
+            if not self.in_limit_window():
+                logger.info(
+                    f"⏹ Outside limit window (limit={self.limit}). "
+                    f"Initiating graceful shutdown..."
+                )
+                self._running = False
+                self._cleanup()
+                os._exit(0)
+            time.sleep(30)  # check every 30 seconds
+
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals."""
         logger.info(f"Received signal {signum}, shutting down...")
@@ -638,6 +678,7 @@ class GridTraderBackendStarter:
         logger.info("=" * 70)
         logger.info("Starting GridTrader Backend")
         logger.info(f"Enabled roles: {list(self.roles.keys())}")
+        logger.info(f"Limit: {self.limit or 'None (never auto-stop)'}")
         logger.info("=" * 70)
 
         # Check if it's a trading day (only in live mode)
@@ -649,6 +690,20 @@ class GridTraderBackendStarter:
         logger.info(f"Session: {self.session_id}")
 
         self._running = True
+
+        # Start limit watchdog if a limit is configured (and not in replay mode)
+        if self.limit and not self.replay_date:
+            if not self.in_limit_window():
+                logger.info(
+                    f"⏹ Already outside limit window (limit={self.limit}). Not starting."
+                )
+                return
+            watchdog = Thread(
+                target=self._limit_watchdog, daemon=True, name="LimitWatchdog"
+            )
+            watchdog.start()
+            self._threads.append(watchdog)
+            logger.info(f"Limit watchdog active: limit={self.limit}")
 
         # Start SnapshotProcessor (it creates its own thread internally)
         if self.processor:

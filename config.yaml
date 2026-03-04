@@ -43,6 +43,7 @@ databases:
 # =============================================================================
 machines:
   wsl2:
+    limit: "null"    # market_open | market_close | null (never stop)
     roles:
       StateEngine:
         enabled: true
@@ -60,6 +61,7 @@ machines:
         influxdb: "influxdb-a"
 
   mibuntu:
+    limit: "market_open"    # market_open | market_close | null (never stop)
     roles:
       NewsProcessor:
         enabled: true
@@ -79,6 +81,7 @@ machines:
         postgres: "postgres-b@OLDMAN"
 
   oldman:
+    limit: "market_open"    # market_open | market_close | null (never stop)
     roles:
       SnapshotProcessor:
         enabled: true
@@ -98,6 +101,7 @@ machines:
         influxdb: "influxdb-b"
 
   collector:
+    limit: "market_open"     # collector only runs premarket
     roles:
       Collector:
         enabled: true
@@ -105,6 +109,7 @@ machines:
         limit: "market_open"
 
   replayer:
+    limit: null               # replayer never auto-stops
     roles:
       Replayer:
         enabled: true

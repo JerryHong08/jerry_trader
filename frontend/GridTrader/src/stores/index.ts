@@ -17,4 +17,10 @@ export { useIbbotStore, type PositionRow } from './ibbotStore';
 
 export { useTickDataStore, type Quote, type Trade } from './tickDataStore';
 
+export {
+  useChartDataStore,
+  type OHLCVBar,
+  type SymbolChartState,
+} from './chartDataStore';
+
 export { usePrivacyStore } from './privacyStore';

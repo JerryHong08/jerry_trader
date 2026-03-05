@@ -165,6 +165,18 @@ def static_version_prefix(session_id: str) -> str:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Chart bars cache keys
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def chart_bars_cache(
+    ticker: str, multiplier: int, timespan: str, from_date: str, to_date: str
+) -> str:
+    """STRING – cached OHLCV bars JSON (session-independent, same data for same params)."""
+    return f"chart:bars:{ticker}:{multiplier}:{timespan}:{from_date}:{to_date}"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Per-item keys  (prefix + :{id})
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

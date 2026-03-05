@@ -45,10 +45,17 @@ machines:
   wsl2:
     limit: "null"    # market_open | market_close | null (never stop)
     roles:
-      StateEngine:
+      # StateEngine:
+      #   enabled: true
+      #   redis: "redis-a"
+        # influxdb: "influxdb-a"
+      GridTraderBFF:
         enabled: true
-        redis: "redis-a"
-        influxdb: "influxdb-a"
+        host: "0.0.0.0"
+        port: 5001
+        debug: false
+        redis: "redis-b"
+        influxdb: "influxdb-b"
       TickDataServer:
         enabled: true
         host: "0.0.0.0"

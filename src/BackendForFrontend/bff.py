@@ -35,6 +35,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from DataManager.chart_data_service import ChartDataService
 from DataManager.overviewchartdat_manager import GridTraderChartDataManager
 from utils.logger import setup_logger
 from utils.redis_keys import (
@@ -198,11 +199,17 @@ class GridTraderBFF:
         self._applied_versions: Dict[str, Dict[str, int]] = {}
         self.VERSION_KEY_PREFIX = static_version_prefix(self.session_id)
 
-        # Initialize chart data manager
+        # Initialize chart data manager (overview chart)
         self.chart_manager = GridTraderChartDataManager(
             session_id=self.session_id,
             redis_config=redis_config,
             influxdb_config=influxdb_config,
+        )
+
+        # Initialize chart data service (OHLCV bars for ChartModule)
+        self.chart_data_service = ChartDataService(
+            redis_config=redis_config,
+            session_id=self.session_id,
         )
 
         # Chart settings (persistent for session)
@@ -449,6 +456,53 @@ class GridTraderBFF:
             """API endpoint to get all subscribed tickers."""
             tickers = self.chart_manager.get_subscribed_tickers()
             return {"tickers": tickers, "count": len(tickers)}
+
+        # ============ Chart Bars API (for ChartModule) ============
+
+        @self.app.get("/api/chart/bars/{ticker}")
+        async def get_chart_bars(
+            ticker: str,
+            timeframe: str = "1D",
+            from_date: Optional[str] = None,
+            to_date: Optional[str] = None,
+            limit: int = 5000,
+        ):
+            """Fetch OHLCV bars for the ChartModule.
+
+            Historical bar data for candlestick chart rendering.
+            Real-time bar updates are handled client-side via trade ticks.
+
+            Args:
+                ticker: Stock ticker symbol
+                timeframe: Bar timeframe (1m, 5m, 15m, 30m, 1h, 4h, 1D, 1W, 1M)
+                from_date: Start date YYYY-MM-DD (default: auto from timeframe)
+                to_date: End date YYYY-MM-DD (default: today)
+                limit: Maximum bars to return
+
+            Returns:
+                JSON with bars array formatted for lightweight-charts CandlestickSeries
+            """
+            result = self.chart_data_service.get_bars(
+                ticker=ticker,
+                timeframe=timeframe,
+                from_date=from_date,
+                to_date=to_date,
+                limit=limit,
+            )
+            if result:
+                return result
+            return {
+                "ticker": ticker.upper(),
+                "timeframe": timeframe,
+                "bars": [],
+                "barCount": 0,
+                "error": "No data available",
+            }
+
+        @self.app.get("/api/chart/timeframes")
+        async def get_chart_timeframes():
+            """Return available chart timeframes with metadata."""
+            return {"timeframes": self.chart_data_service.get_timeframes()}
 
         @self.app.get("/api/test-data")
         async def test_data():

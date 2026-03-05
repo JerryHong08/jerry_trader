@@ -216,12 +216,15 @@ class CustomBarsFetcher:
             df = pl.DataFrame(
                 {
                     "timestamp": [r["t"] for r in results],
-                    "open": [r["o"] for r in results],
-                    "high": [r["h"] for r in results],
-                    "low": [r["l"] for r in results],
-                    "close": [r["c"] for r in results],
-                    "volume": [r["v"] for r in results],
-                    "vwap": [r.get("vw") for r in results],
+                    "open": [float(r["o"]) for r in results],
+                    "high": [float(r["h"]) for r in results],
+                    "low": [float(r["l"]) for r in results],
+                    "close": [float(r["c"]) for r in results],
+                    "volume": [float(r["v"]) for r in results],
+                    "vwap": [
+                        float(r["vw"]) if r.get("vw") is not None else None
+                        for r in results
+                    ],
                     "transactions": [r.get("n") for r in results],
                 }
             )
@@ -322,7 +325,7 @@ class CustomBarsFetcher:
         return data
 
 
-def fetch_polygon_trades(self, symbol: str) -> List[Tuple[int, float]]:
+def fetch_polygon_trades(symbol: str) -> List[Tuple[int, float]]:
     """Paginate Polygon /v3/trades/{symbol} from now back to 4 AM ET.
 
     Returns list of (ts_ms, price) tuples, sorted ascending by ts.

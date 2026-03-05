@@ -54,7 +54,7 @@
       outDir: 'build',
     },
     server: {
-      port: 3000,
+      port: 4321,
       open: true,
       hmr: false,
     },

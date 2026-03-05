@@ -37,6 +37,8 @@ export function connectIbbotWs(
   let reconnectTimer: number | undefined;
   let closedByUser = false;
   let backoffMs = 500;
+  let retryCount = 0;
+  const maxRetries = 5; // Set the maximum number of retries
 
   function clearTimers() {
     if (pingTimer) window.clearInterval(pingTimer);
@@ -46,16 +48,26 @@ export function connectIbbotWs(
   }
 
   function scheduleReconnect(reason?: string) {
-    if (closedByUser) return;
+    if (closedByUser || retryCount >= maxRetries) {
+      handlers.onConnection?.(
+        'disconnected',
+        `Max retries reached. Connection failed: ${reason}`,
+      );
+      return;
+    }
+
     clearTimers();
     const wait = backoffMs;
     backoffMs = Math.min(backoffMs * 2, 10_000);
+    retryCount++;
+
     handlers.onConnection?.(
       'disconnected',
       reason
         ? `Reconnecting in ${Math.round(wait / 100) / 10}s: ${reason}`
         : `Reconnecting in ${Math.round(wait / 100) / 10}s`,
     );
+
     reconnectTimer = window.setTimeout(() => {
       connect();
     }, wait);
@@ -72,6 +84,7 @@ export function connectIbbotWs(
 
     ws.onopen = () => {
       backoffMs = 500;
+      retryCount = 0; // Reset retry count on successful connection
       handlers.onConnection?.('connected');
       pingTimer = window.setInterval(() => {
         try {

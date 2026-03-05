@@ -20,7 +20,7 @@ import redis
 from dotenv import load_dotenv
 
 from config import cache_dir
-from DataUtils.schema import MASSIVE_SNAPSHOT_SCHEMA
+from schema import MASSIVE_SNAPSHOT_SCHEMA
 from utils.logger import setup_logger
 from utils.redis_keys import market_snapshot_stream
 from utils.session import make_session_id

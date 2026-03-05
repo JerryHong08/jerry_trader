@@ -1,0 +1,43 @@
+# Incremental Data Update Configuration
+# =====================================================
+# Defines how data_update.sh fetches and processes market data.
+#
+# Three modes:
+#   - "standalone": Single machine does everything (API fetch + Polygon download + processing)
+#   - "server":     Multi-machine setup 鈥?fetches metadata from APIs, serves to clients
+#   - "client":     Multi-machine setup 鈥?syncs metadata from server, downloads Polygon data
+#
+# Override via environment variable: UPDATE_MODE=standalone|server|client
+
+update:
+  mode: "client"  # default mode
+  recent_days: 7      # how many days of data to fetch/convert
+
+# Data directory for this machine
+data:
+  data_dir: "/mnt/blackdisk/quant_data/polygon_data"
+
+# Multi-machine settings (only used when mode=server or mode=client)
+multi_machine:
+  server:
+    ssh_alias: "oldman"  # SSH alias or hostname (must have key-based auth)
+    data_dir: "/home/oldman/quant_data/polygon_data"  # remote data directory
+
+# Directories to sync from server to client (relative to data_dir)
+# Only used when mode=client
+sync_paths:
+  - "raw/us_stocks_sip/splits"              # splits data from splits_fetch.py
+  - "raw/us_stocks_sip/us_all_tickers"      # stocks/otc overview from all_tickers_fetch.py
+  - "raw/us_indices/us_all_indices"         # indices overview from all_tickers_fetch.py
+  - "raw/us_indices/us_indices_sip/day_aggs_v1"  # indices day aggs from indices_fetch.py
+  - "raw/us_stocks_sip/float_shares"        # float shares from fmp_fundamental_fetch.py
+
+# Rsync options (only used when mode=client)
+rsync:
+  options: "-avz --progress --delete"
+  dry_run: false
+
+# Usage:
+#   ./scripts/incremental_update/data_update.sh                         # standalone (default)
+#   UPDATE_MODE=server ./scripts/incremental_update/data_update.sh      # multi-machine: server
+#   UPDATE_MODE=client ./scripts/incremental_update/data_update.sh      # multi-machine: client

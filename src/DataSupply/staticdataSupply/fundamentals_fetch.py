@@ -17,8 +17,8 @@ import requests
 from bs4 import BeautifulSoup
 
 from config import float_shares_dir
-from DataUtils.schema import FloatShares, FloatSourceData
 from DataUtils.transforms import _parse_number, _parse_percent
+from schema import FloatShares, FloatSourceData
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__, log_to_file=True)

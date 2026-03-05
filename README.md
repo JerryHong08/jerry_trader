@@ -1,6 +1,6 @@
 # Introduction
 
-this file have my trading system module summary and roadmap from very early experimental stage to mature stage.
+this file has my trading system module summary and the roadmap from very early experimental stage to planned.
 
 ## roadmap
 
@@ -43,6 +43,7 @@ mainly focus on basic modules development and strcuture buidling.
   - ✅then Stock Detail. the data request is driven by top gainers and backend data management, so it should use cache, and also the data request can be driven by the frontend button. it's basic the same as the static data column update in top gainers column.
   - ✅then the Portfolio and Order Management. this module is isolated, so it's easier to integrate.
   - 📌the last one is the Chart module, based on tradingview lightweight chart, the focus is balance between the real-time update and historical data retrival. **data management and historical data bootstrap.**
+    - bootstrap using api&cache
 
 ### Stage3
 

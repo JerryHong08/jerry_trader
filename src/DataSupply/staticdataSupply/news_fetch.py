@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from DataUtils.schema import NewsArticle, NewsFormatter
+from schema import NewsArticle, NewsFormatter
 from utils.logger import setup_logger
 from utils.momo_token import MoomooQuoteToken
 
@@ -32,24 +32,25 @@ logger = setup_logger(__name__, log_to_file=True)
 # Proxy Configuration Helper
 # ============================================================================
 
+
 def _get_httpx_client_kwargs() -> Dict:
     """
     Get httpx.AsyncClient kwargs with proxy support.
-    
+
     Handles SOCKS proxies via HTTP_PROXY environment variable.
     For SOCKS proxies, httpx[socks] must be installed.
-    
+
     Returns:
         Dict of kwargs to pass to httpx.AsyncClient()
     """
     proxy_url = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
     kwargs = {}
-    
+
     if proxy_url:
         # httpx uses 'proxy' (singular), not 'proxies'
         kwargs["proxy"] = proxy_url
         # logger.debug(f"Using proxy: {proxy_url}")
-    
+
     return kwargs
 
 
@@ -824,7 +825,9 @@ if __name__ == "__main__":
                 print("-" * 40)
         elif args.provider == "benzinga":
             fetcher = API_NewsFetchers()
-            async for article in fetcher.fetch_news_benzinga(args.ticker, page_size=args.limit):
+            async for article in fetcher.fetch_news_benzinga(
+                args.ticker, page_size=args.limit
+            ):
                 print(f"Article: {article.title}")
                 print(f"  URL: {article.url}")
                 print(f"  Published: {article.published_time}")
@@ -832,7 +835,9 @@ if __name__ == "__main__":
                 print("-" * 40)
         else:
             fetcher = MoomooStockResolver()
-            async for article in fetcher.get_news_momo_async(args.ticker, pageSize=args.limit):
+            async for article in fetcher.get_news_momo_async(
+                args.ticker, pageSize=args.limit
+            ):
                 print(f"Article: {article.title}")
                 print(f"  URL: {article.url}")
                 print(f"  Published: {article.published_time}")

@@ -15,7 +15,7 @@ from urllib.parse import urljoin
 import pandas as pd
 import requests
 
-from DataUtils.schema import BorrowFee
+from schema import BorrowFee
 
 
 class BorrowFeeProvider:

@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from config import load_prompt
-from DataUtils.schema import NewsArticle
+from schema import NewsArticle
 from utils.logger import setup_logger
 from utils.redis_keys import (
     news_article_stream,
@@ -38,10 +38,10 @@ load_dotenv()
 def _get_openai_http_client() -> Optional[httpx.Client]:
     """
     Get an httpx client configured with proxy support for OpenAI.
-    
+
     The OpenAI library uses httpx internally but doesn't handle SOCKS proxies
     from environment variables by default. This provides a pre-configured client.
-    
+
     Returns:
         httpx.Client with proxy configured, or None if no proxy is set
     """
@@ -370,7 +370,7 @@ class NewsProcessor:
 
         # Get custom http_client with proxy support for SOCKS proxies
         http_client = _get_openai_http_client()
-        
+
         client = OpenAI(
             api_key=self.api_key,
             base_url=self.base_url,

@@ -32,8 +32,8 @@ from influxdb_client.client.write_api import SYNCHRONOUS
 load_dotenv()
 from config import cache_dir
 from DataUtils.data_utils import get_common_stocks
-from DataUtils.schema import enforce_snapshot_schema
 from DataUtils.transforms import _parse_transfrom_timetamp
+from schema import enforce_snapshot_schema
 from utils.logger import setup_logger
 from utils.redis_keys import (
     market_snapshot_processed,

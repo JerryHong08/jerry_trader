@@ -1,48 +1,68 @@
+import logging
 import os
 from pathlib import Path
 
 import polars as pl
 import yaml
 
+from utils.logger import setup_logger
+
+logger = setup_logger(__name__, log_to_file=True, level=logging.WARNING)
+
 # ===================== data root =============================================
-blackdisk_data_dir = "/mnt/blackdisk/quant_data/polygon_data"
-oldman_data_dir = "/home/oldman/quant_data/polygon_data"
+# The canonical data root is read from basic_config.yaml (project root).
+# basic_config.yaml is gitignored; copy basic_config.yaml.example to get started.
+
+_CONFIG_FILENAME = "basic_config.yaml"
 
 
 def _get_data_dir_from_config() -> str:
     """
-    Get data_dir based on machine role from machine_config.yaml.
-    Falls back to blackdisk_data_dir if config is not found.
+    Read data_dir from basic_config.yaml.
+
+    Resolution order:
+      1. UPDATE_MODE env var 鈫?picks local or server data_dir
+      2. update.mode in basic_config.yaml
+    Raises FileNotFoundError if basic_config.yaml is missing.
     """
-    config_path = Path(__file__).resolve().parents[1] / "machine_config.yaml"
+    config_path = Path(__file__).resolve().parents[1] / _CONFIG_FILENAME
 
     if not config_path.exists():
-        print("WARNING: machine_config.yaml not found, using default data dir.")
-        return blackdisk_data_dir
+        raise FileNotFoundError(
+            f"{_CONFIG_FILENAME} not found at {config_path}.\n"
+            "Copy basic_config.yaml.example 鈫?basic_config.yaml and fill in your paths."
+        )
 
-    try:
-        with open(config_path, "r") as f:
-            config = yaml.safe_load(f)
+    with open(config_path, "r") as f:
+        config = yaml.safe_load(f)
 
-        # Get role from environment variable or config
-        role = os.environ.get("MACHINE_ROLE", config["machine"]["role"])
+    # Get mode from environment variable or config
+    mode = os.environ.get("UPDATE_MODE", config["update"]["mode"])
 
-        if role == "server":
-            return config["server"]["data_dir"]
-        else:
-            return config["client"]["data_dir"]
-    except Exception:
-        return blackdisk_data_dir
+    if mode == "server":
+        return config["multi_machine"]["server"]["data_dir"]
+    else:
+        # standalone and client both use the local data dir
+        return config["data"]["data_dir"]
 
 
 # =====================================================================
 data_dir = _get_data_dir_from_config()
-# data_dir = oldman_data_dir
-print(f"DEBUG: Current data root dir: {data_dir}")
 lake_data_dir = os.path.join(data_dir, "lake")
 raw_data_dir = os.path.join(data_dir, "raw")
 cache_dir = os.path.join(data_dir, "processed")
 low_volume_tickers_dir = os.path.join(cache_dir, "low_volume_tickers")
+
+# ===================== low volume tickers ================================
+low_volume_tickers_csv = os.path.join(
+    data_dir, "low_volume_tickers/low_volume_tickers.csv"
+)
+low_volume_state_parquet = os.path.join(
+    data_dir, "low_volume_tickers/low_volume_state.parquet"
+)
+low_volume_history_parquet = os.path.join(
+    data_dir, "low_volume_tickers/low_volume_history.parquet"
+)
 
 # ==================== config of config =======================================
 asset_dir_config = {
@@ -57,7 +77,7 @@ splits_dir = os.path.join(data_dir, "raw/us_stocks_sip/splits")
 splits_error_file_copy = os.path.join(
     data_dir, "raw/us_stocks_sip/splits/splits_error.csv"
 )
-splits_error_file = "src/utils/manual_fixed_data/splits_error.csv"
+splits_error_file = "src/data/data_discrepancy_fixed/splits_error.csv"
 
 # ===================== float shares =====================
 float_shares_dir = os.path.join(data_dir, "raw/us_stocks_sip/float_shares")
@@ -66,8 +86,10 @@ float_shares_dir = os.path.join(data_dir, "raw/us_stocks_sip/float_shares")
 all_tickers_dir = os.path.join(data_dir, "raw/us_stocks_sip/us_all_tickers")
 all_indices_dir = os.path.join(data_dir, "raw/us_indices/us_all_indices")
 
-# ===================== other data ============================================
-sppc_dir = "/mnt/blackdisk/quant_data/kaggle_data/sppc"
+# ===================== indices day aggregates ================================
+indices_day_aggs_dir = os.path.join(
+    data_dir, "raw/us_indices/us_indices_sip/day_aggs_v1"
+)
 
 
 # ===================== data_return_functions =================================
@@ -76,7 +98,9 @@ def get_asset_dir(asset):
         raise ValueError(f"Unsupported asset type: {asset}")
 
     asset_dir = os.path.join(data_dir, asset_dir_config[asset][0])
-    asset_error_file = os.path.join("src/utils/manual_fixed_data", f"{asset}_error.csv")
+    asset_error_file = os.path.join(
+        "src/data/data_discrepancy_fixed", f"{asset}_error.csv"
+    )
     asset_error_file_copy = os.path.join(asset_dir, f"{asset}_error.csv")
 
     return asset_dir, asset_error_file, asset_error_file_copy
@@ -105,12 +129,22 @@ def get_asset_overview_data(asset: str) -> pl.DataFrame:
             ),
         )
         asset_original = pl.read_parquet(asset_file)
+
+        # Try to find error correction file: first the source file, then the copy
+        error_file_to_use = None
         if os.path.exists(asset_error_file):
-            # print(f"Applying error corrections from {asset_error_file}")
-            asset_errors = pl.read_csv(asset_error_file)
-            asset_errors.write_csv(
-                asset_error_file_copy
-            )  # make a copy, you can delete it if you want.
+            error_file_to_use = asset_error_file
+            logger.info(f"Using error corrections from {asset_error_file}")
+        elif os.path.exists(asset_error_file_copy):
+            error_file_to_use = asset_error_file_copy
+            logger.info(f"Using error corrections from copy: {asset_error_file_copy}")
+
+        if error_file_to_use:
+            asset_errors = pl.read_csv(error_file_to_use)
+            # Make a copy to the asset directory if using the source file
+            if error_file_to_use == asset_error_file:
+                asset_errors.write_csv(asset_error_file_copy)
+
             error_type_remove = asset_errors.filter(pl.col("error_type") == "remove")
             error_type_add = asset_errors.filter(pl.col("error_type") == "add").select(
                 pl.all().exclude("error_type")
@@ -127,10 +161,13 @@ def get_asset_overview_data(asset: str) -> pl.DataFrame:
 
             asset_data = pl.concat([filtered_original, error_type_add])
         else:
+            logger.warning(
+                f"No error file found for {asset}, loading original data without corrections."
+            )
             asset_data = asset_original
 
     except (ValueError, FileNotFoundError, OSError) as e:
-        print(f"Error loading {asset}: {e}")
+        logger.error(f"Error loading {asset}: {e}")
         asset_file = None
         asset_original = pl.DataFrame()
         asset_errors = pl.DataFrame()
@@ -139,19 +176,15 @@ def get_asset_overview_data(asset: str) -> pl.DataFrame:
     return asset_data
 
 
-splits_data = get_asset_overview_data(asset="splits")
+_splits_data_cache = None
 
 
-from pathlib import Path
-
-PROMPT_DIR = Path(__file__).resolve().parents[0] / "llmContext"
-
-
-def load_prompt(name: str) -> str:
-    path = PROMPT_DIR / name
-    if not path.exists():
-        raise FileNotFoundError(f"Prompt not found: {path}")
-    return path.read_text(encoding="utf-8")
+def get_splits_data() -> pl.DataFrame:
+    """Lazy-load splits overview data (cached after first call)."""
+    global _splits_data_cache
+    if _splits_data_cache is None:
+        _splits_data_cache = get_asset_overview_data(asset="splits")
+    return _splits_data_cache
 
 
 if __name__ == "__main__":

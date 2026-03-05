@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 from influxdb_client import Point, WritePrecision
 from influxdb_client.client.write_api import WriteOptions, WriteType
 
+from DataSupply.bootstrapdataSupply.polygon_fetcher import fetch_polygon_trades
 from DataSupply.tickDataSupply.unified_tick_manager import UnifiedTickManager
 from utils.logger import setup_logger
 from utils.redis_keys import factor_tasks_stream
@@ -354,15 +355,10 @@ class FactorManager:
         if ctx is None:
             return
 
-        api_key = os.getenv("POLYGON_API_KEY")
-        if not api_key:
-            logger.warning(f"_bootstrap_ticker - No POLYGON_API_KEY, skipping {symbol}")
-            return
-
         # Block realtime emit while bootstrap is running
         ctx.bootstrap_in_flight = True
         try:
-            trades = self._fetch_polygon_trades(symbol, api_key)
+            trades = fetch_polygon_trades(symbol)
             if not trades:
                 logger.info(f"_bootstrap_ticker - {symbol}: no historical trades found")
                 return
@@ -398,76 +394,6 @@ class FactorManager:
             logger.error(f"_bootstrap_ticker - {symbol}: {e}")
         finally:
             ctx.bootstrap_in_flight = False
-
-    def _fetch_polygon_trades(
-        self, symbol: str, api_key: str
-    ) -> List[Tuple[int, float]]:
-        """Paginate Polygon /v3/trades/{symbol} from now back to 4 AM ET.
-
-        Returns list of (ts_ms, price) tuples, sorted ascending by ts.
-        """
-        # Compute cutoff: today 4:00 AM ET
-        now_et = datetime.now(ZoneInfo("America/New_York"))
-        cutoff_et = now_et.replace(
-            hour=BOOTSTRAP_MARKET_OPEN_ET, minute=0, second=0, microsecond=0
-        )
-        cutoff_ns = int(cutoff_et.timestamp() * 1e9)  # API uses nanoseconds
-
-        all_trades: List[Tuple[int, float]] = []
-        url = (
-            f"{POLYGON_REST_BASE}/v3/trades/{symbol}"
-            f"?order=desc&limit={BOOTSTRAP_BATCH_SIZE}&sort=timestamp"
-            f"&timestamp.gte={cutoff_ns}"
-            f"&apiKey={api_key}"
-        )
-
-        page = 0
-        while url:
-            page += 1
-            try:
-                resp = requests.get(url, timeout=15)
-                resp.raise_for_status()
-                data = resp.json()
-            except Exception as e:
-                logger.error(f"_fetch_polygon_trades - {symbol} page {page}: {e}")
-                break
-
-            results = data.get("results", [])
-            if not results:
-                break
-
-            for trade in results:
-                sip_ts_ns = trade.get("sip_timestamp", 0)
-                price = trade.get("price", 0.0)
-                ts_ms = sip_ts_ns // 1_000_000  # ns → ms
-                if price > 0:
-                    all_trades.append((ts_ms, price))
-
-            # Check if we've reached data before cutoff
-            oldest_ns = results[-1].get("sip_timestamp", 0)
-            if oldest_ns and oldest_ns < cutoff_ns:
-                break
-
-            # Pagination: follow next_url if present
-            next_url = data.get("next_url")
-            if next_url:
-                # next_url already has query params; just append apiKey
-                url = f"{next_url}&apiKey={api_key}"
-            else:
-                break
-
-            # Ticker may have been removed while we're fetching
-            if symbol not in self.active_tickers:
-                logger.info(f"_fetch_polygon_trades - {symbol} removed, aborting")
-                return []
-
-        logger.info(
-            f"_fetch_polygon_trades - {symbol}: fetched {len(all_trades)} trades "
-            f"in {page} pages"
-        )
-        # Return sorted ascending by timestamp
-        all_trades.sort(key=lambda t: t[0])
-        return all_trades
 
     def _warm_baseline(self, ctx: TickerContext) -> List[Tuple[int, float]]:
         """Fast warm-up: walk only the last ~BASELINE_LEN grid steps from the

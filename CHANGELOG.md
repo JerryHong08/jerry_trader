@@ -1,3 +1,9 @@
+## 0.3.0 (2026-03-06)
+
+### Feat
+
+- C++ based real-time risk management engine
+
 ## 0.2.0 (2026-02-28)
 
 ### Feat

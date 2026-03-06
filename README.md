@@ -213,6 +213,45 @@ mainly focus on basic modules development and strcuture buidling.
 
 - restructure and introduce rust
 
+#### Stage 2.5 TODO
+
+**Phase 1 — Rust BarBuilder core** (`rust/src/bars.rs`)
+
+- [ ] `BarState` struct (open/high/low/close/volume/trade_count/vwap/bar_start/session)
+- [ ] `Timeframe` enum (10s, 1m, 5m, 15m, 1h, 4h, 1d, 1w)
+- [ ] `SessionCalendar` — US session boundaries (premarket 4:00, regular 9:30, afterhours 16:00–20:00)
+- [ ] `BarBuilder` as `#[pyclass]` — maintains per-ticker, per-timeframe rolling state
+- [ ] `ingest_trade(ticker, price, size, timestamp_ms)` → returns completed bars
+- [ ] `get_current_bar(ticker, timeframe)` → returns partial bar
+- [ ] `flush()` → force-complete all open bars
+- [ ] Session-aware bar boundary truncation
+- [ ] Rust unit tests
+- [ ] `maturin develop --release`, verify import from Python
+
+**Phase 2 — ClickHouse + Python BarsBuilderService**
+
+- [ ] ClickHouse `ohlcv_bars` table schema (ReplacingMergeTree, partitioned by date)
+- [ ] Python ClickHouse client integration (clickhouse-connect)
+- [ ] `BarsBuilderService` (Python): tick ingestion → Rust BarBuilder → ClickHouse write → WebSocket push
+- [ ] Add `BarsBuilder` role to config.yaml machine profiles
+- [ ] Historical bar bootstrap from Polygon API → ClickHouse backfill
+
+**Phase 3 — Frontend integration**
+
+- [ ] REST endpoint: query historical bars from ClickHouse
+- [ ] WebSocket endpoint: subscribe to real-time bar updates
+- [ ] Update `chartDataStore.ts` to consume server-built bars
+- [ ] Remove frontend-side `updateFromTrade()` aggregation
+- [ ] TradingView `getBars()` / `subscribeBars()` backed by BarsBuilderService
+
+**Phase 4 — Downstream consumers + InfluxDB→ClickHouse migration**
+
+- [ ] FactorEngine consumes completed bars (not raw ticks)
+- [ ] Factor output: InfluxDB → ClickHouse
+- [ ] Factor visualization overlay in Chart module
+- [ ] Snapshot data: InfluxDB → ClickHouse
+- [ ] Foundation for v3.0 stream bus architecture
+
 ### Stage3
 
 mainly focus on strategy computation,execution,replay backtest.

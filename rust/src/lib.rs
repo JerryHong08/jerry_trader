@@ -1,17 +1,12 @@
 use pyo3::prelude::*;
 
 mod factors;
+mod bars;
 
 /// The Rust computation core, exposed to Python as `jerry_trader._rust`.
 #[pymodule]
 mod _rust {
     use super::*;
-
-    /// Formats the sum of two numbers as string.
-    #[pyfunction]
-    fn sum_as_string(a: usize, b: usize) -> PyResult<String> {
-        Ok((a + b).to_string())
-    }
 
     // ── Factor compute functions ────────────────────────────────────
     #[pyfunction]
@@ -28,4 +23,8 @@ mod _rust {
     ) -> PyResult<f64> {
         factors::price_accel(recent, older)
     }
+
+    // ── Bar builder ─────────────────────────────────────────────────
+    #[pymodule_export]
+    use super::bars::BarBuilder;
 }

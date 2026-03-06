@@ -170,8 +170,8 @@ def build_runtime_config(
         if role_cfg.get("enabled", True):
             resolved_cfg = copy.deepcopy(role_cfg)
 
-            # Resolve database references (redis, postgres, influxdb)
-            for db_type in ["redis", "postgres", "influxdb"]:
+            # Resolve database references (redis, postgres, influxdb, clickhouse)
+            for db_type in ["redis", "postgres", "influxdb", "clickhouse"]:
                 db_ref = role_cfg.get(db_type)
                 if db_ref and isinstance(db_ref, str):
                     resolved_cfg[db_type] = _resolve_db_reference(
@@ -546,6 +546,34 @@ class JerryTraderBackendStarter:
         else:
             self.factor_engine = None
 
+        if "BarsBuilder" in self.roles:
+            from jerry_trader.DataManager.bars_builder_service import BarsBuilderService
+
+            role_cfg = self.roles["BarsBuilder"]
+
+            # If TickDataServer is also enabled, share the UnifiedTickManager
+            if self.tick_data_server is not None:
+                self.bars_builder = BarsBuilderService(
+                    session_id=self.session_id,
+                    redis_config=role_cfg.get("redis"),
+                    clickhouse_config=role_cfg.get("clickhouse"),
+                    timeframes=role_cfg.get("timeframes"),
+                    ws_manager=self.tick_data_server.manager,
+                    ws_loop=self._shared_ws_loop,
+                )
+            else:
+                # Standalone BarsBuilder with its own manager
+                self.bars_builder = BarsBuilderService(
+                    session_id=self.session_id,
+                    manager_type=role_cfg.get("manager_type"),
+                    redis_config=role_cfg.get("redis"),
+                    clickhouse_config=role_cfg.get("clickhouse"),
+                    timeframes=role_cfg.get("timeframes"),
+                )
+            self._services.append(("BarsBuilder", self.bars_builder))
+        else:
+            self.bars_builder = None
+
         logger.info(f"Initialized {len(self._services)} services")
 
     def is_trading_day_today(self) -> bool:
@@ -620,6 +648,10 @@ class JerryTraderBackendStarter:
         if self.factor_engine:
             self.factor_engine.stop()
             logger.info("FactorEngine stopped")
+
+        if self.bars_builder:
+            self.bars_builder.stop()
+            logger.info("BarsBuilder stopped")
 
         if self.tick_data_server:
             self.tick_data_server.cleanup()
@@ -756,6 +788,11 @@ class JerryTraderBackendStarter:
         if self.factor_engine:
             self.factor_engine.start()
             logger.info("FactorEngine started")
+
+        # Start BarsBuilder if enabled (it creates its own threads)
+        if self.bars_builder:
+            self.bars_builder.start()
+            logger.info("BarsBuilder started")
 
         # Start TickDataServer if enabled
         # Runs in a separate thread since it's a blocking uvicorn server

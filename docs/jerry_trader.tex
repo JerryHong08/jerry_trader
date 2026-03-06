@@ -207,6 +207,108 @@ The migration from Python \texttt{compute.py} modules to Rust follows a three-st
 The signal/state detection logic depends on strategy rules that are not fully decided yet;
 it will remain Python-only for the foreseeable future.
 
+\noindent\textbf{Status:} Step~1 completed. \texttt{z\_score} achieved 3.6--10.7$\times$ speedup,
+\texttt{price\_accel} achieved 8.9--12.1$\times$ speedup over Python.
+Steps~2--3 are deferred in favour of the Bars Builder pipeline below.
+
+\subsection{Stage 2.5 --- Bars Builder Pipeline}
+\label{sec:bars-builder}
+
+The Chart module requires a reliable server-side bar-building pipeline.
+The v1.0 architecture (frontend fetches historical bars from Polygon API, real-time
+last-bar-only update from raw trade ticks in \texttt{chartDataStore.ts}) suffered from:
+\begin{itemize}[nosep]
+    \item Bar consistency issues across timeframes
+    \item Duplicated aggregation logic (frontend \emph{and} factor engine)
+    \item No single source of truth for completed bars
+    \item Cannot scale to feed downstream engines (factors, signals, risk)
+\end{itemize}
+
+\noindent The v2.0 architecture introduces a \textbf{Rust-native Bar Builder} as the canonical
+bar source for all downstream consumers:
+
+\begin{verbatim}
+  Polygon / ThetaData / Replayer ticks
+           |
+           v
+    UnifiedTickManager (Python, existing)
+           |  asyncio.Queue
+           v
+    +----------------------------+
+    |  BarBuilder (Rust #[pyclass])  |
+    |  * ingest_trade()          |
+    |  * get_current_bar()       |
+    |  * completed-bar callbacks |
+    +-------------+--------------+
+                  |
+       +----------+----------+----------+
+       |          |          |          |
+       v          v          v          v
+   ClickHouse  Frontend  FactorEngine  Future:
+   (persist)   (WS push)  (bars)     signals, risk
+\end{verbatim}
+
+\subsubsection{Core Design}
+
+\paragraph{Timeframes.}
+Eight concurrent timeframes per ticker: 10\,s, 1\,m, 5\,m, 15\,m, 1\,h, 4\,h, 1\,d, 1\,w.
+Each is maintained as an independent rolling \texttt{BarState} inside the Rust \texttt{BarBuilder}.
+
+\paragraph{Session awareness.}
+Bars respect US market session boundaries:
+\begin{itemize}[nosep]
+    \item Premarket: 04:00--09:30 ET
+    \item Regular: 09:30--16:00 ET
+    \item Afterhours: 16:00--20:00 ET
+\end{itemize}
+A bar never spans a session boundary. For example, a 5\,m bar starting at 09:28 closes
+at 09:30 (truncated), and a new bar begins at 09:30 in the regular session.
+
+\paragraph{BarState fields.}
+Each rolling bar tracks: open, high, low, close, volume, trade\_count,
+vwap (via cumulative numerator + denominator), bar\_start (epoch ms), session tag.
+
+\paragraph{Completed bar emission.}
+When a new trade arrives whose timestamp falls outside the current bar window (or crosses
+a session boundary), the current bar is \emph{completed} and returned to the Python caller.
+The caller (BarsBuilderService) is responsible for persisting to ClickHouse and pushing
+to WebSocket subscribers.
+
+\subsubsection{Implementation Phases}
+
+\begin{enumerate}
+    \item \textbf{Phase 1: Rust BarBuilder core} \\
+    \texttt{rust/src/bars.rs} --- \texttt{BarState}, \texttt{Timeframe} enum,
+    \texttt{SessionCalendar}, \texttt{BarBuilder} as \texttt{\#[pyclass]}.
+    Methods: \texttt{ingest\_trade()}, \texttt{get\_current\_bar()}, \texttt{flush()}.
+    8 timeframes, session-aware boundaries, VWAP tracking.
+    Exposed via \texttt{lib.rs} in the existing \texttt{jerry\_trader.\_rust} module.
+
+    \item \textbf{Phase 2: ClickHouse + Python service} \\
+    ClickHouse schema for OHLCV bars (\texttt{ohlcv\_bars} table,
+    \texttt{ReplacingMergeTree}, partitioned by date).
+    Python \texttt{BarsBuilderService}: orchestrates tick ingestion
+    (reuses \texttt{UnifiedTickManager}) $\to$ Rust \texttt{BarBuilder}
+    $\to$ ClickHouse writes $\to$ WebSocket broadcast of completed bars.
+    ClickHouse replaces InfluxDB for bar storage (InfluxDB retained for
+    snapshots/factors until full migration).
+
+    \item \textbf{Phase 3: Frontend integration} \\
+    Update \texttt{chartDataStore.ts} to receive server-built bars via WebSocket
+    (subscribe) and REST (historical query from ClickHouse).
+    Remove frontend-side \texttt{updateFromTrade()} aggregation.
+    TradingView Lightweight Charts \texttt{getBars()} / \texttt{subscribeBars()} backed
+    by BarsBuilderService.
+
+    \item \textbf{Phase 4: Downstream consumers} \\
+    FactorEngine consumes completed bars from BarBuilder instead of raw ticks
+    for trade-rate / acceleration computation.
+    Factor output migrated from InfluxDB to ClickHouse.
+    Factor visualization overlay in the Chart module.
+    Foundation for v3.0 stream bus: bar builder, feature engine, strategy engine
+    as parallel consumers off a shared tick bus.
+\end{enumerate}
+
 \section{Strategy}
 This app is designed to implement my personal trading strategies, which focus on US pre-market momentum trading.
 

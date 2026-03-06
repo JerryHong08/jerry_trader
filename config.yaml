@@ -40,6 +40,14 @@ databases:
       bucket: "jerryib_trade"
       influx_token_env: "OLDMAN_INFLUXDB_TOKEN"
 
+  clickhouse:
+    clickhouse-a:
+      host: "localhost"
+      port: 8123
+      user: "default"
+      database: "jerry_trader"
+      password_env: "CLICKHOUSE_PASSWORD"
+
 # =============================================================================
 # Machine Roles Configuration
 # =============================================================================
@@ -68,6 +76,19 @@ machines:
         manager_type: "polygon" # choices=["polygon", "theta", "replayer"]
         redis: "redis-a"
         influxdb: "influxdb-a"
+      BarsBuilder:
+        enabled: true
+        redis: "redis-a"
+        clickhouse: "clickhouse-a"
+        timeframes:
+          - "10s"
+          - "1m"
+          - "5m"
+          - "15m"
+          - "1h"
+          - "4h"
+          - "1d"
+          - "1w"
 
   mibuntu:
     limit: "market_open"    # market_open | market_close | null (never stop)

@@ -244,7 +244,7 @@ class SnapshotProcessor:
             traceback.print_exc()
 
     # =========================================================================
-    # HISTORICAL DATA LOADING
+    # HISTORICAL DATA LOADING (will be deprecated in the future)
     # =========================================================================
 
     def _load_historical_data(self, date: str) -> None:

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Building2, Globe, TrendingUp, DollarSign, Users, Calendar, BarChart3, Newspaper, RefreshCw, ExternalLink, Sparkles, AlertCircle, Loader2 } from 'lucide-react';
 import type { ModuleProps, NewsArticle, StockDetailView } from '../types';
 import { SymbolSearch } from './common/SymbolSearch';
@@ -163,12 +163,17 @@ const sortNewsByPublishedAt = (articles: NewsArticle[]): NewsArticle[] => {
   });
 };
 
-const AVAILABLE_SYMBOLS = [
-  'AAPL', 'TSLA', 'NVDA', 'MSFT', 'GOOGL', 'AMZN', 'META', 'AMD',
-  'NFLX', 'COIN', 'PLTR', 'RIVN', 'LCID', 'SOFI', 'BABA', 'NIO'
-];
-
 export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChange }: ModuleProps) {
+  // Get sorted symbol list as a stable string for memoization
+  const symbolsKey = useMarketDataStore((state) =>
+    Array.from(state.entities.keys()).sort().join(',')
+  );
+
+  // Memoize sorted symbols array to prevent infinite loop
+  const availableSymbols = useMemo(() => {
+    return symbolsKey ? symbolsKey.split(',') : [];
+  }, [symbolsKey]);
+
   // Get first ticker from entities map as fallback default (stable selector - avoids infinite loop)
   const firstTicker = useMarketDataStore((state) => {
     // Get first entity by iterating the map - this is stable because we only extract a string
@@ -389,7 +394,7 @@ export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChan
               <SymbolSearch
                 value={symbol}
                 onChange={handleSymbolChange}
-                availableSymbols={AVAILABLE_SYMBOLS}
+                availableSymbols={availableSymbols}
                 placeholder="Symbol..."
                 useConfirmButton={true}
               />
@@ -421,7 +426,7 @@ export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChan
             <SymbolSearch
               value={symbol}
               onChange={handleSymbolChange}
-              availableSymbols={AVAILABLE_SYMBOLS}
+              availableSymbols={availableSymbols}
               placeholder="Symbol..."
               useConfirmButton={true}
             />

@@ -183,20 +183,11 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
         return;
       }
 
-      // Deduplicate and sort bars by time
-      const barMap = new Map<number, OHLCVBar>();
-      for (const bar of data.bars) {
-        barMap.set(bar.time, bar);
-      }
-      const sortedBars = Array.from(barMap.values()).sort(
-        (a, b) => a.time - b.time,
-      );
-
       set((s) => ({
         symbolBars: {
           ...s.symbolBars,
           [tickerUpper]: {
-            bars: sortedBars,
+            bars: data.bars,
             timeframe,
             barDurationSec: data.barDurationSec || TIMEFRAME_DURATION_SEC[timeframe],
             loading: false,
@@ -208,8 +199,15 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
       }));
 
       console.log(
-        `📊 Chart bars loaded: ${tickerUpper} ${timeframe} — ${sortedBars.length} bars (${data.source})`,
+        `📊 Chart bars loaded: ${tickerUpper} ${timeframe} — ${data.bars.length} bars` +
+        ` (${data.source})` +
+        (data.bars.length > 0
+          ? ` | first=${new Date(data.bars[0].time * 1000).toISOString()}` +
+            ` | last=${new Date(data.bars[data.bars.length - 1].time * 1000).toISOString()}` +
+            ` | range=${data.from}..${data.to}`
+          : ''),
       );
+
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       console.error(`❌ Chart bars fetch failed: ${tickerUpper}`, errMsg);
@@ -245,8 +243,26 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
     const barDuration = state.barDurationSec;
     const tradeSec = Math.floor(timestampMs / 1000);
 
-    // Compute the bar boundary this trade belongs to
-    const tradeBarTime = Math.floor(tradeSec / barDuration) * barDuration;
+    // Compute the bar boundary this trade belongs to.
+    // For daily+ bars (>= 86400s), Polygon bar timestamps are NOT exact
+    // multiples of barDuration (they use market-open or date-based offsets).
+    // Use range comparison instead of floor alignment for those.
+    let tradeBarTime: number;
+    if (barDuration >= 86400) {
+      if (tradeSec >= lastBar.time && tradeSec < lastBar.time + barDuration) {
+        // Trade falls within the current bar's expected range
+        tradeBarTime = lastBar.time;
+      } else if (tradeSec >= lastBar.time + barDuration) {
+        // Trade is past the current bar — new bar
+        tradeBarTime = lastBar.time + barDuration;
+      } else {
+        // Trade is before the current bar — stale, ignore
+        return;
+      }
+    } else {
+      // Intraday: floor alignment works perfectly
+      tradeBarTime = Math.floor(tradeSec / barDuration) * barDuration;
+    }
 
     if (tradeBarTime === lastBar.time) {
       // Trade belongs to current bar — update OHLC in place

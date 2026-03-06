@@ -170,10 +170,23 @@ def static_version_prefix(session_id: str) -> str:
 
 
 def chart_bars_cache(
-    ticker: str, multiplier: int, timespan: str, from_date: str, to_date: str
+    ticker: str,
+    multiplier: int,
+    timespan: str,
+    from_date: str,
+    to_date: str,
+    time_bucket: str = "",
 ) -> str:
-    """STRING – cached OHLCV bars JSON (session-independent, same data for same params)."""
-    return f"chart:bars:{ticker}:{multiplier}:{timespan}:{from_date}:{to_date}"
+    """STRING – cached OHLCV bars JSON.
+
+    For intraday timespans (minute, hour), includes a time_bucket suffix
+    (e.g. hour bucket '14') so that requests at different times of day
+    don’t collide on the same cache key.
+    """
+    base = f"chart:bars:{ticker}:{multiplier}:{timespan}:{from_date}:{to_date}"
+    if time_bucket:
+        return f"{base}:{time_bucket}"
+    return base
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

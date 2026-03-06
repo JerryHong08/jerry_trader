@@ -42,22 +42,98 @@ mainly focus on basic modules development and strcuture buidling.
   - ✅after that or during test of column data, we can test the overviewchartdata emit, which needs to normalize the frontend chart and get_chart_data in overviewchartdataManager.py.
   - ✅then Stock Detail. the data request is driven by top gainers and backend data management, so it should use cache, and also the data request can be driven by the frontend button. it's basic the same as the static data column update in top gainers column.
   - ✅then the Portfolio and Order Management. this module is isolated, so it's easier to integrate.
-  - 📌the last one is the Chart module, based on tradingview lightweight chart, the focus is balance between the real-time update and historical data retrival. **data management and historical data bootstrap.**
+
+### Stage2.5(Current)
+
+📌the last one is the Chart module, based on tradingview lightweight chart, the focus is balance between the real-time update and historical data retrival. **data management and historical data bootstrap. also build a architecture prepared for stage3 strategy real-time/replay computation, execution, analysis**
     - bootstrap using api&cache
+    - write a data pipeline in Rust
+
+    - current architecture:
+
+      ``` bash
+      v1.0
+
+      frontend
+        -> request - bff for historical data api fetch(cache&incremental design)
+        -> subscribe - tickdataServer for real-time websocket
+
+      problem:
+        bar consistency issues
+        UI complexity
+        duplicate aggregation logic
+        hard to scale
+      ```
+
+    - planned architecture(for better tradingng ui):
+
+      ``` bash
+      v2.0
+
+      frontend
+        -> request - bars builder for historical data api fetch(The builder maintains rolling bar states.)
+        -> subscribe - bars builder for real-time websocket
+
+      Backend pipeline:
+        polygon ticks
+            │
+            ▼
+        tick ingestion
+            │
+            ▼
+        Bar Builder Service
+            │
+            ├─ maintains rolling bar states
+            │
+            ├─ persists completed bars
+            │
+            └─ streams realtime bar updates
+
+      Frontend behavior:
+        getBars()
+        subscribeBars()
+
+      Advantages:
+        UI becomes simple
+        bar consistency guaranteed
+        deterministic bar generation
+        lower websocket bandwidth
+      ```
+
+    - planned architecture(for better quant strategy computation&execution):
+
+      ``` bash
+      v3.0
+
+      market feed
+        │
+        ▼
+      tick ingestion
+        │
+        ▼
+      stream bus
+        │
+        ├─ bar builder
+        ├─ feature engine
+        └─ strategy engine
+
+      more to be discussed yet.
+
+      ```
 
 ### Stage3
 
-mainly focus on factor computing and advanced integration of system.
+mainly focus on strategy computation,execution,replay backtest.
 
 - ✅separated works to other computuers using ssh. configured in config.yaml.
 - visualization of factors in chart module.
-- rewrite stateEngine in rust.
 - real-time risk management engine/trigger.
   - risk manage rule
 - developing machine learning module.
   - build breakout-compute-analyze oriented Context Model using current recored files.
   - simulate market_snapshot replay using historical trade&quote bulk file.
   - build historical context model.
+- rewrite stateEngine in rust.
 - rewrite factorEegine in Rust.
 
 ### optional features

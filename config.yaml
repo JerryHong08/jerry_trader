@@ -61,11 +61,11 @@ machines:
         host: "0.0.0.0"
         port: 8000
         redis: "redis-a"
-      FactorEngine:
-        enabled: true
-        manager_type: "polygon" # choices=["polygon", "theta", "replayer"]
-        redis: "redis-a"
-        influxdb: "influxdb-a"
+      # FactorEngine:
+      #   enabled: true
+      #   manager_type: "polygon" # choices=["polygon", "theta", "replayer"]
+      #   redis: "redis-a"
+      #   influxdb: "influxdb-a"
 
   mibuntu:
     limit: "market_open"    # market_open | market_close | null (never stop)

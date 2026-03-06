@@ -281,7 +281,7 @@ export function ChartModule({
       timeVisible: ['1m', '5m', '15m', '30m', '1h', '4h'].includes(timeframe),
       secondsVisible: timeframe === '1m',
     });
-  }, [chartState?.bars, chartState?.loading, chartMode, symbol, ensureSeries, timeframe]);
+  }, [chartState?.lastFetchTime, chartState?.loading, chartMode, symbol, ensureSeries, timeframe]);
 
   // ── Real-time trade tick → update current bar / line fallback ──────────
   const latestTrade = symbol

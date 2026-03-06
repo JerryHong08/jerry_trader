@@ -1,13 +1,20 @@
 """
 Chart Data Service – OHLCV bar data provider for frontend ChartModule.
 
-Orchestrates historical bar data from multiple sources with unified caching.
-This is the backend counterpart of the frontend's chartDataStore.
+Orchestrates historical bar data from multiple sources with unified caching
+and incremental fetch support.
 
 Data Source Resolution (in order):
-    1. Redis cache (keyed by ticker + timeframe + date range)
-    2. Polygon.io API (via CustomBarsFetcher)
+    1. Redis cache (time-bucketed for intraday, date-based for daily+)
+    2. Polygon.io API (via CustomBarsFetcher) — incremental when possible
     3. Local data loader (for replay mode / API failure fallback)
+
+Incremental Fetch:
+    When the backend Redis cache is stale (gap between last cached bar and
+    now exceeds the timeframe threshold), the service fetches only the
+    delta from Polygon, merges with the cached bars, and returns the
+    combined result.  This is entirely backend-internal; the frontend
+    always receives a complete bar set.
 
 Architecture Notes:
     - Real-time bar updates are handled on the frontend via trade ticks
@@ -20,14 +27,13 @@ Architecture Notes:
 Usage:
     service = ChartDataService(redis_config={"host": "127.0.0.1"})
     result = service.get_bars("AAPL", "5m")
-    # result = { "ticker": "AAPL", "timeframe": "5m", "bars": [...], ... }
 
 Data Flow:
     Frontend ChartModule
         → REST GET /api/chart/bars/{ticker}?timeframe=5m
         → BFF → ChartDataService.get_bars()
-        → [Redis cache | Polygon API | Local data]
-        → Returns OHLCV array → Frontend renders candlestick chart
+        → [Redis cache | Polygon API (full or incremental) | Local data]
+        → Returns complete OHLCV array → Frontend renders candlestick chart
 """
 
 import json
@@ -75,6 +81,46 @@ DEFAULT_LOOKBACK: Dict[str, int] = {
     "1M": 1825,
 }
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Intraday vs daily helpers
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Timespans considered "intraday" for cache-key bucketing
+_INTRADAY_TIMESPANS = {"minute", "hour"}
+
+
+def _is_intraday(timespan: str) -> bool:
+    return timespan in _INTRADAY_TIMESPANS
+
+
+def _time_bucket(timespan: str, multiplier: int) -> str:
+    """Compute a time-bucket suffix for intraday cache keys.
+
+    Bucket granularity scales with bar size:
+      minute-1   → bucket every 5 min  (e.g. '1422'  → minute 1422 of day // 5)
+      minute-5   → bucket every 15 min
+      minute-15  → bucket every 30 min
+      minute-30  → bucket every 60 min
+      hour-*     → bucket every hour
+    """
+    now = datetime.now()
+    minutes_of_day = now.hour * 60 + now.minute
+
+    if timespan == "minute":
+        if multiplier <= 1:
+            bucket_size = 5
+        elif multiplier <= 5:
+            bucket_size = 15
+        elif multiplier <= 15:
+            bucket_size = 30
+        else:
+            bucket_size = 60
+        return str(minutes_of_day // bucket_size)
+    elif timespan == "hour":
+        return str(now.hour)
+    return ""
+
+
 # Cache TTL (seconds) per timeframe granularity
 # Intraday bars expire faster (data still forming during market hours)
 CACHE_TTL: Dict[str, int] = {
@@ -89,6 +135,20 @@ CACHE_TTL: Dict[str, int] = {
     "1M": 28800,  # 8 hr
 }
 
+# Minimum gap (seconds) before we bother doing an incremental fetch.
+# If the gap is smaller than this, the current cached / returned data is fresh enough.
+MIN_INCREMENTAL_GAP: Dict[str, int] = {
+    "1m": 60,
+    "5m": 300,
+    "15m": 900,
+    "30m": 1800,
+    "1h": 3600,
+    "4h": 14400,
+    "1D": 86400,
+    "1W": 86400,
+    "1M": 86400,
+}
+
 
 class ChartDataService:
     """
@@ -96,6 +156,7 @@ class ChartDataService:
 
     Wraps CustomBarsFetcher (Polygon API) with smart defaults and caching.
     Falls back to local data loader when API is unavailable and local files exist.
+    Supports incremental fetch to avoid re-fetching already-known bars.
 
     Thread Safety:
         Safe for concurrent calls — Redis and CustomBarsFetcher are thread-safe.
@@ -141,6 +202,11 @@ class ChartDataService:
         """
         Get OHLCV bars for the frontend ChartModule.
 
+        Returns a complete bar set.  Internally uses incremental fetch
+        when the Redis cache is stale (fetches only the gap from Polygon,
+        merges with cached bars).  The frontend always receives a full
+        replacement — no client-side merge needed.
+
         Args:
             ticker: Stock ticker symbol (e.g., 'AAPL')
             timeframe: Frontend timeframe string ('1m', '5m', '1h', '1D', etc.)
@@ -150,17 +216,6 @@ class ChartDataService:
 
         Returns:
             Dict with bars data formatted for lightweight-charts, or None on failure.
-            {
-                "ticker": "AAPL",
-                "timeframe": "5m",
-                "bars": [{"time": 1709600100, "open": 170.5, "high": 171.0,
-                          "low": 170.2, "close": 170.8, "volume": 12345}, ...],
-                "barCount": 390,
-                "source": "polygon" | "polygon_cache" | "local" | "cache",
-                "barDurationSec": 300,
-                "from": "2026-03-01",
-                "to": "2026-03-05"
-            }
         """
         ticker = ticker.upper().strip()
         if not ticker:
@@ -175,7 +230,8 @@ class ChartDataService:
         multiplier, timespan, bar_duration_sec = TIMEFRAME_MAP[timeframe]
 
         # Resolve date range
-        to_dt = datetime.strptime(to_date, "%Y-%m-%d") if to_date else datetime.now()
+        now = datetime.now()
+        to_dt = datetime.strptime(to_date, "%Y-%m-%d") if to_date else now
         if from_date:
             from_dt = datetime.strptime(from_date, "%Y-%m-%d")
         else:
@@ -185,13 +241,72 @@ class ChartDataService:
         from_str = from_dt.strftime("%Y-%m-%d")
         to_str = to_dt.strftime("%Y-%m-%d")
 
-        # 1. Check chart-level Redis cache
-        cache_key = chart_bars_cache(ticker, multiplier, timespan, from_str, to_str)
+        # Time bucket for intraday cache keys (avoids serving stale 10am data at 2pm)
+        bucket = _time_bucket(timespan, multiplier) if _is_intraday(timespan) else ""
+
+        logger.debug(
+            f"get_bars → {ticker} {timeframe} | "
+            f"range={from_str}..{to_str} | "
+            f"polygon_params=({multiplier},{timespan}) | "
+            f"bar_dur={bar_duration_sec}s | limit={limit} | "
+            f"bucket={bucket!r}"
+        )
+
+        # ── 1. Check chart-level Redis cache ──────────────────────────
+        cache_key = chart_bars_cache(
+            ticker, multiplier, timespan, from_str, to_str, time_bucket=bucket
+        )
         cached = self._get_chart_cache(cache_key)
+
         if cached:
+            cached_bars = cached.get("bars", [])
+            cached_last = cached_bars[-1]["time"] if cached_bars else 0
+            now_epoch = int(now.timestamp())
+            gap = now_epoch - cached_last
+
+            # If the gap is small enough, serve cache directly
+            min_gap = MIN_INCREMENTAL_GAP.get(timeframe, bar_duration_sec)
+            if gap < min_gap:
+                logger.debug(
+                    f"get_bars ← {ticker} {timeframe} | CACHE HIT (fresh) | "
+                    f"{len(cached_bars)} bars | gap={gap}s < {min_gap}s | key={cache_key}"
+                )
+                return cached
+
+            # Cache exists but is stale — try incremental fetch from the gap
+            logger.debug(
+                f"get_bars ~ {ticker} {timeframe} | CACHE STALE | "
+                f"{len(cached_bars)} bars | gap={gap}s ≥ {min_gap}s → incremental"
+            )
+            incremental = self._incremental_fetch(
+                ticker,
+                multiplier,
+                timespan,
+                cached_last,
+                to_dt,
+                timeframe,
+                bar_duration_sec,
+                limit,
+            )
+            if incremental:
+                merged = self._merge_bars(cached_bars, incremental)
+                result = self._build_response(
+                    merged,
+                    ticker,
+                    timeframe,
+                    bar_duration_sec,
+                    from_str,
+                    to_str,
+                    source="polygon_incremental",
+                )
+                self._set_chart_cache(cache_key, result, timeframe)
+                self._log_result(ticker, timeframe, "INCREMENTAL", result)
+                return result
+            # If incremental fetch failed, still serve stale cache
+            logger.debug(f"get_bars ~ incremental failed, returning stale cache")
             return cached
 
-        # 2. Try Polygon API (CustomBarsFetcher handles its own caching)
+        # ── 2. Full fetch from Polygon API ────────────────────────────
         result = self._fetch_from_polygon(
             ticker,
             multiplier,
@@ -204,9 +319,10 @@ class ChartDataService:
         )
         if result:
             self._set_chart_cache(cache_key, result, timeframe)
+            self._log_result(ticker, timeframe, "POLYGON FULL", result)
             return result
 
-        # 3. Fallback to local data
+        # ── 3. Fallback to local data ─────────────────────────────────
         result = self._fetch_from_local(
             ticker,
             timeframe,
@@ -216,6 +332,7 @@ class ChartDataService:
         )
         if result:
             self._set_chart_cache(cache_key, result, timeframe)
+            self._log_result(ticker, timeframe, "LOCAL", result)
             return result
 
         logger.warning(f"get_bars - no data available for {ticker} {timeframe}")
@@ -234,6 +351,116 @@ class ChartDataService:
         ]
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # Incremental fetch & merge helpers
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    def _incremental_fetch(
+        self,
+        ticker: str,
+        multiplier: int,
+        timespan: str,
+        last_bar_time: int,
+        to_dt: datetime,
+        timeframe: str,
+        bar_duration_sec: int,
+        limit: int,
+    ) -> Optional[List[Dict]]:
+        """Fetch only the bars newer than `last_bar_time` from Polygon.
+
+        Returns a list of bar dicts, or None on failure.
+        """
+        try:
+            # Start 1 bar before last_bar_time to ensure overlap for dedup
+            gap_from = datetime.utcfromtimestamp(last_bar_time)
+            logger.debug(
+                f"_incremental_fetch {ticker} {timeframe} | "
+                f"from={gap_from.isoformat()} to={to_dt.date()}"
+            )
+            polygon_cache_ttl = CACHE_TTL.get(timeframe, 3600)
+            df = self.fetcher.bars_fetch(
+                ticker=ticker,
+                multiplier=multiplier,
+                timespan=timespan,
+                from_=gap_from,
+                to_=to_dt,
+                limit=limit,
+                timeout=20,
+                use_cache=False,  # Never use polygon cache for incremental
+                return_dataframe=True,
+                cache_ttl=polygon_cache_ttl,
+            )
+            if df is None or df.is_empty():
+                return None
+
+            bars = []
+            for row in df.iter_rows(named=True):
+                time_sec = row["timestamp"] // 1000
+                bars.append(
+                    {
+                        "time": time_sec,
+                        "open": round(row["open"], 4),
+                        "high": round(row["high"], 4),
+                        "low": round(row["low"], 4),
+                        "close": round(row["close"], 4),
+                        "volume": row["volume"],
+                    }
+                )
+            logger.debug(f"_incremental_fetch → {len(bars)} new bars for {ticker}")
+            return bars
+        except Exception as e:
+            logger.warning(f"_incremental_fetch failed for {ticker}: {e}")
+            return None
+
+    @staticmethod
+    def _merge_bars(existing: List[Dict], new_bars: List[Dict]) -> List[Dict]:
+        """Merge existing cached bars with newly fetched bars.
+
+        For overlapping timestamps, the new bar's data wins (it has the latest
+        volume / close from Polygon).  Result is sorted by time, deduplicated.
+        """
+        merged = {b["time"]: b for b in existing}
+        for b in new_bars:
+            merged[b["time"]] = b  # new overwrites old on overlap
+        result = sorted(merged.values(), key=lambda b: b["time"])
+        return result
+
+    @staticmethod
+    def _build_response(
+        bars: List[Dict],
+        ticker: str,
+        timeframe: str,
+        bar_duration_sec: int,
+        from_date: str,
+        to_date: str,
+        source: str = "polygon",
+    ) -> Dict:
+        """Build a ChartBarsResponse dict from a bar list."""
+        last_t = bars[-1]["time"] if bars else None
+        return {
+            "ticker": ticker,
+            "timeframe": timeframe,
+            "bars": bars,
+            "barCount": len(bars),
+            "barDurationSec": bar_duration_sec,
+            "source": source,
+            "from": from_date,
+            "to": to_date,
+            "lastBarTime": last_t,
+        }
+
+    @staticmethod
+    def _log_result(ticker: str, timeframe: str, label: str, result: Dict):
+        bars = result.get("bars", [])
+        first_t = bars[0]["time"] if bars else None
+        last_t = bars[-1]["time"] if bars else None
+        logger.info(
+            f"get_bars ← {ticker} {timeframe} | {label} | "
+            f"{len(bars)} bars | "
+            f"first={datetime.utcfromtimestamp(first_t).isoformat() if first_t else 'N/A'} | "
+            f"last={datetime.utcfromtimestamp(last_t).isoformat() if last_t else 'N/A'}"
+        )
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # Data source: Polygon API
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -250,6 +477,9 @@ class ChartDataService:
     ) -> Optional[Dict]:
         """Fetch bars via Polygon.io API (CustomBarsFetcher)."""
         try:
+            # Use same TTL for the polygon-level cache as the chart-level cache
+            # so intraday bars don't serve stale data from the polygon cache
+            polygon_cache_ttl = CACHE_TTL.get(timeframe, 3600)
             df = self.fetcher.bars_fetch(
                 ticker=ticker,
                 multiplier=multiplier,
@@ -260,6 +490,7 @@ class ChartDataService:
                 timeout=20,
                 use_cache=True,
                 return_dataframe=True,
+                cache_ttl=polygon_cache_ttl,
             )
 
             if df is None or df.is_empty():
@@ -430,6 +661,11 @@ class ChartDataService:
                 }
             )
 
+        # Forward-fill gaps for intraday data
+        if _is_intraday(TIMEFRAME_MAP.get(timeframe, (0, "day", 0))[1]) and bars:
+            bars = ChartDataService._fill_intraday_gaps(bars, bar_duration_sec)
+
+        last_t = bars[-1]["time"] if bars else None
         return {
             "ticker": ticker,
             "timeframe": timeframe,
@@ -439,6 +675,7 @@ class ChartDataService:
             "source": source,
             "from": from_date,
             "to": to_date,
+            "lastBarTime": last_t,
         }
 
     @staticmethod
@@ -487,4 +724,48 @@ class ChartDataService:
             "source": "local",
             "from": from_date,
             "to": to_date,
+            "lastBarTime": bars[-1]["time"] if bars else None,
         }
+
+    @staticmethod
+    def _fill_intraday_gaps(bars: List[Dict], bar_duration_sec: int) -> List[Dict]:
+        """Forward-fill missing intraday bars.
+
+        If there's a gap > 1 bar_duration between consecutive bars,
+        fill with synthetic bars that carry the previous close forward
+        (open = high = low = close = prev_close, volume = 0).
+
+        This mirrors the _forward_fill_missing pattern in data_loader.py
+        but operates on the lightweight bar-dict format.
+
+        Limited to intraday to avoid creating bars on weekends/holidays
+        for daily+ timespans.
+        """
+        if len(bars) < 2:
+            return bars
+
+        filled: List[Dict] = [bars[0]]
+        for i in range(1, len(bars)):
+            prev = filled[-1]
+            curr = bars[i]
+            gap = curr["time"] - prev["time"]
+
+            # Only fill gaps that are multiples of bar_duration and reasonable
+            # (max 60 synthetic bars to avoid blowing up on overnight gaps)
+            if gap > bar_duration_sec:
+                n_missing = min(int(gap / bar_duration_sec) - 1, 60)
+                prev_close = prev["close"]
+                for j in range(1, n_missing + 1):
+                    filled.append(
+                        {
+                            "time": prev["time"] + j * bar_duration_sec,
+                            "open": prev_close,
+                            "high": prev_close,
+                            "low": prev_close,
+                            "close": prev_close,
+                            "volume": 0,
+                        }
+                    )
+            filled.append(curr)
+
+        return filled

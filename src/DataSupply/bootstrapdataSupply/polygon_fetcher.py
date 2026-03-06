@@ -252,6 +252,7 @@ class CustomBarsFetcher:
         timeout: int = 20,
         use_cache: bool = True,
         return_dataframe: bool = True,
+        cache_ttl: Optional[int] = None,
     ) -> Optional[pl.DataFrame | Dict]:
         """
         Fetch bars data from Polygon.io API
@@ -266,6 +267,7 @@ class CustomBarsFetcher:
             timeout: Request timeout in seconds (default: 20)
             use_cache: Whether to use Redis caching (default: True)
             return_dataframe: Return as Polars DataFrame instead of raw dict (default: True)
+            cache_ttl: Override cache TTL in seconds (default: None → uses CACHE_TTL)
 
         Returns:
             Polars DataFrame or dict with bars data, or None if failed
@@ -286,6 +288,7 @@ class CustomBarsFetcher:
 
         # Check cache first
         cache_key = self._get_cache_key(ticker, multiplier, timespan, from_, to_)
+        effective_ttl = cache_ttl if cache_ttl is not None else self.CACHE_TTL
         if use_cache:
             cached_data = self._get_cached_data(cache_key)
             if cached_data:
@@ -311,9 +314,13 @@ class CustomBarsFetcher:
             logger.error("bars_fetch - Failed to fetch data")
             return None
 
-        # Cache the data
+        # Cache the data with effective TTL
         if use_cache and data.get("resultsCount", 0) > 0:
-            self._cache_data(cache_key, data)
+            try:
+                self.r.setex(cache_key, effective_ttl, json.dumps(data))
+                logger.debug(f"💾 Cached {cache_key} (TTL={effective_ttl}s)")
+            except Exception as e:
+                logger.warning(f"Failed to cache data: {e}")
 
         logger.info(
             f"✅ Successfully fetched {data.get('resultsCount', 0)} bars for {ticker}"

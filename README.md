@@ -2,6 +2,96 @@
 
 this file has my trading system module summary and the roadmap from very early experimental stage to planned.
 
+## Installation & Quick Start
+
+this project is built for my multiple machines working under the same network or through tailscale. you can configure each machine's role in the through [config.yaml](/config.yaml.example)
+
+### 1. Clone & Configure
+
+```bash
+git clone <repo-url> jerry_trader && cd jerry_trader
+
+Edit `.env` — at minimum you need:
+
+- `POLYGON_API_KEY` — Polygon.io Advanced subscription (real-time snapshot + tick data)
+- Database URLs for PostgreSQL / InfluxDB (if using persistence)
+- `IB_PORT` — 7496 (paper) or 7497 (live) for IBKR TWS; 4002/4001 for Gateway
+
+Edit `basic_config.yaml`:
+
+- `data.data_dir` — local path where market data is stored
+
+### 2. Install Python Dependencies
+
+```bash
+# Create virtualenv and install all deps
+poetry install
+
+# Verify
+poetry env info
+```
+
+for ibapi installation, see [Download the TWS API](https://www.interactivebrokers.com/campus/ibkr-api-page/twsapi-doc/#find-the-api)
+
+### 3. Build the Rust Extension
+
+```bash
+# Build and install the Rust extension into the Poetry venv
+poetry run maturin develop
+
+# Verify
+poetry run python -c "from jerry_trader._rust import sum_as_string; print(sum_as_string(1, 2))"
+# → 3
+```
+
+For release-optimized builds: `poetry run maturin develop --release`
+
+### 4. Database Setup
+
+```bash
+# Run Alembic migrations (requires postgres URL in alembic.ini)
+poetry run alembic upgrade head
+```
+
+Make sure Redis is running (`redis-server` or via Docker).
+
+### 5. Start the Backend
+
+```bash
+# Start all backend services for a machine profile defined in config.yaml
+poetry run python -m jerry_trader.backend_starter --machine wsl2
+
+# Dry-run to see what would start
+poetry run python -m jerry_trader.backend_starter --machine wsl2 --dry-run
+
+# With replay mode (historical date)
+poetry run python -m jerry_trader.backend_starter --machine wsl2 --defaults.replay_date 20260115
+```
+
+### 6. Start the Frontend
+
+```bash
+cd frontend
+pnpm install
+pnpm dev
+```
+
+### 7. Development Workflow
+
+```bash
+# After editing Rust code
+poetry run maturin develop
+
+# After editing Python code — no rebuild needed (editable install)
+
+# Run tests
+poetry run pytest
+
+# Code formatting
+poetry run black python/
+poetry run isort python/
+```
+
 ## roadmap
 
 ### Stage 1 & Initial Start
@@ -46,80 +136,82 @@ mainly focus on basic modules development and strcuture buidling.
 ### Stage2.5(Current)
 
 📌the last one is the Chart module, based on tradingview lightweight chart, the focus is balance between the real-time update and historical data retrival. **data management and historical data bootstrap. also build a architecture prepared for stage3 strategy real-time/replay computation, execution, analysis**
-    - bootstrap using api&cache
-    - write a data pipeline in Rust
 
-    - current architecture:
+- bootstrap using api&cache
+- write a data pipeline in Rust
+  - current architecture:
 
-      ``` bash
-      v1.0
+    ``` bash
+    v1.0
 
-      frontend
-        -> request - bff for historical data api fetch(cache&incremental design)
-        -> subscribe - tickdataServer for real-time websocket
+    frontend
+      -> request - bff for historical data api fetch(cache&incremental design)
+      -> subscribe - tickdataServer for real-time websocket
 
-      problem:
-        bar consistency issues
-        UI complexity
-        duplicate aggregation logic
-        hard to scale
-      ```
+    problem:
+      bar consistency issues
+      UI complexity
+      duplicate aggregation logic
+      hard to scale
+    ```
 
-    - planned architecture(for better tradingng ui):
+  - planned architecture(for better tradingng ui):
 
-      ``` bash
-      v2.0
+    ``` bash
+    v2.0
 
-      frontend
-        -> request - bars builder for historical data api fetch(The builder maintains rolling bar states.)
-        -> subscribe - bars builder for real-time websocket
+    frontend
+      -> request - bars builder for historical data api fetch(The builder maintains rolling bar states.)
+      -> subscribe - bars builder for real-time websocket
 
-      Backend pipeline:
-        polygon ticks
-            │
-            ▼
-        tick ingestion
-            │
-            ▼
-        Bar Builder Service
-            │
-            ├─ maintains rolling bar states
-            │
-            ├─ persists completed bars
-            │
-            └─ streams realtime bar updates
-
-      Frontend behavior:
-        getBars()
-        subscribeBars()
-
-      Advantages:
-        UI becomes simple
-        bar consistency guaranteed
-        deterministic bar generation
-        lower websocket bandwidth
-      ```
-
-    - planned architecture(for better quant strategy computation&execution):
-
-      ``` bash
-      v3.0
-
-      market feed
-        │
-        ▼
+    Backend pipeline:
+      polygon ticks
+          │
+          ▼
       tick ingestion
-        │
-        ▼
-      stream bus
-        │
-        ├─ bar builder
-        ├─ feature engine
-        └─ strategy engine
+          │
+          ▼
+      Bar Builder Service
+          │
+          ├─ maintains rolling bar states
+          │
+          ├─ persists completed bars
+          │
+          └─ streams realtime bar updates
 
-      more to be discussed yet.
+    Frontend behavior:
+      getBars()
+      subscribeBars()
 
-      ```
+    Advantages:
+      UI becomes simple
+      bar consistency guaranteed
+      deterministic bar generation
+      lower websocket bandwidth
+    ```
+
+  - planned architecture(for better quant strategy computation&execution):
+
+    ``` bash
+    v3.0
+
+    market feed
+      │
+      ▼
+    tick ingestion
+      │
+      ▼
+    stream bus
+      │
+      ├─ bar builder
+      ├─ feature engine
+      └─ strategy engine
+
+    more to be discussed yet.
+
+    ```
+
+- restructure and introduce rust
 
 ### Stage3
 

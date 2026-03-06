@@ -1,29 +1,109 @@
-__pycache__/
-*.pyc
-.env
-*.sqlite3
-data/*
-!data/.gitkeep
-.vscode
+# ==================== Rust ====================
+/target
+rust/target/
+**/*.rs.bk
 
+# ==================== Python ====================
+# Byte-compiled / optimized / DLL files
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.pyo
+
+# C extensions / maturin-built shared objects
+*.so
+*.pyd
+
+# Distribution / packaging
+.Python
+.venv/
+env/
+bin/
+build/
+develop-eggs/
+dist/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+include/
+man/
+venv/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+pip-selfcheck.json
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.coverage
+.cache
+nosetests.xml
+coverage.xml
+
+# Translations
+*.mo
+
+# Mr Developer
+.mr.developer.cfg
+.project
+.pydevproject
+
+# Rope
+.ropeproject
+
+# ==================== Frontend ====================
+node_modules/
+frontend/build/
+public/build/
+
+# Vite/Rollup build assets
+/assets/index-*.js
+
+# ==================== IDE / Editor ====================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ==================== OS ====================
+.DS_Store
+Thumbs.db
+
+# ==================== Project-specific ====================
+# Config with secrets
+alembic.ini
+.env
+config.yaml
+
+# Data / logs / docs (generated)
+data/*
 logs/
 docs/
 discard/
 
-alembic.ini
+# Data files
+*data.csv
+*.pkl
+*.sqlite3
 
+# Misc
 momo_token.py
 
-*data.csv
+# Django
+*.log
+*.pot
 
-# Build outputs
-build/
-dist/
-node_modules/
+# Sphinx
+docs/_build/
 
-# Vite/Rollup build assets
-/assets/index-*.js
-# /assets/
-public/build/
-
-*.pkl
+# Pyenv
+.python-version

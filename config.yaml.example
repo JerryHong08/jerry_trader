@@ -1,0 +1,170 @@
+# config.yaml.example
+# Copy to config.yaml and customize for your setup.
+#
+# Database Reference Format: "db-name@MACHINE" or "db-name" (defaults to LOCAL)
+# Example: "redis-a@MACHINE_B" -> {host: env(MACHINE_B_IP), port: 6379, db: 0}
+
+# =============================================================================
+# Network - Environment variable names for machine IPs (set in .env)
+# Add/remove machines as needed for your setup.
+# =============================================================================
+network:
+  MACHINE_A: "MACHINE_A_IP"         # e.g., your main dev machine
+  MACHINE_B: "MACHINE_B_IP"         # e.g., a remote server
+  MACHINE_C: "MACHINE_C_IP"         # e.g., another remote machine
+  MACHINE_B_REMOTE: "MACHINE_B_REMOTE_IP"   # e.g., public IP for remote access
+  LOCAL: null  # null = 127.0.0.1
+
+# =============================================================================
+# Database Definitions (templates without host - host resolved from network)
+# =============================================================================
+databases:
+  redis:
+    redis-a:
+      port: 6379
+      db: 0
+    redis-b:
+      port: 6379
+      db: 0
+
+  postgres:
+    postgres-a:
+      # URL resolved from {MACHINE}_DATABASE_URL env var
+      # e.g., postgres-a@MACHINE_A -> MACHINE_A_DATABASE_URL
+    postgres-b:
+
+  influxdb:
+    influxdb-a:
+      bucket: "your_bucket_name"
+      influx_token_env: "MACHINE_A_INFLUXDB_TOKEN"
+    influxdb-b:
+      bucket: "your_bucket_name"
+      influx_token_env: "MACHINE_B_INFLUXDB_TOKEN"
+
+# =============================================================================
+# Machine Roles Configuration
+# Define which services run on each machine. Each machine profile is started
+# via: python -m jerry_trader.backend_starter --machine <name>
+# =============================================================================
+machines:
+  # ---- Machine A: main dev machine (runs frontend-facing services) ----------
+  machine_a:
+    limit: "null"    # market_open | market_close | null (never stop)
+    roles:
+      # StateEngine:
+      #   enabled: true
+      #   redis: "redis-a"
+      #   influxdb: "influxdb-a"
+      GridTraderBFF:
+        enabled: true
+        host: "0.0.0.0"
+        port: 5001
+        debug: false
+        redis: "redis-b"
+        influxdb: "influxdb-b"
+      TickDataServer:
+        enabled: true
+        host: "0.0.0.0"
+        port: 8000
+        redis: "redis-a"
+      # FactorEngine:
+      #   enabled: true
+      #   manager_type: "polygon" # choices=["polygon", "theta", "replayer"]
+      #   redis: "redis-a"
+      #   influxdb: "influxdb-a"
+
+  # ---- Machine B: data processing server ------------------------------------
+  machine_b:
+    limit: "market_open"    # market_open | market_close | null (never stop)
+    roles:
+      SnapshotProcessor:
+        enabled: true
+        redis: "redis-b"           # no @MACHINE = LOCAL (127.0.0.1)
+        influxdb: "influxdb-b"
+      StaticDataWorker:
+        enabled: true
+        poll_interval: 1.0
+        batch_size: 5
+        redis: "redis-b"
+      GridTraderBFF:
+        enabled: true
+        host: "0.0.0.0"
+        port: 5001
+        debug: false
+        redis: "redis-b"
+        influxdb: "influxdb-b"
+
+  # ---- Machine C: news & NLP processing ------------------------------------
+  machine_c:
+    limit: "market_open"    # market_open | market_close | null (never stop)
+    roles:
+      NewsProcessor:
+        enabled: true
+        redis: "redis-b@MACHINE_B"
+        postgres: "postgres-b@MACHINE_B"
+      NewsWorker:
+        enabled: true
+        poll_interval: 1.0
+        batch_size: 5
+        news_limit: 5
+        news_recency_hours: 24.0
+        sources:
+          - momo
+          - benzinga
+          - fmp
+        redis: "redis-b@MACHINE_B"
+        postgres: "postgres-b@MACHINE_B"
+
+  # ---- Collector: premarket data collection ---------------------------------
+  collector:
+    limit: "market_open"     # collector only runs premarket
+    roles:
+      Collector:
+        enabled: true
+        redis: "redis-b"
+        limit: "market_open"
+
+  # ---- Replayer: replay historical data for backtesting ---------------------
+  replayer:
+    limit: null               # replayer never auto-stops
+    roles:
+      Replayer:
+        enabled: true
+        speed: 1.0
+        format: "parquet"
+        rollback_to: null
+        start_from: null
+        clear: false
+        redis: "redis-b"
+        influxdb: "influxdb-b"
+
+# =============================================================================
+# Defaults
+# =============================================================================
+defaults:
+  replay_date: null
+  suffix_id: null
+  load_history: null
+  log_level: "DEBUG"
+  worker_count: 4
+  queue_maxsize: 200
+  monitor_interval: 10.0
+
+# =============================================================================
+# LLM Configuration
+# =============================================================================
+llm:
+  active_model: deepseek
+  models:
+    deepseek:
+      default_model: "deepseek-chat"
+      system_prompt: "news_processor_prompt_v2.txt"
+      base_url: "https://api.deepseek.com"
+      thinking_mode: false
+      api_key_env: "DEEPSEEK_API_KEY"
+    kimi:
+      default_model: "kimi-k2.5"
+      system_prompt: "news_processor_prompt_v2.txt"
+      base_url: "https://api.moonshot.cn/v1"
+      thinking_mode: false
+      api_key_env: "KIMI_API_KEY"

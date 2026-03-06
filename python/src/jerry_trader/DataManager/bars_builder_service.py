@@ -309,10 +309,14 @@ class BarsBuilderService:
         self.active_tickers.add(symbol)
 
         # Subscribe to trade events via shared UnifiedTickManager
-        self.ws_manager.subscribe(
-            websocket_client=CLIENT_ID,
-            symbols=[symbol],
-            events=["T"],
+        # NOTE: subscribe() is an async coroutine — must schedule on ws_loop
+        asyncio.run_coroutine_threadsafe(
+            self.ws_manager.subscribe(
+                websocket_client=CLIENT_ID,
+                symbols=[symbol],
+                events=["T"],
+            ),
+            self.ws_loop,
         )
 
         # Create async consumer for each trade stream key
@@ -349,9 +353,20 @@ class BarsBuilderService:
     async def _consume_stream_key(self, stream_key: str, symbol: str) -> None:
         """Read from the per-client asyncio.Queue and feed to BarBuilder."""
         logger.debug(f"Starting consumer for {stream_key}")
-        q = self.ws_manager.get_client_queue(CLIENT_ID, stream_key)
+
+        # Retry: subscribe() is async and may not have completed yet
+        q = None
+        for attempt in range(10):
+            q = self.ws_manager.get_client_queue(CLIENT_ID, stream_key)
+            if q is not None:
+                break
+            logger.debug(
+                f"Queue not ready for {stream_key}, retrying ({attempt + 1}/10)..."
+            )
+            await asyncio.sleep(0.3)
+
         if q is None:
-            logger.warning(f"No queue found for {stream_key}")
+            logger.warning(f"No queue found for {stream_key} after retries")
             return
 
         while True:

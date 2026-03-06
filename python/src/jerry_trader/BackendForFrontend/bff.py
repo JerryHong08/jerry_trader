@@ -29,6 +29,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import clickhouse_connect
 import redis
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -152,6 +153,34 @@ class JerryTraderBFF:
     - state_change: Real-time state transition notifications
     """
 
+    # Timeframes served by BarBuilder/ClickHouse (lowercase)
+    BARS_BUILDER_TIMEFRAMES = {"10s", "1m", "5m", "15m", "1h", "4h", "1d", "1w"}
+
+    # Map frontend timeframe names → BarBuilder names
+    _TF_TO_BUILDER: Dict[str, str] = {
+        "10s": "10s",
+        "1m": "1m",
+        "5m": "5m",
+        "15m": "15m",
+        "1h": "1h",
+        "4h": "4h",
+        "1D": "1d",
+        "1W": "1w",
+        "1d": "1d",
+        "1w": "1w",
+    }
+
+    _TF_DURATION_SEC: Dict[str, int] = {
+        "10s": 10,
+        "1m": 60,
+        "5m": 300,
+        "15m": 900,
+        "1h": 3600,
+        "4h": 14400,
+        "1d": 86400,
+        "1w": 604800,
+    }
+
     def __init__(
         self,
         host: str = "0.0.0.0",
@@ -159,6 +188,7 @@ class JerryTraderBFF:
         session_id: Optional[str] = None,
         redis_config: Optional[Dict[str, Any]] = None,
         influxdb_config: Optional[Dict[str, Any]] = None,
+        clickhouse_config: Optional[Dict[str, Any]] = None,
     ):
         self.host = host
         self.port = port
@@ -214,6 +244,42 @@ class JerryTraderBFF:
             session_id=self.session_id,
         )
 
+        # ── ClickHouse (bar queries) ─────────────────────────────────
+        ch_cfg = clickhouse_config or {}
+        ch_host = ch_cfg.get("host", "localhost")
+        ch_port = ch_cfg.get("port", 8123)
+        ch_user = ch_cfg.get("user", "default")
+        ch_db = ch_cfg.get("database", "jerry_trader")
+        password_env = ch_cfg.get("password_env", "CLICKHOUSE_PASSWORD")
+        ch_password = os.getenv(password_env, "")
+
+        self.ch_client = None
+        if ch_password:
+            try:
+                self.ch_client = clickhouse_connect.get_client(
+                    host=ch_host,
+                    port=ch_port,
+                    username=ch_user,
+                    password=ch_password,
+                    database=ch_db,
+                )
+                self.ch_client.command("SELECT 1")  # connectivity check
+                logger.info(f"ClickHouse connected: {ch_host}:{ch_port}/{ch_db}")
+            except Exception as exc:
+                logger.warning(
+                    f"ClickHouse unavailable, falling back to ChartDataService: {exc}"
+                )
+                self.ch_client = None
+        else:
+            logger.info(
+                "No ClickHouse password — bar queries fall back to ChartDataService"
+            )
+
+        # ── Bar subscriptions (WS clients → ticker:timeframe) ────────
+        # key = "TICKER:builder_tf", value = set of client_ids
+        self._bar_subscriptions: Dict[str, Set[str]] = {}
+        self._bars_pubsub_task = None
+
         # Chart settings (persistent for session)
         self.chart_top_n = 20  # Default top N tickers to send
 
@@ -239,6 +305,9 @@ class JerryTraderBFF:
                 self._article_stream_listener()
             )  # New
 
+            # Start Redis pub/sub listener for completed bar broadcasts
+            self._bars_pubsub_task = asyncio.create_task(self._bars_pubsub_listener())
+
             yield
 
             # Shutdown
@@ -252,6 +321,8 @@ class JerryTraderBFF:
                 self._static_task.cancel()
             if self._article_task:
                 self._article_task.cancel()
+            if self._bars_pubsub_task:
+                self._bars_pubsub_task.cancel()
             self.cleanup()
 
         self.app = FastAPI(
@@ -471,12 +542,13 @@ class JerryTraderBFF:
         ):
             """Fetch OHLCV bars for the ChartModule.
 
-            Historical bar data for candlestick chart rendering.
-            Real-time bar updates are handled client-side via trade ticks.
+            Queries ClickHouse for BarBuilder timeframes (10s–1w),
+            falls back to ChartDataService (Polygon) for others (30m, 1M)
+            or when ClickHouse has no data.
 
             Args:
                 ticker: Stock ticker symbol
-                timeframe: Bar timeframe (1m, 5m, 15m, 30m, 1h, 4h, 1D, 1W, 1M)
+                timeframe: Bar timeframe (10s, 1m, 5m, 15m, 30m, 1h, 4h, 1D, 1W, 1M)
                 from_date: Start date YYYY-MM-DD (default: auto from timeframe)
                 to_date: End date YYYY-MM-DD (default: today)
                 limit: Maximum bars to return
@@ -484,6 +556,24 @@ class JerryTraderBFF:
             Returns:
                 JSON with bars array formatted for lightweight-charts CandlestickSeries
             """
+            builder_tf = self._TF_TO_BUILDER.get(timeframe)
+            ticker_upper = ticker.upper()
+
+            # Try ClickHouse first for BarBuilder timeframes
+            if builder_tf and self.ch_client:
+                ch_result = self._query_bars_clickhouse(
+                    ticker_upper,
+                    builder_tf,
+                    from_date,
+                    to_date,
+                    limit,
+                )
+                if ch_result and ch_result["barCount"] > 0:
+                    # Remap timeframe to frontend convention for response
+                    ch_result["timeframe"] = timeframe
+                    return ch_result
+
+            # Fall back to ChartDataService (Polygon API / Redis cache)
             result = self.chart_data_service.get_bars(
                 ticker=ticker,
                 timeframe=timeframe,
@@ -494,7 +584,7 @@ class JerryTraderBFF:
             if result:
                 return result
             return {
-                "ticker": ticker.upper(),
+                "ticker": ticker_upper,
                 "timeframe": timeframe,
                 "bars": [],
                 "barCount": 0,
@@ -504,7 +594,21 @@ class JerryTraderBFF:
         @self.app.get("/api/chart/timeframes")
         async def get_chart_timeframes():
             """Return available chart timeframes with metadata."""
-            return {"timeframes": self.chart_data_service.get_timeframes()}
+            base_tfs = self.chart_data_service.get_timeframes()
+            # Inject 10s if ClickHouse is connected
+            if self.ch_client:
+                has_10s = any(tf.get("value") == "10s" for tf in base_tfs)
+                if not has_10s:
+                    base_tfs.insert(
+                        0,
+                        {
+                            "value": "10s",
+                            "label": "10 Seconds",
+                            "barDurationSec": 10,
+                            "source": "clickhouse",
+                        },
+                    )
+            return {"timeframes": base_tfs}
 
         @self.app.get("/api/test-data")
         async def test_data():
@@ -536,9 +640,11 @@ class JerryTraderBFF:
                     data = await websocket.receive_json()
                     await self._handle_websocket_message(client_id, data)
             except WebSocketDisconnect:
+                self._remove_bar_subscriptions(client_id)
                 self.manager.disconnect(client_id)
             except Exception as e:
                 logger.error(f"WebSocket error for {client_id}: {e}")
+                self._remove_bar_subscriptions(client_id)
                 self.manager.disconnect(client_id)
 
     async def _handle_websocket_message(self, client_id: str, data: dict):
@@ -617,6 +723,28 @@ class JerryTraderBFF:
                 },
                 client_id,
             )
+
+        elif msg_type == "subscribe_bars":
+            # Subscribe this client to real-time bar updates for a ticker+timeframe
+            ticker = (payload.get("ticker") or "").upper()
+            tf = payload.get("timeframe", "")
+            builder_tf = self._TF_TO_BUILDER.get(tf, tf)
+            if ticker and builder_tf in self.BARS_BUILDER_TIMEFRAMES:
+                key = f"{ticker}:{builder_tf}"
+                self._bar_subscriptions.setdefault(key, set()).add(client_id)
+                logger.debug(f"Client {client_id} subscribed to bars {key}")
+
+        elif msg_type == "unsubscribe_bars":
+            ticker = (payload.get("ticker") or "").upper()
+            tf = payload.get("timeframe", "")
+            builder_tf = self._TF_TO_BUILDER.get(tf, tf)
+            key = f"{ticker}:{builder_tf}"
+            subs = self._bar_subscriptions.get(key)
+            if subs:
+                subs.discard(client_id)
+                if not subs:
+                    del self._bar_subscriptions[key]
+                logger.debug(f"Client {client_id} unsubscribed from bars {key}")
 
     async def _send_initial_data(self, client_id: str):
         """Send initial data to a newly connected client."""
@@ -1328,6 +1456,197 @@ class JerryTraderBFF:
                 logger.error(f"Article stream listener error: {e}")
                 await asyncio.sleep(5)
 
+    # ════════════════════════════════════════════════════════════════════════
+    # ClickHouse bar query
+    # ════════════════════════════════════════════════════════════════════════
+
+    def _query_bars_clickhouse(
+        self,
+        ticker: str,
+        builder_tf: str,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        limit: int = 5000,
+    ) -> Optional[Dict]:
+        """Query completed bars from ClickHouse.
+
+        Returns a response dict matching ChartDataService format, or None on error.
+        """
+        if not self.ch_client:
+            return None
+
+        from datetime import date as dt_date
+
+        # Default date range based on timeframe
+        if to_date:
+            end_dt = datetime.strptime(to_date, "%Y-%m-%d").date()
+        else:
+            end_dt = datetime.now().date()
+
+        if from_date:
+            start_dt = datetime.strptime(from_date, "%Y-%m-%d").date()
+        else:
+            # Auto-range: short TFs get fewer days, long TFs get more
+            dur = self._TF_DURATION_SEC.get(builder_tf, 60)
+            if dur <= 60:  # 10s, 1m
+                days_back = 2
+            elif dur <= 900:  # 5m, 15m
+                days_back = 5
+            elif dur <= 14400:  # 1h, 4h
+                days_back = 30
+            else:  # 1d, 1w
+                days_back = 365
+            from datetime import timedelta
+
+            start_dt = end_dt - timedelta(days=days_back)
+
+        start_ms = int(
+            datetime.combine(start_dt, datetime.min.time()).timestamp() * 1000
+        )
+        end_ms = int(
+            datetime.combine(
+                end_dt + timedelta(days=1), datetime.min.time()
+            ).timestamp()
+            * 1000
+        )
+
+        try:
+            query = """
+                SELECT bar_start, bar_end, open, high, low, close, volume,
+                       trade_count, vwap, session
+                FROM ohlcv_bars FINAL
+                WHERE ticker = {ticker:String}
+                  AND timeframe = {timeframe:String}
+                  AND bar_start >= {start_ms:Int64}
+                  AND bar_start < {end_ms:Int64}
+                ORDER BY bar_start ASC
+                LIMIT {limit:UInt32}
+            """
+            result = self.ch_client.query(
+                query,
+                parameters={
+                    "ticker": ticker,
+                    "timeframe": builder_tf,
+                    "start_ms": start_ms,
+                    "end_ms": end_ms,
+                    "limit": limit,
+                },
+            )
+
+            bars = []
+            for row in result.result_rows:
+                bar_start, bar_end, o, h, l, c, vol, tc, vwap, session = row
+                # lightweight-charts expects `time` in seconds (UTC)
+                bars.append(
+                    {
+                        "time": bar_start // 1000,
+                        "open": o,
+                        "high": h,
+                        "low": l,
+                        "close": c,
+                        "volume": vol,
+                    }
+                )
+
+            dur_sec = self._TF_DURATION_SEC.get(builder_tf, 60)
+            return {
+                "ticker": ticker,
+                "timeframe": builder_tf,
+                "bars": bars,
+                "barCount": len(bars),
+                "barDurationSec": dur_sec,
+                "source": "clickhouse",
+                "from": str(start_dt),
+                "to": str(end_dt),
+            }
+        except Exception as e:
+            logger.error(f"ClickHouse bar query failed for {ticker}/{builder_tf}: {e}")
+            return None
+
+    # ════════════════════════════════════════════════════════════════════════
+    # Redis pub/sub: relay completed bars to WebSocket clients
+    # ════════════════════════════════════════════════════════════════════════
+
+    async def _bars_pubsub_listener(self):
+        """Subscribe to bars:* Redis pub/sub and relay to interested WS clients."""
+        logger.info("Starting bars pub/sub listener...")
+
+        # Create a dedicated Redis connection for pub/sub (blocking subscriber)
+        redis_cfg = {}
+        try:
+            redis_host = self.r.connection_pool.connection_kwargs.get(
+                "host", "127.0.0.1"
+            )
+            redis_port = self.r.connection_pool.connection_kwargs.get("port", 6379)
+            redis_db = self.r.connection_pool.connection_kwargs.get("db", 0)
+            pubsub_redis = redis.Redis(
+                host=redis_host, port=redis_port, db=redis_db, decode_responses=True
+            )
+            ps = pubsub_redis.pubsub()
+            ps.psubscribe("bars:*")
+            logger.info("Subscribed to Redis bars:* pattern")
+        except Exception as e:
+            logger.error(f"Failed to subscribe to bars pub/sub: {e}")
+            return
+
+        try:
+            while self._running:
+                try:
+                    msg = ps.get_message(timeout=0.5)
+                    if msg and msg["type"] == "pmessage":
+                        # Channel: bars:{ticker}:{timeframe}
+                        channel = msg["channel"]
+                        parts = channel.split(":", 2)
+                        if len(parts) == 3:
+                            _, ticker, builder_tf = parts
+                            key = f"{ticker}:{builder_tf}"
+                            client_ids = self._bar_subscriptions.get(key, set())
+                            if client_ids:
+                                bar_data = json.loads(msg["data"])
+                                # Convert bar_start ms → time seconds for frontend
+                                ws_msg = {
+                                    "type": "bar_update",
+                                    "ticker": ticker,
+                                    "timeframe": builder_tf,
+                                    "bar": {
+                                        "time": bar_data["bar_start"] // 1000,
+                                        "open": bar_data["open"],
+                                        "high": bar_data["high"],
+                                        "low": bar_data["low"],
+                                        "close": bar_data["close"],
+                                        "volume": bar_data["volume"],
+                                    },
+                                }
+                                for cid in client_ids.copy():
+                                    await self.manager.send_personal_message(
+                                        ws_msg, cid
+                                    )
+                    else:
+                        # No message — yield to event loop
+                        await asyncio.sleep(0.01)
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.error(f"Bars pub/sub error: {e}")
+                    await asyncio.sleep(1)
+        finally:
+            try:
+                ps.punsubscribe("bars:*")
+                ps.close()
+                pubsub_redis.close()
+            except Exception:
+                pass
+
+    def _remove_bar_subscriptions(self, client_id: str):
+        """Remove a client from all bar subscriptions (called on disconnect)."""
+        empty_keys = []
+        for key, clients in self._bar_subscriptions.items():
+            clients.discard(client_id)
+            if not clients:
+                empty_keys.append(key)
+        for key in empty_keys:
+            del self._bar_subscriptions[key]
+
     def run(self, debug: bool = False):
         """Run the JerryTrader BFF server."""
         logger.info("=" * 60)
@@ -1357,6 +1676,11 @@ class JerryTraderBFF:
         """Clean up resources on shutdown."""
         if self.chart_manager:
             self.chart_manager.close()
+        if self.ch_client:
+            try:
+                self.ch_client.close()
+            except Exception:
+                pass
         logger.info("JerryTrader BFF resources cleaned up")
 
 

@@ -59,13 +59,14 @@ machines:
         enabled: true
         redis: "redis-a"
         influxdb: "influxdb-a"
-      # GridTraderBFF:
-      #   enabled: true
-      #   host: "0.0.0.0"
-      #   port: 5001
-      #   debug: false
-      #   redis: "redis-b"
-      #   influxdb: "influxdb-b"
+      JerryTraderBFF:
+        enabled: true
+        host: "0.0.0.0"
+        port: 5001
+        debug: false
+        redis: "redis-b"
+        influxdb: "influxdb-b"
+        clickhouse: "clickhouse-a"
       TickDataServer:
         enabled: true
         host: "0.0.0.0"

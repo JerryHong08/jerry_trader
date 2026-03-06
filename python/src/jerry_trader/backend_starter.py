@@ -357,6 +357,7 @@ class JerryTraderBackendStarter:
                 session_id=self.session_id,
                 redis_config=role_cfg.get("redis"),
                 influxdb_config=role_cfg.get("influxdb"),
+                clickhouse_config=role_cfg.get("clickhouse"),
             )
             self._services.append(("JerryTraderBFF", self.bff))
         else:

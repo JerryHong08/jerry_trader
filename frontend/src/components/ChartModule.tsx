@@ -40,10 +40,10 @@ import type { ModuleProps, ChartTimeframe } from '../types';
 import { useTickDataStore, type Trade, type Quote } from '../stores/tickDataStore';
 import { useChartDataStore, type OHLCVBar } from '../stores/chartDataStore';
 
-// ── Constants ────────────────────────────────────────────────────────────
+// ── Constants ──────────────────────────────────────────────────────────────────
 
 const TIMEFRAMES: ChartTimeframe[] = [
-  '1m', '5m', '15m', '30m', '1h', '4h', '1D', '1W', '1M',
+  '10s', '1m', '5m', '15m', '30m', '1h', '4h', '1D', '1W', '1M',
 ];
 
 type ChartMode = 'candle' | 'line';
@@ -223,7 +223,7 @@ export function ChartModule({
     currentTimeframeRef.current = timeframe;
   }, [symbol, timeframe, fetchBars]);
 
-  // ── Render bars when chartState changes ────────────────────────────────
+  // ── Render bars on bootstrap fetch ────────────────────────────────────
   useEffect(() => {
     if (!chartRef.current || !symbol) return;
     if (!chartState || chartState.loading) return;
@@ -278,9 +278,10 @@ export function ChartModule({
 
     // Update timeScale options based on timeframe
     chartRef.current.timeScale().applyOptions({
-      timeVisible: ['1m', '5m', '15m', '30m', '1h', '4h'].includes(timeframe),
-      secondsVisible: timeframe === '1m',
+      timeVisible: ['10s', '1m', '5m', '15m', '30m', '1h', '4h'].includes(timeframe),
+      secondsVisible: ['10s', '1m'].includes(timeframe),
     });
+
   }, [chartState?.lastFetchTime, chartState?.loading, chartMode, symbol, ensureSeries, timeframe]);
 
   // ── Real-time trade tick → update current bar / line fallback ──────────

@@ -17,6 +17,7 @@ import {
   type LWSeriesData,
   type ConnectionStatus,
 } from '../stores/marketDataStore';
+import { useChartDataStore } from '../stores/chartDataStore';
 import { IS_DEMO } from '../data/mockData';
 
 // Configuration - use Vite env variable or default
@@ -357,6 +358,27 @@ export function subscribeNewsUpdates(handler: (payload: NewsUpdatePayload) => vo
   return () => newsUpdateHandlers.delete(handler);
 }
 
+/**
+ * Subscribe to real-time bar updates for a ticker + timeframe.
+ * The BFF will relay completed bars from BarsBuilder via Redis pub/sub.
+ */
+export function subscribeBarUpdates(ticker: string, timeframe: string) {
+  sendMessage({
+    type: 'subscribe_bars',
+    payload: { ticker: ticker.toUpperCase(), timeframe },
+  });
+}
+
+/**
+ * Unsubscribe from real-time bar updates for a ticker + timeframe.
+ */
+export function unsubscribeBarUpdates(ticker: string, timeframe: string) {
+  sendMessage({
+    type: 'unsubscribe_bars',
+    payload: { ticker: ticker.toUpperCase(), timeframe },
+  });
+}
+
 function registerStockDetailHandler(
   ticker: string,
   handlers: { onDetail: (data: any) => void; onError: (data: any) => void }
@@ -584,6 +606,15 @@ function handleMessage(message: WebSocketMessage) {
         }
       });
       break;
+
+    case 'bar_update': {
+      // Completed bar pushed by BarsBuilder via BFF Redis pub/sub
+      const { ticker, timeframe, bar } = message;
+      if (ticker && timeframe && bar) {
+        useChartDataStore.getState().applyBarUpdate(ticker, timeframe, bar);
+      }
+      break;
+    }
 
     default:
       // Silently ignore unknown message types

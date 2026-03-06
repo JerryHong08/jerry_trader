@@ -215,36 +215,40 @@ mainly focus on basic modules development and strcuture buidling.
 
 #### Stage 2.5 TODO
 
-**Phase 1 — Rust BarBuilder core** (`rust/src/bars.rs`)
+Phase 1 — Rust BarBuilder core (`rust/src/bars.rs`)
 
-- [ ] `BarState` struct (open/high/low/close/volume/trade_count/vwap/bar_start/session)
-- [ ] `Timeframe` enum (10s, 1m, 5m, 15m, 1h, 4h, 1d, 1w)
-- [ ] `SessionCalendar` — US session boundaries (premarket 4:00, regular 9:30, afterhours 16:00–20:00)
-- [ ] `BarBuilder` as `#[pyclass]` — maintains per-ticker, per-timeframe rolling state
-- [ ] `ingest_trade(ticker, price, size, timestamp_ms)` → returns completed bars
-- [ ] `get_current_bar(ticker, timeframe)` → returns partial bar
-- [ ] `flush()` → force-complete all open bars
-- [ ] Session-aware bar boundary truncation
-- [ ] Rust unit tests
-- [ ] `maturin develop --release`, verify import from Python
+- [x] `BarState` struct (open/high/low/close/volume/trade_count/vwap/bar_start/session)
+- [x] `Timeframe` enum (10s, 1m, 5m, 15m, 1h, 4h, 1d, 1w)
+- [x] `SessionCalendar` — US session boundaries (premarket 4:00, regular 9:30, afterhours 16:00–20:00)
+- [x] `BarBuilder` as `#[pyclass]` — maintains per-ticker, per-timeframe rolling state
+- [x] `ingest_trade(ticker, price, size, timestamp_ms)` → returns completed bars
+- [x] `get_current_bar(ticker, timeframe)` → returns partial bar
+- [x] `flush()` → force-complete all open bars
+- [x] Session-aware bar boundary truncation
+- [x] Rust unit tests
+- [x] `maturin develop --release`, verify import from Python
 
-**Phase 2 — ClickHouse + Python BarsBuilderService**
+Phase 2 — ClickHouse + Python BarsBuilderService
 
-- [ ] ClickHouse `ohlcv_bars` table schema (ReplacingMergeTree, partitioned by date)
-- [ ] Python ClickHouse client integration (clickhouse-connect)
-- [ ] `BarsBuilderService` (Python): tick ingestion → Rust BarBuilder → ClickHouse write → WebSocket push
-- [ ] Add `BarsBuilder` role to config.yaml machine profiles
+- [x] ClickHouse `ohlcv_bars` table schema (ReplacingMergeTree, partitioned by date)
+- [x] Python ClickHouse client integration (clickhouse-connect)
+- [x] `BarsBuilderService` (Python): tick ingestion → Rust BarBuilder → ClickHouse write → Redis pub/sub
+- [x] Add `BarsBuilder` role to config.yaml machine profiles
+- [x] Register BarsBuilder in backend_starter.py
 - [ ] Historical bar bootstrap from Polygon API → ClickHouse backfill
 
-**Phase 3 — Frontend integration**
+Phase 3 — Frontend integration
 
-- [ ] REST endpoint: query historical bars from ClickHouse
-- [ ] WebSocket endpoint: subscribe to real-time bar updates
-- [ ] Update `chartDataStore.ts` to consume server-built bars
-- [ ] Remove frontend-side `updateFromTrade()` aggregation
-- [ ] TradingView `getBars()` / `subscribeBars()` backed by BarsBuilderService
+- [x] REST endpoint: BFF queries ClickHouse for BarBuilder timeframes, falls back to ChartDataService
+- [x] WebSocket relay: BFF subscribes to Redis `bars:*` pub/sub, relays `bar_update` to clients
+- [x] `subscribe_bars` / `unsubscribe_bars` WS message types
+- [x] `chartDataStore.ts`: added `applyBarUpdate()` for server-pushed completed bars
+- [x] `useWebSocket.ts`: handles `bar_update` message, exports `subscribeBarUpdates()`
+- [x] `ChartModule.tsx`: subscribes on mount, unsubscribes on cleanup, added `10s` timeframe
+- [x] `ChartTimeframe` type: added `10s`
+- [ ] Remove frontend-side `updateFromTrade()` aggregation (kept as fallback for now)
 
-**Phase 4 — Downstream consumers + InfluxDB→ClickHouse migration**
+Phase 4 — Downstream consumers + InfluxDB→ClickHouse migration
 
 - [ ] FactorEngine consumes completed bars (not raw ticks)
 - [ ] Factor output: InfluxDB → ClickHouse

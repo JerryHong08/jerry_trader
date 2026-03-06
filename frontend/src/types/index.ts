@@ -1,6 +1,6 @@
 export type ModuleType = 'order-management' | 'rank-list' | 'chart' | 'overview-chart' | 'stock-detail' | 'portfolio';
 
-export type ChartTimeframe = '1m' | '5m' | '15m' | '30m' | '1h' | '4h' | '1D' | '1W' | '1M';
+export type ChartTimeframe = '10s' | '1m' | '5m' | '15m' | '30m' | '1h' | '4h' | '1D' | '1W' | '1M';
 
 export interface Position {
   x: number;

@@ -69,6 +69,7 @@ type ChartDataState = {
     size: number,
     timestampMs: number,
   ) => void;
+  applyBarUpdate: (ticker: string, timeframe: string, bar: OHLCVBar) => void;
   clearSymbol: (symbol: string) => void;
   reset: () => void;
 };
@@ -89,6 +90,7 @@ function getBffBaseUrl(): string {
 
 /** Bar duration in seconds for each timeframe */
 const TIMEFRAME_DURATION_SEC: Record<ChartTimeframe, number> = {
+  '10s': 10,
   '1m': 60,
   '5m': 300,
   '15m': 900,
@@ -102,6 +104,7 @@ const TIMEFRAME_DURATION_SEC: Record<ChartTimeframe, number> = {
 
 /** Minimum refetch interval per timeframe (ms) — prevents hammering API */
 const MIN_REFETCH_INTERVAL: Record<ChartTimeframe, number> = {
+  '10s': 10_000, // 10s
   '1m': 30_000, // 30s
   '5m': 60_000,
   '15m': 120_000,
@@ -292,6 +295,50 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
       }
     }
     // else: trade is for an older bar — ignore (out of order)
+
+    set((s) => ({
+      symbolBars: {
+        ...s.symbolBars,
+        [tickerUpper]: {
+          ...state,
+          bars,
+        },
+      },
+    }));
+  },
+
+  // ========================================================================
+  // Server-pushed completed bar (from BarsBuilder via BFF WebSocket)
+  // ========================================================================
+  applyBarUpdate: (ticker: string, timeframe: string, bar: OHLCVBar) => {
+    const tickerUpper = ticker.toUpperCase();
+    const state = get().symbolBars[tickerUpper];
+    if (!state || state.loading) return;
+
+    // Map BarBuilder timeframe names (lowercase) to frontend convention
+    const tfMap: Record<string, string> = {
+      '10s': '10s', '1m': '1m', '5m': '5m', '15m': '15m',
+      '1h': '1h', '4h': '4h', '1d': '1D', '1w': '1W',
+    };
+    const frontendTf = tfMap[timeframe] ?? timeframe;
+
+    // Only apply if this update matches the currently displayed timeframe
+    if (state.timeframe !== frontendTf) return;
+
+    const bars = [...state.bars];
+    const lastBar = bars[bars.length - 1];
+
+    if (lastBar && bar.time === lastBar.time) {
+      // Update existing bar in place (late tick → re-emit)
+      bars[bars.length - 1] = bar;
+    } else if (!lastBar || bar.time > lastBar.time) {
+      // New completed bar — append
+      bars.push(bar);
+      if (bars.length > 2000) {
+        bars.splice(0, bars.length - 2000);
+      }
+    }
+    // else: stale bar — ignore
 
     set((s) => ({
       symbolBars: {

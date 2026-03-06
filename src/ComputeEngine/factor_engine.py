@@ -141,9 +141,6 @@ class FactorManager:
     - Outputs to InfluxDB (trade_activity measurement) and Redis HSET
     """
 
-    DEFAULT_INFLUX_ORG = "jerryhong"
-    DEFAULT_INFLUX_BUCKET = "jerryib_trade"
-
     def __init__(
         self,
         manager_type=None,
@@ -163,8 +160,8 @@ class FactorManager:
         self.influx_url = (
             os.getenv(influx_url_env) if influx_url_env else "http://localhost:8086"
         )
-        self.influx_org = influx_cfg.get("org", self.DEFAULT_INFLUX_ORG)
-        self.influx_bucket = influx_cfg.get("bucket", self.DEFAULT_INFLUX_BUCKET)
+        self.influx_org = influx_cfg.get("org", "")
+        self.influx_bucket = influx_cfg.get("bucket", "")
         influx_token_env = influx_cfg.get("influx_token_env")
         self.influx_token = os.getenv(influx_token_env) if influx_token_env else None
 

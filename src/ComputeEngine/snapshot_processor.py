@@ -83,7 +83,7 @@ class SnapshotProcessor:
         # ---------- InfluxDB Configuration ----------
         self.org = "jerryhong"
         influx_cfg = influxdb_config or {}
-        self.bucket = influx_cfg.get("bucket", "jerryib_trade")
+        self.bucket = influx_cfg.get("bucket", "")
 
         # Token from env var
         influx_token_env = influx_cfg.get("influx_token_env")

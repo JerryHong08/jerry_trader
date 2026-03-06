@@ -1,9 +1,9 @@
-# Alembic migrations for jerryib_trade
+# Alembic migrations for jerry_trader
 
 Quick start:
 
 1) Set DATABASE_URL
-   export DATABASE_URL='postgresql+psycopg://user:pass@localhost:5432/jerryib_trade'
+   export DATABASE_URL='postgresql+psycopg://user:pass@localhost:5432/dbname'
 
 2) Upgrade to latest
     poetry run alembic upgrade head

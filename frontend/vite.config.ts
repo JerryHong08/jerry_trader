@@ -58,5 +58,5 @@
       open: true,
       hmr: false,
     },
-    base: '/jerryib_trader/',
+    base: '/jerry_trader/',
   });

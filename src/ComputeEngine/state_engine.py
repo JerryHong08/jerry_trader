@@ -75,7 +75,7 @@ class StateEngine:
         # ── InfluxDB ─────────────────────────────────────────────────
         self.influx_org = "jerryhong"
         influx_cfg = influxdb_config or {}
-        self.influx_bucket = influx_cfg.get("bucket", "jerryib_trade")
+        self.influx_bucket = influx_cfg.get("bucket", "")
 
         influx_token_env = influx_cfg.get("influx_token_env")
         token = os.environ.get(influx_token_env) if influx_token_env else None

@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
-LOG_DIR = PROJECT_ROOT / "logs" / "jerryib_trader" / datetime.now().strftime("%Y%m%d")
+LOG_DIR = PROJECT_ROOT / "logs" / "jerry_trader" / datetime.now().strftime("%Y%m%d")
 
 
 def setup_logger(

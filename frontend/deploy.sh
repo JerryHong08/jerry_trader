@@ -43,4 +43,4 @@ COMMIT=$(git commit-tree "$TREE" -m "Deploy GridTrader $(date '+%Y-%m-%d %H:%M:%
 unset GIT_WORK_TREE GIT_INDEX_FILE
 git push origin "$COMMIT":refs/heads/"$BRANCH" --force
 
-echo "Deployed to https://JerryHong08.github.io/jerryib_trader/"
+echo "Deployed to https://JerryHong08.github.io/jerry_trader/"

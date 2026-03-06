@@ -1,10 +1,10 @@
 """
-BFF (Backend For Frontend) for GridTrader
+BFF (Backend For Frontend) for JerryTrader
 
 FastAPI + WebSocket server for real-time visualization connecting React frontend
 with Python backend services via Redis streams.
 
-This version is designed for the GridTrader frontend which uses:
+This version is designed for the JerryTrader frontend which uses:
 - RankList: Column-based data display with multiple columns
 - OverviewChartModule: Segmented line chart with state-colored segments
 
@@ -36,7 +36,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from jerry_trader.DataManager.chart_data_service import ChartDataService
-from jerry_trader.DataManager.overviewchartdat_manager import GridTraderChartDataManager
+from jerry_trader.DataManager.overviewchartdat_manager import (
+    JerryTraderChartDataManager,
+)
 from jerry_trader.utils.logger import setup_logger
 from jerry_trader.utils.redis_keys import (
     market_snapshot_processed,
@@ -133,12 +135,12 @@ class ConnectionManager:
         return {k: len(v) for k, v in self.subscriptions.items()}
 
 
-# ============ GridTrader BFF Class ============
+# ============ JerryTrader BFF Class ============
 
 
-class GridTraderBFF:
+class JerryTraderBFF:
     """
-    Backend For Frontend for GridTrader React application using FastAPI.
+    Backend For Frontend for JerryTrader React application using FastAPI.
 
     Connects to backend services via Redis streams:
     - market_snapshot_processed:{date} - For rank list and chart updates
@@ -200,7 +202,7 @@ class GridTraderBFF:
         self.VERSION_KEY_PREFIX = static_version_prefix(self.session_id)
 
         # Initialize chart data manager (overview chart)
-        self.chart_manager = GridTraderChartDataManager(
+        self.chart_manager = JerryTraderChartDataManager(
             session_id=self.session_id,
             redis_config=redis_config,
             influxdb_config=influxdb_config,
@@ -226,7 +228,7 @@ class GridTraderBFF:
         @asynccontextmanager
         async def lifespan(app: FastAPI):
             # Startup
-            logger.info("Starting GridTrader BFF...")
+            logger.info("Starting JerryTrader BFF...")
             self._running = True
 
             # Start background listeners
@@ -240,7 +242,7 @@ class GridTraderBFF:
             yield
 
             # Shutdown
-            logger.info("Shutting down GridTrader BFF...")
+            logger.info("Shutting down JerryTrader BFF...")
             self._running = False
             if self._snapshot_task:
                 self._snapshot_task.cancel()
@@ -253,8 +255,8 @@ class GridTraderBFF:
             self.cleanup()
 
         self.app = FastAPI(
-            title="GridTrader BFF",
-            description="Backend For Frontend for GridTrader trading application",
+            title="JerryTrader BFF",
+            description="Backend For Frontend for JerryTrader trading application",
             version="1.0.0",
             lifespan=lifespan,
         )
@@ -272,7 +274,7 @@ class GridTraderBFF:
         self._setup_routes()
 
         logger.info(
-            f"GridTraderBFF initialized: backend host={host}, port={port}, "
+            f"JerryTraderBFF initialized: backend host={host}, port={port}, "
             f"session_id={self.session_id}, run_mode={self.run_mode}, "
             f"redis host={redis_host}, redis port={redis_port}, redis db={redis_db}"
             f"influxdb config={influxdb_config}"
@@ -284,7 +286,7 @@ class GridTraderBFF:
         @self.app.get("/")
         async def index():
             return {
-                "service": "GridTrader BFF",
+                "service": "JerryTrader BFF",
                 "status": "running",
                 "version": "1.0.0",
             }
@@ -863,7 +865,7 @@ class GridTraderBFF:
         try:
             self.r.xgroup_create(
                 self.SNAPSHOT_STREAM_NAME,
-                "gridtrader_bff_consumers",
+                "JerryTrader_bff_consumers",
                 id="0",
                 mkstream=True,
             )
@@ -871,13 +873,13 @@ class GridTraderBFF:
             if "BUSYGROUP" not in str(e):
                 raise
 
-        consumer_name = f"gridtrader_bff_{datetime.now().timestamp()}"
+        consumer_name = f"JerryTrader_bff_{datetime.now().timestamp()}"
 
         while self._running:
             try:
                 # Use blocking read with timeout
                 messages = self.r.xreadgroup(
-                    "gridtrader_bff_consumers",
+                    "JerryTrader_bff_consumers",
                     consumer_name,
                     {self.SNAPSHOT_STREAM_NAME: ">"},
                     count=1,
@@ -906,7 +908,7 @@ class GridTraderBFF:
                             # Acknowledge the message
                             self.r.xack(
                                 self.SNAPSHOT_STREAM_NAME,
-                                "gridtrader_bff_consumers",
+                                "JerryTrader_bff_consumers",
                                 message_id,
                             )
 
@@ -927,7 +929,7 @@ class GridTraderBFF:
         try:
             self.r.xgroup_create(
                 self.STATE_STREAM_NAME,
-                "gridtrader_bff_state_consumers",
+                "JerryTrader_bff_state_consumers",
                 id="0",
                 mkstream=True,
             )
@@ -935,12 +937,12 @@ class GridTraderBFF:
             if "BUSYGROUP" not in str(e):
                 raise
 
-        consumer_name = f"gridtrader_state_{datetime.now().timestamp()}"
+        consumer_name = f"JerryTrader_state_{datetime.now().timestamp()}"
 
         while self._running:
             try:
                 messages = self.r.xreadgroup(
-                    "gridtrader_bff_state_consumers",
+                    "JerryTrader_bff_state_consumers",
                     consumer_name,
                     {self.STATE_STREAM_NAME: ">"},
                     count=10,
@@ -978,7 +980,7 @@ class GridTraderBFF:
                             # Acknowledge the message
                             self.r.xack(
                                 self.STATE_STREAM_NAME,
-                                "gridtrader_bff_state_consumers",
+                                "JerryTrader_bff_state_consumers",
                                 message_id,
                             )
 
@@ -1018,7 +1020,7 @@ class GridTraderBFF:
         try:
             self.r.xgroup_create(
                 self.STATIC_UPDATE_STREAM,
-                "gridtrader_bff_static_consumers",
+                "JerryTrader_bff_static_consumers",
                 id="0",
                 mkstream=True,
             )
@@ -1026,12 +1028,12 @@ class GridTraderBFF:
             if "BUSYGROUP" not in str(e):
                 raise
 
-        consumer_name = f"gridtrader_static_{datetime.now().timestamp()}"
+        consumer_name = f"JerryTrader_static_{datetime.now().timestamp()}"
 
         while self._running:
             try:
                 messages = self.r.xreadgroup(
-                    "gridtrader_bff_static_consumers",
+                    "JerryTrader_bff_static_consumers",
                     consumer_name,
                     {self.STATIC_UPDATE_STREAM: ">"},
                     count=10,
@@ -1045,7 +1047,7 @@ class GridTraderBFF:
                             if not symbol:
                                 self.r.xack(
                                     self.STATIC_UPDATE_STREAM,
-                                    "gridtrader_bff_static_consumers",
+                                    "JerryTrader_bff_static_consumers",
                                     message_id,
                                 )
                                 continue
@@ -1111,7 +1113,7 @@ class GridTraderBFF:
                                 # All domains are stale, skip this message
                                 self.r.xack(
                                     self.STATIC_UPDATE_STREAM,
-                                    "gridtrader_bff_static_consumers",
+                                    "JerryTrader_bff_static_consumers",
                                     message_id,
                                 )
                                 continue
@@ -1221,7 +1223,7 @@ class GridTraderBFF:
                             # Acknowledge the message
                             self.r.xack(
                                 self.STATIC_UPDATE_STREAM,
-                                "gridtrader_bff_static_consumers",
+                                "JerryTrader_bff_static_consumers",
                                 message_id,
                             )
 
@@ -1247,7 +1249,7 @@ class GridTraderBFF:
         try:
             self.r.xgroup_create(
                 self.NEWS_ARTICLE_STREAM,
-                "gridtrader_bff_article_consumers",
+                "JerryTrader_bff_article_consumers",
                 id="0",
                 mkstream=True,
             )
@@ -1255,12 +1257,12 @@ class GridTraderBFF:
             if "BUSYGROUP" not in str(e):
                 raise
 
-        consumer_name = f"gridtrader_article_{datetime.now().timestamp()}"
+        consumer_name = f"JerryTrader_article_{datetime.now().timestamp()}"
 
         while self._running:
             try:
                 messages = self.r.xreadgroup(
-                    "gridtrader_bff_article_consumers",
+                    "JerryTrader_bff_article_consumers",
                     consumer_name,
                     {self.NEWS_ARTICLE_STREAM: ">"},
                     count=10,
@@ -1274,7 +1276,7 @@ class GridTraderBFF:
                             if not symbol:
                                 self.r.xack(
                                     self.NEWS_ARTICLE_STREAM,
-                                    "gridtrader_bff_article_consumers",
+                                    "JerryTrader_bff_article_consumers",
                                     message_id,
                                 )
                                 continue
@@ -1314,7 +1316,7 @@ class GridTraderBFF:
                             # Acknowledge
                             self.r.xack(
                                 self.NEWS_ARTICLE_STREAM,
-                                "gridtrader_bff_article_consumers",
+                                "JerryTrader_bff_article_consumers",
                                 message_id,
                             )
 
@@ -1327,9 +1329,9 @@ class GridTraderBFF:
                 await asyncio.sleep(5)
 
     def run(self, debug: bool = False):
-        """Run the GridTrader BFF server."""
+        """Run the JerryTrader BFF server."""
         logger.info("=" * 60)
-        logger.info(f"Starting GridTrader BFF on {self.host}:{self.port}")
+        logger.info(f"Starting JerryTrader BFF on {self.host}:{self.port}")
         logger.info("=" * 60)
 
         if self.run_mode == "replay":
@@ -1355,13 +1357,13 @@ class GridTraderBFF:
         """Clean up resources on shutdown."""
         if self.chart_manager:
             self.chart_manager.close()
-        logger.info("GridTrader BFF resources cleaned up")
+        logger.info("JerryTrader BFF resources cleaned up")
 
 
 def main():
-    """Main entry point for GridTrader BFF."""
+    """Main entry point for JerryTrader BFF."""
     parser = argparse.ArgumentParser(
-        description="GridTrader BFF (Backend For Frontend)",
+        description="JerryTrader BFF (Backend For Frontend)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -1409,7 +1411,7 @@ Examples:
     )
 
     # Create and run BFF
-    bff = GridTraderBFF(
+    bff = JerryTraderBFF(
         host=args.host,
         port=args.port,
         session_id=session_id,
@@ -1418,7 +1420,7 @@ Examples:
     try:
         bff.run(debug=args.debug)
     except Exception as e:
-        logger.error(f"GridTrader BFF error: {e}")
+        logger.error(f"JerryTrader BFF error: {e}")
         import traceback
 
         traceback.print_exc()

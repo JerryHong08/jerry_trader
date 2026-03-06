@@ -2,7 +2,7 @@
  * PinDialog — centered modal for unlocking privacy mode.
  *
  * Renders as a dark overlay with a zinc-styled dialog in the center.
- * Matches the GridTrader design language (bg-zinc-900, border-zinc-700, etc.).
+ * Matches the JerryTrader design language (bg-zinc-900, border-zinc-700, etc.).
  */
 
 import React, { useState, useEffect, useRef } from 'react';

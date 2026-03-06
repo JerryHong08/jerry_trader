@@ -241,7 +241,7 @@ some other features to make it better.
 #### Overview Layout Set
 
 <p align="center">
-  <img src="./assets/gridtrader.png" alt="gridtrader" width="600">
+  <img src="./assets/JerryTrader.png" alt="JerryTrader" width="600">
   <br><em>Portfolio, order history and chart are using mock data</em>
 </p>
 

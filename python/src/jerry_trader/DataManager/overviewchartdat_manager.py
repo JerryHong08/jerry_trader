@@ -1,8 +1,8 @@
 """
-Overview Chart Data Manager for GridTrader Frontend
+Overview Chart Data Manager for JerryTrader Frontend
 
-This module manages chart data for the GridTrader frontend's OverviewChartModule.
-Unlike the MMM version which uses a single color per ticker, GridTrader displays
+This module manages chart data for the JerryTrader frontend's OverviewChartModule.
+Unlike the MMM version which uses a single color per ticker, JerryTrader displays
 each ticker's line with segmented colors representing different states (regimes).
 
 Data Flow:
@@ -41,12 +41,12 @@ from jerry_trader.utils.session import (
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
 
 
-class GridTraderChartDataManager:
+class JerryTraderChartDataManager:
     """
-    Manage and format chart data for GridTrader's OverviewChartModule.
+    Manage and format chart data for JerryTrader's OverviewChartModule.
 
     The key difference from MMM version:
-    - GridTrader renders each ticker as multiple line segments
+    - JerryTrader renders each ticker as multiple line segments
     - Each segment corresponds to a state period
     - Segments are colored by state (Best, Good, OnWatch, NotGood, Bad)
     """
@@ -115,7 +115,7 @@ class GridTraderChartDataManager:
         self._query_api = self._influx_client.query_api()
 
         logger.info(
-            f"__init__ - GridTraderChartDataManager initialized: mode={self.run_mode}, session_id={self.session_id}"
+            f"__init__ - JerryTraderChartDataManager initialized: mode={self.run_mode}, session_id={self.session_id}"
         )
 
     def mark_dirty(self):
@@ -418,4 +418,4 @@ class GridTraderChartDataManager:
         """Clean up resources."""
         if self._influx_client:
             self._influx_client.close()
-        logger.info("GridTraderChartDataManager closed")
+        logger.info("JerryTraderChartDataManager closed")

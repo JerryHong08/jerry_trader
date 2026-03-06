@@ -1,8 +1,39 @@
-## 0.3.0 (2026-03-06)
+## 1.0.0 (2026-03-06)
+
+### BREAKING CHANGES
+
+- **Project renamed** from `jerryib_trade` to `jerry_trader`
+- **Directory restructured** to a multi-language monorepo: `python/`, `rust/`, `frontend/`
+- **All Python imports** changed from bare subpackage names (`from DataManager.X`) to fully qualified (`from jerry_trader.DataManager.X`)
+- **Build system** switched from pure Poetry to **maturin + Poetry** hybrid (Rust extension compiled via PyO3)
 
 ### Feat
 
-- C++ based real-time risk management engine
+- **rust**: introduced Rust computation core (`rust/src/lib.rs`) compiled via maturin as `jerry_trader._rust` PyO3 extension module
+- **project**: added `utils/paths.py` with marker-file-based `PROJECT_ROOT` discovery — replaces fragile `parents[N]` offsets, robust against future restructuring
+- **config**: added `config.yaml.example` with anonymized machine names and role descriptions for onboarding
+- **chart**: Chart module 1D data bootstrap working (TradingView lightweight chart integration in progress)
+- **config**: added per-role `limit` config for machine-level service lifecycle control (`market_open` / `market_close` / `null`)
+- **frontend**: GitHub Pages deploy support; frontend path and icon cleanup
+
+### Fix
+
+- **config**: fixed config path resolution — `config.py`, `backend_starter.py`, and `utils/logger.py` now use centralized `PROJECT_ROOT`
+- **frontend**: fixed stock detail search
+- **DataSupply**: snapshot schema type mismatch fixed
+
+### Refactor
+
+- **project**: flattened Rust layout from `rust/jerry_trader/` to `rust/` (single crate)
+- **project**: removed redundant `rust/jerry_trader/pyproject.toml` (maturin init leftover)
+- **project**: fixed `Cargo.toml` lib name and `lib.rs` module name to match maturin `module-name = "jerry_trader._rust"`
+- **project**: converted dependency specifiers from Poetry parenthesis syntax to PEP 508 for Poetry 2.x compatibility
+- **project**: added `_rust.pyi` type stubs for IDE autocompletion of Rust extension
+- **project**: added `[tool.pytest.ini_options]` testpaths and VS Code `python.analysis.extraPaths` for proper import resolution
+- **project**: reorganized `.gitignore` into categorized sections (Rust, Python, Frontend, IDE, OS, Project-specific)
+- **project**: updated all `python -m src.X` docstring references to `python -m jerry_trader.X`
+- **poetry**: removed orphaned `jerryib-trade` virtualenv, recreated as `jerry-trader` with fresh `poetry.lock`
+- **frontend** is now just frontend, remove 'GridTrader' name.
 
 ## 0.2.0 (2026-02-28)
 

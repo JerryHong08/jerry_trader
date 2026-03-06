@@ -1,8 +1,8 @@
 """
-GridTrader Backend Starter
+JerryTrader Backend Starter
 
-Starts selected backend services for GridTrader based on working machine:
-SnapshotProcessor, StaticDataWorker, GridTrader BFF.
+Starts selected backend services for JerryTrader based on working machine:
+SnapshotProcessor, StaticDataWorker, JerryTrader BFF.
 StateEngine.
 NewsWorker, NewsProcessor.
 
@@ -143,7 +143,7 @@ def build_runtime_config(
     Overrides can use dot notation:
     - "replay_date" or "defaults.replay_date" -> sets replay_date
     - "llm.active_model" -> sets llm.active_model
-    - "roles.GridTraderBFF.port" -> sets role-specific param
+    - "roles.JerryTraderBFF.port" -> sets role-specific param
 
     Database references use "db-name@MACHINE" format:
     - "redis-b@OLDMAN" -> resolves host from OLDMAN_IP env var
@@ -290,9 +290,9 @@ def _normalize_date_fields(config: dict) -> None:
                         role_cfg[field] = str(role_cfg[field])
 
 
-class GridTraderBackendStarter:
+class JerryTraderBackendStarter:
     """
-    Manages and starts backend services for GridTrader based on machine roles.
+    Manages and starts backend services for JerryTrader based on machine roles.
 
     Services (started based on machine config):
     - SnapshotProcessor: Receives data, processes, stores to InfluxDB and Redis
@@ -300,7 +300,7 @@ class GridTraderBackendStarter:
     - StaticDataWorker: Fetches static data (fundamentals, float) for subscribed tickers
     - NewsWorker: Fetches and caches news data for subscribed tickers
     - NewsProcessor: Processes news with LLM
-    - GridTraderBFF: Backend For Frontend (FastAPI + WebSocket server)
+    - JerryTraderBFF: Backend For Frontend (FastAPI + WebSocket server)
     """
 
     def __init__(self, config: dict):
@@ -347,18 +347,18 @@ class GridTraderBackendStarter:
         logger.info(f"Enabled roles: {list(self.roles.keys())}")
 
         # Lazy imports - only import what we need
-        if "GridTraderBFF" in self.roles:
-            from jerry_trader.BackendForFrontend.bff import GridTraderBFF
+        if "JerryTraderBFF" in self.roles:
+            from jerry_trader.BackendForFrontend.bff import JerryTraderBFF
 
-            role_cfg = self.roles["GridTraderBFF"]
-            self.bff = GridTraderBFF(
+            role_cfg = self.roles["JerryTraderBFF"]
+            self.bff = JerryTraderBFF(
                 host=role_cfg.get("host", "localhost"),
                 port=role_cfg.get("port", 5001),
                 session_id=self.session_id,
                 redis_config=role_cfg.get("redis"),
                 influxdb_config=role_cfg.get("influxdb"),
             )
-            self._services.append(("GridTraderBFF", self.bff))
+            self._services.append(("JerryTraderBFF", self.bff))
         else:
             self.bff = None
 
@@ -678,7 +678,7 @@ class GridTraderBackendStarter:
     def run(self):
         """Run backend services based on enabled roles."""
         logger.info("=" * 70)
-        logger.info("Starting GridTrader Backend")
+        logger.info("Starting JerryTrader Backend")
         logger.info(f"Enabled roles: {list(self.roles.keys())}")
         logger.info(f"Limit: {self.limit or 'None (never auto-stop)'}")
         logger.info("=" * 70)
@@ -777,10 +777,10 @@ class GridTraderBackendStarter:
 
         # Run BFF in the main thread (blocking) if enabled
         if self.bff:
-            bff_cfg = self.roles.get("GridTraderBFF", {})
+            bff_cfg = self.roles.get("JerryTraderBFF", {})
             host = bff_cfg.get("host", "localhost")
             port = bff_cfg.get("port", 5001)
-            logger.info(f"Starting GridTrader BFF on {host}:{port}")
+            logger.info(f"Starting JerryTrader BFF on {host}:{port}")
             self.bff.run()
         else:
             # If no BFF, just keep running
@@ -790,9 +790,9 @@ class GridTraderBackendStarter:
 
 
 def main():
-    """Main entry point for GridTrader backend."""
+    """Main entry point for JerryTrader backend."""
     parser = argparse.ArgumentParser(
-        description="GridTrader Backend Starter",
+        description="JerryTrader Backend Starter",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -807,13 +807,13 @@ Examples:
     python -m jerry_trader.backend_starter --machine mibuntu --llm.models.deepseek.thinking_mode true
 
     # Override role-specific settings
-    python -m jerry_trader.backend_starter --machine wsl2 --roles.GridTraderBFF.port 8080
+    python -m jerry_trader.backend_starter --machine wsl2 --roles.JerryTraderBFF.port 8080
 
     # Combine multiple overrides
     python -m jerry_trader.backend_starter --machine wsl2 \\
         --replay_date 20260115 \\
         --suffix_id test \\
-        --roles.GridTraderBFF.host 0.0.0.0
+        --roles.JerryTraderBFF.host 0.0.0.0
 
     # Dry run to see resolved config
     python -m jerry_trader.backend_starter --machine wsl2 --dry-run
@@ -881,12 +881,12 @@ Config override paths (dot notation):
         sys.exit(0)
 
     # Create and run backend with resolved config
-    starter = GridTraderBackendStarter(config=runtime_config)
+    starter = JerryTraderBackendStarter(config=runtime_config)
 
     try:
         starter.run()
     except Exception as e:
-        logger.error(f"GridTrader backend error: {e}")
+        logger.error(f"JerryTrader backend error: {e}")
         import traceback
 
         traceback.print_exc()

@@ -55,7 +55,7 @@ machines:
       #   enabled: true
       #   redis: "redis-a"
       #   influxdb: "influxdb-a"
-      GridTraderBFF:
+      JerryTraderBFF:
         enabled: true
         host: "0.0.0.0"
         port: 5001
@@ -86,7 +86,7 @@ machines:
         poll_interval: 1.0
         batch_size: 5
         redis: "redis-b"
-      GridTraderBFF:
+      JerryTraderBFF:
         enabled: true
         host: "0.0.0.0"
         port: 5001

@@ -1,5 +1,5 @@
 /**
- * WebSocket Hook for GridTrader Backend Communication
+ * WebSocket Hook for JerryTrader Backend Communication
  *
  * Connects to the FastAPI BFF via native WebSocket and provides real-time data updates
  * for RankList and OverviewChart components.
@@ -34,13 +34,13 @@ console.debug('[WebSocket] Using BFF URL:', BFF_URL_RESOLVED);
 const BFF_WS_URL = BFF_URL_RESOLVED.replace(/^http/, 'ws');
 
 // Generate unique client ID
-const CLIENT_ID = `gridtrader_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+const CLIENT_ID = `JerryTrader_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
 // LocalStorage keys for cache persistence
-const PROFILE_CACHE_KEY = 'gridtrader_profile_cache';
-const NEWS_CACHE_KEY = 'gridtrader_news_cache';
-const DATA_STATUS_KEY = 'gridtrader_data_status';
-const VERSION_CACHE_KEY = 'gridtrader_version_cache';
+const PROFILE_CACHE_KEY = 'JerryTrader_profile_cache';
+const NEWS_CACHE_KEY = 'JerryTrader_news_cache';
+const DATA_STATUS_KEY = 'JerryTrader_data_status';
+const VERSION_CACHE_KEY = 'JerryTrader_version_cache';
 
 // Version tracking type: symbol -> domain -> version (summary/profile)
 export type VersionCache = Record<string, Record<string, number>>;

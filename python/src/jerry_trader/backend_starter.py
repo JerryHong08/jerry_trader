@@ -363,7 +363,7 @@ class JerryTraderBackendStarter:
             self.bff = None
 
         if "SnapshotProcessor" in self.roles:
-            from jerry_trader.ComputeEngine.snapshot_processor import SnapshotProcessor
+            from jerry_trader.core.snapshot.processor import SnapshotProcessor
 
             role_cfg = self.roles["SnapshotProcessor"]
             self.processor = SnapshotProcessor(
@@ -377,7 +377,7 @@ class JerryTraderBackendStarter:
             self.processor = None
 
         if "StateEngine" in self.roles:
-            from jerry_trader.ComputeEngine.state_engine import StateEngine
+            from jerry_trader.core.signals.state_engine import StateEngine
 
             role_cfg = self.roles["StateEngine"]
             self.state_engine = StateEngine(
@@ -422,7 +422,7 @@ class JerryTraderBackendStarter:
             self.news_worker = None
 
         if "NewsProcessor" in self.roles:
-            from jerry_trader.ComputeEngine.news_processor import NewsProcessor
+            from jerry_trader.core.news.processor import NewsProcessor
 
             role_cfg = self.roles["NewsProcessor"]
             llm_cfg = self.config.get("llm", {})
@@ -521,7 +521,7 @@ class JerryTraderBackendStarter:
             self.tick_data_server = None
 
         if "FactorEngine" in self.roles:
-            from jerry_trader.ComputeEngine.factor_engine import FactorManager
+            from jerry_trader.core.factors.engine import FactorManager
 
             role_cfg = self.roles["FactorEngine"]
 

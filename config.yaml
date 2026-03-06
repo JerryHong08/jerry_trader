@@ -32,9 +32,11 @@ databases:
 
   influxdb:
     influxdb-a:
+      org: "jerryhong"
       bucket: "jerrymmm"
       influx_token_env: "WSL2_INFLUXDB_TOKEN"
     influxdb-b:
+      org: "jerryhong"
       bucket: "jerryib_trade"
       influx_token_env: "OLDMAN_INFLUXDB_TOKEN"
 
@@ -45,27 +47,27 @@ machines:
   wsl2:
     limit: "null"    # market_open | market_close | null (never stop)
     roles:
-      # StateEngine:
-      #   enabled: true
-      #   redis: "redis-a"
-        # influxdb: "influxdb-a"
-      GridTraderBFF:
+      StateEngine:
         enabled: true
-        host: "0.0.0.0"
-        port: 5001
-        debug: false
-        redis: "redis-b"
-        influxdb: "influxdb-b"
+        redis: "redis-a"
+        influxdb: "influxdb-a"
+      # GridTraderBFF:
+      #   enabled: true
+      #   host: "0.0.0.0"
+      #   port: 5001
+      #   debug: false
+      #   redis: "redis-b"
+      #   influxdb: "influxdb-b"
       TickDataServer:
         enabled: true
         host: "0.0.0.0"
         port: 8000
         redis: "redis-a"
-      # FactorEngine:
-      #   enabled: true
-      #   manager_type: "polygon" # choices=["polygon", "theta", "replayer"]
-      #   redis: "redis-a"
-      #   influxdb: "influxdb-a"
+      FactorEngine:
+        enabled: true
+        manager_type: "polygon" # choices=["polygon", "theta", "replayer"]
+        redis: "redis-a"
+        influxdb: "influxdb-a"
 
   mibuntu:
     limit: "market_open"    # market_open | market_close | null (never stop)

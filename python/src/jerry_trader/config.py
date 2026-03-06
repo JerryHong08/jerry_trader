@@ -16,6 +16,31 @@ logger = setup_logger(__name__, log_to_file=True, level=logging.WARNING)
 
 _CONFIG_FILENAME = "basic_config.yaml"
 
+# ===================== LLM prompt loader =====================================
+_LLM_CONTEXT_DIR = Path(__file__).parent / "llmContext"
+
+
+def load_prompt(filename: str) -> str:
+    """
+    Read a prompt text file from the llmContext/ directory.
+
+    Args:
+        filename: Name of the prompt file (e.g. "news_processor_prompt_v2.txt").
+
+    Returns:
+        The prompt text content.
+
+    Raises:
+        FileNotFoundError: If the prompt file does not exist.
+    """
+    prompt_path = _LLM_CONTEXT_DIR / filename
+    if not prompt_path.exists():
+        raise FileNotFoundError(
+            f"Prompt file not found: {prompt_path}\n"
+            f"Available prompts: {[f.name for f in _LLM_CONTEXT_DIR.iterdir() if f.is_file()]}"
+        )
+    return prompt_path.read_text(encoding="utf-8")
+
 
 def _get_data_dir_from_config() -> str:
     """

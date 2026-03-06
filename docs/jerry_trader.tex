@@ -1,0 +1,225 @@
+\documentclass[a4paper, 11pt]{article}
+\title{Jerry Trader Documentation}
+\author{JerryHong}
+\date{March 2026}
+\date{Started December 2025 \\ Last updated: \today}
+
+\usepackage{fontspec}
+\usepackage{xeCJK} % for support Chinese.
+% Set a CJK monospaced font if available (silences xeCJK unknown-tt warning).
+\setCJKmainfont{Microsoft YaHei}
+\setCJKmonofont{Microsoft YaHei}
+\usepackage{xcolor}
+\usepackage{tabularx}
+\usepackage{ragged2e}
+\usepackage{array}
+\usepackage{seqsplit}
+\usepackage{fvextra}
+\usepackage{enumitem}
+\newcolumntype{Y}{>{\RaggedRight\arraybackslash}X}
+% (removed global \texttt redefinition - use \seqsplit manually where needed)
+
+\begin{document}
+\maketitle
+
+\pagebreak
+
+\tableofcontents
+
+\pagebreak
+
+\section{Introduction}
+Jerry Trader is a multi-language (Python + Rust + React) trading platform designed for real-time US pre-market momentum trading.
+This documentation provides an overview of the app's features, architecture, and usage instructions \begin{em}based on my trading strategies\end{em}.
+
+The project follows a monorepo layout:
+\begin{itemize}
+\item \texttt{python/src/jerry\_trader/} --- Python backend (orchestration, I/O, services)
+\item \texttt{rust/src/} --- Rust computation core (compiled via maturin/PyO3 as \texttt{jerry\_trader.\_rust})
+\item \texttt{frontend/} --- React + TypeScript frontend (Vite)
+\end{itemize}
+
+\pagebreak
+
+\section{Frontend Modules}
+
+\begin{table}[!htbp]
+\centering
+\footnotesize
+\renewcommand{\arraystretch}{1.05}
+    \begin{tabularx}{\textwidth}{|>{\RaggedRight\arraybackslash}p{2.5cm}|>{\RaggedRight\arraybackslash}p{2.5cm}|Y|Y|}
+\hline
+\textbf{Module Type} & \textbf{Sub-View Name} & \textbf{Description} & \textbf{Backend} \\
+\hline
+rank-list &  & rank list with key metrics & \seqsplit{core.snapshot, static-data-worker, news-worker, core.signals} \\
+\hline
+stock-detail & fundamentals & stock basic info & \seqsplit{staticdata-worker} \\
+\hline
+stock-detail & news &  & \seqsplit{news-worker} \\
+\hline
+overview-chart & overview &  & \seqsplit{overviewchart-management} \\
+\hline
+overview-chart & focus & focus on one tiker with state segmentation & \seqsplit{overviewchart-management} \\
+\hline
+chart &  &  & \seqsplit{chart-data-service} \\
+\hline
+portfolio &  & portfolio and positions & OrderManagement \\
+\hline
+order-management & placement &  & OrderManagement \\
+\hline
+order-management & orders &  & OrderManagement \\
+\hline
+\end{tabularx}
+\caption{Module descriptions and their corresponding backends.}
+\label{tab:module_descriptions}
+\end{table}
+
+\section{Backend Architecture}
+
+\subsection{Package Layout}
+The Python backend is organized into the following top-level packages:
+
+    \begin{table}[!htbp]
+\centering
+\footnotesize
+\renewcommand{\arraystretch}{1.15}
+    \begin{tabularx}{\textwidth}{|>{\RaggedRight\arraybackslash}p{2.8cm}|Y|>{\RaggedRight\arraybackslash}p{2.5cm}|}
+\hline
+\textbf{Package} & \textbf{Purpose} & \textbf{Language} \\
+\hline
+\texttt{core/} & Computation core \& Rust migration boundary & Python + Rust \\
+\hline
+\texttt{core/snapshot/} & Snapshot processing: ranks, derived metrics, volume tracking & Python $\to$ Rust \\
+\hline
+\texttt{core/factors/} & Factor engine: trade\_rate, accel, z-scores & Python $\to$ Rust \\
+\hline
+\texttt{core/signals/} & State/signal detection (QUIET $\leftrightarrow$ ACTIVE) & Python \\
+\hline
+\texttt{core/news/} & News classification (LLM-based) & Python \\
+\hline
+\texttt{core/\_bridge.py} & Rust $\leftrightarrow$ Python dispatch (try \_rust, fallback to Python) & Python \\
+\hline
+BFF & BFF: FastAPI + WebSocket server & Python \\
+\hline
+\texttt{DataManager/} & Data-serving workers \& servers (static data, news, tick, chart) & Python \\
+\hline
+\texttt{DataSupply/} & External data sources (Polygon, ThetaData, local files) & Python \\
+\hline
+\texttt{OrderManagement/} & IBKR order placement, portfolio, persistence & Python \\
+\hline
+\texttt{MachineLearning/} & ML experimentation (LightGBM) & Python \\
+\hline
+\texttt{utils/} & Cross-cutting: config, logger, Redis keys, session & Python \\
+\hline
+\end{tabularx}
+\caption{Python backend package layout.}
+\label{tab:package_layout}
+\end{table}
+
+\pagebreak
+
+\subsection{Computation Core (\texttt{core/})}
+The \texttt{core/} package is the \textbf{Rust migration boundary}. Each subpackage follows a compute/orchestration split:
+
+\begin{itemize}
+    \item \texttt{compute.py} --- Pure functions \& stateful trackers (\textbf{Rust migration target}). These have planned counterparts in \texttt{rust/src/}.
+    \item \texttt{processor.py} / \texttt{engine.py} --- I/O orchestration (Redis, InfluxDB, threads). Stays in Python.
+\end{itemize}
+
+The \texttt{\_bridge.py} module provides a try/except dispatch:
+\begin{Verbatim}[breaklines=true]
+try:
+    from jerry_trader._rust import VolumeTracker, compute_ranks
+except ImportError:
+    from jerry_trader.core.snapshot.compute import VolumeTracker, compute_ranks
+\end{Verbatim}
+
+\noindent This allows incremental migration --- Rust implementation when compiled, Python fallback otherwise.
+
+\subsection{Services}
+
+{\small\RaggedRight
+\begin{itemize}[leftmargin=*,labelsep=6pt]
+    \item \textbf{BackendForFrontend (BFF)} \\
+    FastAPI + WebSocket server running on the main machine. Collects and pre-processes (\texttt{\seqsplit{core.snapshot}}); receives and emits rank data and overview-chart data to the frontend.
+
+    \item \textbf{core.snapshot (SnapshotProcessor)} \\
+    Receives raw market snapshots from Redis stream, computes ranks and derived metrics (via Rust when available), manages the top-movers subscription set, writes to output Redis stream and InfluxDB.
+
+    \item \textbf{core.factors (FactorManager)} \\
+    {\scriptsize\RaggedRight Real-time factor engine. Ingests tick-level trade data.
+    Computes trade rate. Computes acceleration. Produces rolling z-scores.
+    Outputs to InfluxDB. Uses Redis (HSET) for metadata. Includes historical bootstrap via Polygon API.\par}\justifying
+
+    \item \textbf{core.signals (StateEngine)} \\
+    Polls factor HSETs and fires state transition events (QUIET $\to$ ACTIVE, ACTIVE $\to$ QUIET) based on z-score thresholds.
+
+    \item \textbf{core.news (NewsProcessor)} \\
+    LLM-based news classification. Determines if news articles are positive catalysts using DeepSeek API.
+
+    \item \textbf{OrderManagement} \\
+    Order management system based on Interactive Brokers API. Handles order placement, status callbacks, portfolio and position tracking. Backed by PostgreSQL via SQLAlchemy + Alembic.
+
+    \item \textbf{DataSupply} \\
+    External data sources:
+    \begin{itemize}
+        \item \texttt{snapshotDataSupply} --- market snapshot collection \& replay
+        \item \texttt{tickDataSupply} --- real-time tick data (Polygon.io, ThetaData, local Rust replay)
+        \item \texttt{staticdataSupply} --- fundamentals, borrow fee, news fetch
+        \item \texttt{bootstrapdataSupply} --- historical data loaders
+    \end{itemize}
+
+    \item \textbf{DataManager} \\
+    Data-serving workers that bridge DataSupply to the BFF:
+    \begin{itemize}
+        \item \texttt{\seqsplit{static\_data\_worker}} --- fetches fundamentals for subscribed tickers
+        \item \texttt{\seqsplit{news\_worker}} --- fetches and caches news
+        \item \texttt{\seqsplit{tickdata\_server}} --- serves tick data to frontend and factor engine
+        \item \texttt{\seqsplit{chart\_data\_service}} --- historical bar data for TradingView chart
+    \end{itemize}
+
+    \item \textbf{utils} \\
+    Cross-cutting utilities: config, logger, Redis key naming, session management, path resolution.
+\end{itemize}
+\par}
+
+\subsection{Rust Migration Roadmap}
+\label{sec:rust-roadmap}
+The migration from Python \texttt{compute.py} modules to Rust follows a three-step progression, ordered from simplest to most complex:
+
+\begin{enumerate}
+    \item \textbf{Step 1: Pure math functions} (\texttt{core/factors/compute.py}) \\
+    \texttt{z\_score} and \texttt{price\_accel} --- stateless, no external dependencies.
+    This step establishes the full end-to-end workflow: write Rust in \texttt{\seqsplit{lib.rs}},
+    run \texttt{maturin develop}, \texttt{\seqsplit{\_bridge.py}} auto-switches,
+    existing tests validate correctness, \texttt{RUST\_FACTORS} flips to \texttt{True}.
+
+    \item \textbf{Step 2: Stateful tracker} (\texttt{core/snapshot/compute.py}) \\
+    \texttt{VolumeTracker} as a \texttt{\#[pyclass]} with methods ---
+    learn stateful Rust objects exposed to Python via PyO3.
+
+    \item \textbf{Step 3: DataFrame operations} (\texttt{core/snapshot/compute.py}) \\
+    \texttt{\seqsplit{compute\_ranks}}, \texttt{\seqsplit{compute\_derived\_metrics}}, \texttt{\seqsplit{compute\_weighted\_mid\_price}}
+    --- Polars DataFrame in/out, requires the \texttt{pyo3-polars} crate. Most complex.
+\end{enumerate}
+
+\noindent\textbf{Note:} \texttt{core/signals/} (StateEngine) is excluded from the Rust migration roadmap.
+The signal/state detection logic depends on strategy rules that are not fully decided yet;
+it will remain Python-only for the foreseeable future.
+
+\section{Strategy}
+This app is designed to implement my personal trading strategies, which focus on US pre-market momentum trading.
+
+\begin{itemize}
+\item Trade when tickers are getting active, it has a amount of gains suddenly, we do the momentum trading.
+
+\item And the market has all the attention on this one. cross-section computation.
+
+\item And it has hot news with it.
+
+\item the float shares are relatively low, below 20M is preferred.
+
+\item the country location is not HK or China, etc.
+\item price is preferred \$1--\$20
+\end{itemize}
+\end{document}

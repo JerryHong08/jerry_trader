@@ -38,7 +38,7 @@ import type {
 import { Wifi, WifiOff, BarChart3, TrendingUp, Loader2 } from 'lucide-react';
 import type { ModuleProps, ChartTimeframe } from '../types';
 import { useTickDataStore, type Trade, type Quote } from '../stores/tickDataStore';
-import { useChartDataStore, type OHLCVBar } from '../stores/chartDataStore';
+import { useChartDataStore } from '../stores/chartDataStore';
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -71,7 +71,6 @@ export function ChartModule({
 
   // Chart data store (OHLCV bars)
   const fetchBars = useChartDataStore((s) => s.fetchBars);
-  const updateFromTrade = useChartDataStore((s) => s.updateFromTrade);
   const symbolBars = useChartDataStore((s) => s.symbolBars);
   const chartState = symbol ? symbolBars[symbol.toUpperCase()] : undefined;
 
@@ -102,6 +101,23 @@ export function ChartModule({
 
   // Line chart fallback data (when no OHLCV bars available)
   const lineDataRef = useRef<LineData<Time>[]>([]);
+
+  // Current bar OHLCV accumulator — tracks the in-progress bar for real-time updates.
+  // lightweight-charts update() replaces the entire bar, so we must maintain OHLCV ourselves.
+  const currentBarRef = useRef<{
+    time: number; open: number; high: number; low: number; close: number; volume: number;
+  } | null>(null);
+
+  // Bar duration of the currently rendered series — decoupled from store loading state
+  // so trade ticks keep flowing during a timeframe fetch.
+  const activeBarDurationRef = useRef<number>(0);
+
+  // Track whether we've done the initial fitContent for this symbol
+  const lastRenderedSymbolRef = useRef<string | null>(null);
+
+  // Ref to read current timeframe inside effects without adding it as a dependency
+  const timeframeRef = useRef(timeframe);
+  timeframeRef.current = timeframe;
 
   // ── Initialize lightweight-charts ──────────────────────────────────────
   useEffect(() => {
@@ -211,26 +227,31 @@ export function ChartModule({
   );
 
   // ── Bootstrap: fetch bars on symbol/timeframe change ───────────────────
+  // Only triggers the API fetch. The chart keeps showing current data and
+  // trade ticks keep flowing until the response arrives and the render
+  // effect swaps in the new bars.
   useEffect(() => {
     if (!symbol) return;
 
     const tickerUpper = symbol.toUpperCase();
     fetchBars(tickerUpper, timeframe);
 
-    // Reset line data for fallback mode
-    lineDataRef.current = [];
     currentSymbolRef.current = tickerUpper;
     currentTimeframeRef.current = timeframe;
   }, [symbol, timeframe, fetchBars]);
 
+  // Reset refs when the symbol itself changes (different ticker = clean slate)
+  useEffect(() => {
+    lineDataRef.current = [];
+    currentBarRef.current = null;
+  }, [symbol]);
+
   // ── Render bars on bootstrap fetch ────────────────────────────────────
   useEffect(() => {
     if (!chartRef.current || !symbol) return;
-    if (!chartState || chartState.loading) return;
+    if (!chartState || chartState.loading || chartState.bars.length === 0) return;
 
-    const hasBars = chartState.bars.length > 0;
-
-    if (hasBars && chartMode === 'candle') {
+    if (chartMode === 'candle') {
       ensureSeries('candle');
 
       // Set candlestick data
@@ -256,9 +277,14 @@ export function ChartModule({
         volumeSeriesRef.current.setData(volumeData);
       }
 
-      // Auto-fit visible range
-      chartRef.current.timeScale().fitContent();
-    } else if (hasBars && chartMode === 'line') {
+      // Only fitContent on symbol change (first load), not on timeframe switch
+      if (lastRenderedSymbolRef.current !== symbol) {
+        chartRef.current.timeScale().fitContent();
+        lastRenderedSymbolRef.current = symbol;
+      }
+      activeBarDurationRef.current = chartState.barDurationSec;
+      currentBarRef.current = null;
+    } else if (chartMode === 'line') {
       ensureSeries('line');
 
       const lineData: LineData<Time>[] = chartState.bars.map((bar) => ({
@@ -270,19 +296,23 @@ export function ChartModule({
         lineSeriesRef.current.setData(lineData);
       }
 
-      chartRef.current.timeScale().fitContent();
-    } else if (!hasBars) {
-      // No bars — use line mode with live trade fallback
-      ensureSeries('line');
+      if (lastRenderedSymbolRef.current !== symbol) {
+        chartRef.current.timeScale().fitContent();
+        lastRenderedSymbolRef.current = symbol;
+      }
+      activeBarDurationRef.current = chartState.barDurationSec;
+      currentBarRef.current = null;
     }
 
-    // Update timeScale options based on timeframe
+    // Update timeScale options to match the rendered timeframe.
+    // Uses ref so this only runs when new data arrives (lastFetchTime), not on button click.
+    const tf = timeframeRef.current;
     chartRef.current.timeScale().applyOptions({
-      timeVisible: ['10s', '1m', '5m', '15m', '30m', '1h', '4h'].includes(timeframe),
-      secondsVisible: ['10s', '1m'].includes(timeframe),
+      timeVisible: ['10s', '1m', '5m', '15m', '30m', '1h', '4h'].includes(tf),
+      secondsVisible: ['10s', '1m'].includes(tf),
     });
 
-  }, [chartState?.lastFetchTime, chartState?.loading, chartMode, symbol, ensureSeries, timeframe]);
+  }, [chartState?.lastFetchTime, chartMode, symbol, ensureSeries]);
 
   // ── Real-time trade tick → update current bar / line fallback ──────────
   const latestTrade = symbol
@@ -293,43 +323,65 @@ export function ChartModule({
     if (!latestTrade || latestTrade.symbol !== symbol) return;
     if (typeof latestTrade.price !== 'number' || typeof latestTrade.timestamp !== 'number') return;
 
-    const cs = chartStateRef.current;
-    const hasBars = cs && cs.bars.length > 0;
+    // Use the actively rendered bar duration, not the store's (which may be loading)
+    const barDuration = activeBarDurationRef.current;
 
-    if (hasBars) {
-      // Update current bar in chartDataStore (mutates store)
-      updateFromTrade(symbol, latestTrade.price, latestTrade.size, latestTrade.timestamp);
+    // Floor-align trade timestamp to bar boundary (seconds)
+    const tradeSec = Math.floor(latestTrade.timestamp / 1000);
+    const barTime = barDuration > 0
+      ? Math.floor(tradeSec / barDuration) * barDuration
+      : tradeSec;
 
-      // Read freshly updated bars from the store (avoids stale closure)
-      const freshState = useChartDataStore.getState().symbolBars[symbol.toUpperCase()];
-      if (!freshState || freshState.bars.length === 0) return;
-      const lastBar = freshState.bars[freshState.bars.length - 1];
+    // If we have an active candlestick or line series, update via the ref directly
+    const hasActiveSeries = candleSeriesRef.current || lineSeriesRef.current;
+    if (hasActiveSeries && barDuration > 0) {
+      // Accumulate OHLCV for the current bar
+      const cur = currentBarRef.current;
+      if (cur && cur.time === barTime) {
+        // Same bar — update high/low/close/volume
+        cur.high = Math.max(cur.high, latestTrade.price);
+        cur.low = Math.min(cur.low, latestTrade.price);
+        cur.close = latestTrade.price;
+        cur.volume += latestTrade.size;
+      } else {
+        // New bar boundary — start fresh
+        currentBarRef.current = {
+          time: barTime,
+          open: latestTrade.price,
+          high: latestTrade.price,
+          low: latestTrade.price,
+          close: latestTrade.price,
+          volume: latestTrade.size,
+        };
+      }
+
+      const bar = currentBarRef.current!;
 
       if (chartMode === 'candle' && candleSeriesRef.current) {
         try {
           candleSeriesRef.current.update({
-            time: lastBar.time as Time,
-            open: lastBar.open,
-            high: lastBar.high,
-            low: lastBar.low,
-            close: lastBar.close,
+            time: bar.time as Time,
+            open: bar.open,
+            high: bar.high,
+            low: bar.low,
+            close: bar.close,
           });
         } catch { /* ignore out-of-order */ }
 
         if (volumeSeriesRef.current) {
           try {
             volumeSeriesRef.current.update({
-              time: lastBar.time as Time,
-              value: lastBar.volume,
-              color: lastBar.close >= lastBar.open ? '#22c55e40' : '#ef444440',
+              time: bar.time as Time,
+              value: bar.volume,
+              color: bar.close >= bar.open ? '#22c55e40' : '#ef444440',
             });
           } catch { /* ignore */ }
         }
       } else if (chartMode === 'line' && lineSeriesRef.current) {
         try {
           lineSeriesRef.current.update({
-            time: lastBar.time as Time,
-            value: lastBar.close,
+            time: bar.time as Time,
+            value: bar.close,
           });
         } catch { /* ignore */ }
       }
@@ -337,18 +389,18 @@ export function ChartModule({
       // No OHLCV bars — fallback to raw trade line chart
       if (!lineSeriesRef.current) return;
 
-      const newTime = Math.floor(latestTrade.timestamp / 1000) as Time;
+      const btAsTime = barTime as Time;
       const lastPoint = lineDataRef.current[lineDataRef.current.length - 1];
 
-      if (lastPoint && lastPoint.time === newTime && lastPoint.value === latestTrade.price) return;
+      if (lastPoint && lastPoint.time === btAsTime && lastPoint.value === latestTrade.price) return;
 
-      if (lastPoint && lastPoint.time === newTime) {
+      if (lastPoint && lastPoint.time === btAsTime) {
         lastPoint.value = latestTrade.price;
         try { lineSeriesRef.current.update(lastPoint); } catch { /* ignore */ }
         return;
       }
 
-      const newPoint: LineData<Time> = { time: newTime, value: latestTrade.price };
+      const newPoint: LineData<Time> = { time: btAsTime, value: latestTrade.price };
       try {
         lineSeriesRef.current.update(newPoint);
         lineDataRef.current.push(newPoint);
@@ -366,10 +418,7 @@ export function ChartModule({
         lineSeriesRef.current!.setData(lineDataRef.current);
       }
     }
-    // NOTE: chartState intentionally excluded — we read via ref + getState()
-    // to avoid infinite re-render loop (updateFromTrade mutates the store).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [latestTrade, symbol, chartMode, updateFromTrade]);
+  }, [latestTrade, symbol, chartMode]);
 
   // ── Quote data ─────────────────────────────────────────────────────────
   const quote = symbol ? (symbolData[symbol]?.Q as Quote | undefined) : undefined;
@@ -492,17 +541,23 @@ export function ChartModule({
             )}
           </button>
 
-          {/* Loading indicator */}
-          {chartState?.loading && (
-            <Loader2 className="w-3 h-3 text-blue-400 animate-spin" />
-          )}
+          {/* Loading indicator — always in DOM to prevent reflow on toggle */}
+          <Loader2
+            className={`w-3 h-3 text-blue-400 ${
+              chartState?.loading ? 'animate-spin' : 'invisible'
+            }`}
+          />
 
-          {/* Data source badge */}
-          {chartState?.source && !chartState.loading && (
-            <span className="text-[9px] text-gray-600 font-mono">
-              {chartState.source}
-            </span>
-          )}
+          {/* Data source badge — always in DOM to prevent reflow on toggle */}
+          <span
+            className={`text-[9px] font-mono ${
+              chartState?.source && !chartState.loading
+                ? 'text-gray-600'
+                : 'invisible'
+            }`}
+          >
+            {chartState?.source || ''}
+          </span>
 
           {/* Price info */}
           {symbol && latestTrade && (

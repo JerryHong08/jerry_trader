@@ -144,6 +144,14 @@ pub enum ReplayCommand {
     Unsubscribe {
         symbol: String,
     },
+    /// Batch-load Parquet data for multiple symbols at once (1 scan per
+    /// data type instead of N).  Results are stored in
+    /// `preloaded_cache` so subsequent `Subscribe` calls skip I/O.
+    BatchPreload {
+        symbols: Vec<String>,
+        data_types: Vec<DataType>,
+        ack: std::sync::mpsc::Sender<Result<()>>,
+    },
     SetSpeed(f64),
     Pause,
     Resume,
@@ -223,6 +231,42 @@ pub fn engine_loop(
                 }
 
                 let _ = ack.send(result);
+            }
+
+            // ── BatchPreload ────────────────────────────────────────
+            Ok(ReplayCommand::BatchPreload {
+                symbols,
+                data_types,
+                ack,
+            }) => {
+                info!(
+                    "Batch preloading {} symbols ({:?})",
+                    symbols.len(),
+                    data_types
+                );
+                let load_start = Instant::now();
+
+                match rt.block_on(loader::load_multi_symbol_data(
+                    &config, &symbols, &data_types,
+                )) {
+                    Ok(loaded) => {
+                        let count = loaded.len();
+                        for (key, data) in loaded {
+                            preloaded_cache.insert(key, data);
+                        }
+                        let elapsed = load_start.elapsed();
+                        info!(
+                            "Batch preload done: {} cache entries in {:.1}s",
+                            count,
+                            elapsed.as_secs_f64()
+                        );
+                        let _ = ack.send(Ok(()));
+                    }
+                    Err(e) => {
+                        error!("Batch preload failed: {}", e);
+                        let _ = ack.send(Err(e));
+                    }
+                }
             }
 
             // ── Unsubscribe ─────────────────────────────────────────

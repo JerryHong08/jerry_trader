@@ -192,6 +192,65 @@ impl TickDataReplayer {
             })
     }
 
+    /// Batch-preload Parquet data for multiple symbols at once.
+    ///
+    /// Each data-type file is scanned only **once** (with an ``is_in``
+    /// filter) instead of once per symbol, then the result is cached
+    /// so that subsequent :meth:`subscribe` calls skip I/O entirely.
+    ///
+    /// Args:
+    ///     symbols: List of tickers, e.g. ``["AAPL", "MSFT"]``.
+    ///     events:  Data types — ``["Q"]``, ``["T"]``, or ``["Q","T"]``.
+    #[pyo3(signature = (symbols, events))]
+    fn batch_preload(
+        &self,
+        py: Python,
+        symbols: Vec<String>,
+        events: Vec<String>,
+    ) -> PyResult<()> {
+        let data_types: Vec<DataType> = events
+            .iter()
+            .filter_map(|e| match e.as_str() {
+                "Q" => Some(DataType::Quotes),
+                "T" => Some(DataType::Trades),
+                _ => None,
+            })
+            .collect();
+
+        if data_types.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "events must contain 'Q' and/or 'T'",
+            ));
+        }
+
+        let (ack_tx, ack_rx) = mpsc::channel();
+
+        self.cmd_tx
+            .send(ReplayCommand::BatchPreload {
+                symbols,
+                data_types,
+                ack: ack_tx,
+            })
+            .map_err(|_| {
+                pyo3::exceptions::PyRuntimeError::new_err("Engine thread is not running")
+            })?;
+
+        // Release GIL while batch loading.
+        py.detach(move || {
+            ack_rx
+                .recv()
+                .map_err(|_| {
+                    pyo3::exceptions::PyRuntimeError::new_err("Engine thread hung up")
+                })?
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Batch preload failed: {}",
+                        e
+                    ))
+                })
+        })
+    }
+
     // ── Transport controls ──────────────────────────────────────
     //
     // State changes (speed / pause / resume) are applied directly to the

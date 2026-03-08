@@ -8,6 +8,7 @@
 use anyhow::{Context, Result};
 use log::{info, warn};
 use polars::prelude::*;
+use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::replayer::config::ReplayConfig;
@@ -223,4 +224,203 @@ fn extract_trades(df: &DataFrame) -> Result<Vec<RawTrade>> {
         }
     }
     Ok(trades)
+}
+
+// ── Batch (multi-symbol) loading ────────────────────────────────────
+
+/// Load data for **multiple symbols** in a single Parquet scan.
+///
+/// Each Parquet file (quotes_v1 or trades_v1) is opened once and
+/// filtered with `ticker.is_in([...])`, then the resulting DataFrame
+/// is split by ticker.  This is dramatically faster than calling
+/// [`load_symbol_data`] N times (N scans → 1 scan per data type).
+///
+/// Returns `HashMap<cache_key, PreloadedData>` where
+/// `cache_key = "{symbol}_{DataType:?}"`.
+pub async fn load_multi_symbol_data(
+    config: &ReplayConfig,
+    symbols: &[String],
+    data_types: &[DataType],
+) -> Result<HashMap<String, PreloadedData>> {
+    let mut result: HashMap<String, PreloadedData> = HashMap::new();
+
+    for &dt in data_types {
+        let subdir = dt.parquet_subdir();
+        let file_path = config.parquet_path(subdir);
+
+        if !file_path.exists() {
+            warn!("Data file not found: {}", file_path.display());
+            continue;
+        }
+
+        info!(
+            "Batch loading {:?} for {} symbols from {}",
+            dt,
+            symbols.len(),
+            file_path.display()
+        );
+        let load_start = Instant::now();
+        let start_ts = config.start_timestamp_ns;
+
+        // Build a polars Series for the IS_IN filter.
+        let syms: Vec<&str> = symbols.iter().map(|s| s.as_str()).collect();
+
+        match dt {
+            DataType::Quotes => {
+                let fp = file_path.clone();
+                let syms_owned: Vec<String> = symbols.to_vec();
+
+                let df = tokio::task::spawn_blocking(move || -> Result<DataFrame> {
+                    let ticker_series = Series::new("_filter".into(), &syms_owned);
+                    LazyFrame::scan_parquet(&fp, Default::default())
+                        .context("Failed to scan parquet")?
+                        .filter(col("ticker").is_in(lit(ticker_series)))
+                        .select(&[
+                            col("ticker"),
+                            col("participant_timestamp")
+                                .cast(polars::datatypes::DataType::Int64),
+                            col("bid_price").cast(polars::datatypes::DataType::Float64),
+                            col("ask_price").cast(polars::datatypes::DataType::Float64),
+                            col("bid_size").cast(polars::datatypes::DataType::Int64),
+                            col("ask_size").cast(polars::datatypes::DataType::Int64),
+                        ])
+                        .collect()
+                        .context("Failed to collect quotes dataframe")
+                })
+                .await
+                .context("Blocking task panicked")??;
+
+                let elapsed_ms = load_start.elapsed().as_secs_f64() * 1000.0;
+                info!(
+                    "Batch loaded {} quote rows for {} tickers in {:.1}ms",
+                    df.height(),
+                    syms.len(),
+                    elapsed_ms,
+                );
+
+                // Partition by ticker.
+                for sym in &syms {
+                    let sub_df = df.clone().lazy()
+                        .filter(col("ticker").eq(lit(*sym)))
+                        .collect()?;
+
+                    if sub_df.height() == 0 {
+                        warn!("No quote data found for {}", sym);
+                        let cache_key = format!("{}_Quotes", sym);
+                        result.insert(
+                            cache_key,
+                            PreloadedData {
+                                quotes: Some(Vec::new()),
+                                trades: None,
+                                first_ts_ns: 0,
+                                data_type: dt,
+                            },
+                        );
+                        continue;
+                    }
+
+                    let mut quotes = extract_quotes(&sub_df)?;
+                    quotes.sort_by_key(|q| q.participant_timestamp);
+
+                    let first_ts_ns = quotes
+                        .iter()
+                        .find(|q| start_ts.is_none_or(|s| q.participant_timestamp >= s))
+                        .map(|q| q.participant_timestamp)
+                        .unwrap_or_else(|| {
+                            quotes.first().map(|q| q.participant_timestamp).unwrap_or(0)
+                        });
+
+                    info!("  {} — {} quotes (first_ts={})", sym, quotes.len(), first_ts_ns);
+                    let cache_key = format!("{}_Quotes", sym);
+                    result.insert(
+                        cache_key,
+                        PreloadedData {
+                            quotes: Some(quotes),
+                            trades: None,
+                            first_ts_ns,
+                            data_type: dt,
+                        },
+                    );
+                }
+            }
+
+            DataType::Trades => {
+                let fp = file_path.clone();
+                let syms_owned: Vec<String> = symbols.to_vec();
+
+                let df = tokio::task::spawn_blocking(move || -> Result<DataFrame> {
+                    let ticker_series = Series::new("_filter".into(), &syms_owned);
+                    LazyFrame::scan_parquet(&fp, Default::default())
+                        .context("Failed to scan parquet")?
+                        .filter(col("ticker").is_in(lit(ticker_series)))
+                        .select(&[
+                            col("ticker"),
+                            col("participant_timestamp")
+                                .cast(polars::datatypes::DataType::Int64),
+                            col("price").cast(polars::datatypes::DataType::Float64),
+                            col("size").cast(polars::datatypes::DataType::Int64),
+                            col("exchange").cast(polars::datatypes::DataType::Int64),
+                        ])
+                        .collect()
+                        .context("Failed to collect trades dataframe")
+                })
+                .await
+                .context("Blocking task panicked")??;
+
+                let elapsed_ms = load_start.elapsed().as_secs_f64() * 1000.0;
+                info!(
+                    "Batch loaded {} trade rows for {} tickers in {:.1}ms",
+                    df.height(),
+                    syms.len(),
+                    elapsed_ms,
+                );
+
+                for sym in &syms {
+                    let sub_df = df.clone().lazy()
+                        .filter(col("ticker").eq(lit(*sym)))
+                        .collect()?;
+
+                    if sub_df.height() == 0 {
+                        warn!("No trade data found for {}", sym);
+                        let cache_key = format!("{}_Trades", sym);
+                        result.insert(
+                            cache_key,
+                            PreloadedData {
+                                quotes: None,
+                                trades: Some(Vec::new()),
+                                first_ts_ns: 0,
+                                data_type: dt,
+                            },
+                        );
+                        continue;
+                    }
+
+                    let mut trades = extract_trades(&sub_df)?;
+                    trades.sort_by_key(|t| t.participant_timestamp);
+
+                    let first_ts_ns = trades
+                        .iter()
+                        .find(|t| start_ts.is_none_or(|s| t.participant_timestamp >= s))
+                        .map(|t| t.participant_timestamp)
+                        .unwrap_or_else(|| {
+                            trades.first().map(|t| t.participant_timestamp).unwrap_or(0)
+                        });
+
+                    info!("  {} — {} trades (first_ts={})", sym, trades.len(), first_ts_ns);
+                    let cache_key = format!("{}_Trades", sym);
+                    result.insert(
+                        cache_key,
+                        PreloadedData {
+                            quotes: None,
+                            trades: Some(trades),
+                            first_ts_ns,
+                            data_type: dt,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(result)
 }

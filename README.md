@@ -268,8 +268,8 @@ Phase 2.5.3.5 - Key features implement(current stage):
   stale responses discarded on arrival.
 - ✅Added `ChartDataBFF` role to `config.yaml` and `backend_starter.py`.
 - ✅Frontend `VITE_CHART_BFF_URL` env var (`getChartBffBaseUrl()` defaults to port 5002).
-- [ ] localdata_loader/data_loader.py -> ClickHouse backfill in replay mode.
-- ✅Wall-time `BarBuilder.check_expired(now_ms)` — bars close at correct boundary even without trades,
+- [ ]localdata_loader/data_loader.py -> ClickHouse backfill in replay mode.
+- [ ]Wall-time `BarBuilder.check_expired(now_ms)` — bars close at correct boundary even without trades,
   driven by `clock.now_ms()` in the flush loop (works in both live and replay mode).
 
 Phase 2.5.4 — Downstream consumers + InfluxDB→ClickHouse migration

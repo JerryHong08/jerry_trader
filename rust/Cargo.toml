@@ -14,7 +14,7 @@ pyo3 = "0.27.0"
 tokio = { version = "1.35", features = ["full"] }
 
 # Data processing — Parquet reading
-polars = { version = "0.43", features = ["parquet", "lazy", "dtype-datetime"] }
+polars = { version = "0.43", features = ["parquet", "lazy", "dtype-datetime", "is_in", "partition_by"] }
 
 # Date and time handling
 chrono = "0.4"

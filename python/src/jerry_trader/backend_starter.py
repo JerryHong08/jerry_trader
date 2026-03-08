@@ -358,6 +358,7 @@ class JerryTraderBackendStarter:
                     provider="synced-replayer", manager=synced_mgr
                 )
                 self._tick_replayer = tick_replayer  # keep reference
+                self._preload_list = role_cfg.get("preload_tickers", [])
                 logger.info(
                     "Created synced-replayer (in-process Rust) for date=%s",
                     self.replay_date,
@@ -365,6 +366,7 @@ class JerryTraderBackendStarter:
             else:
                 self._shared_ws_manager = UnifiedTickManager(provider=manager_type)
                 self._tick_replayer = None
+                self._preload_list = []
 
             # Create shared event loop for the ws_manager
             self._shared_ws_loop = asyncio.new_event_loop()
@@ -372,6 +374,11 @@ class JerryTraderBackendStarter:
                 target=self._run_shared_ws_loop, daemon=True, name="SharedWSLoop"
             )
             self._shared_ws_thread.start()
+
+            # Pre-load ticker data (Parquet) while clock is paused so
+            # the data is in memory before the frontend subscribes.
+            if self._preload_list and self._tick_replayer is not None:
+                self._preload_tickers(self._preload_list)
 
             self.tick_data_server = TickDataServer(
                 host=role_cfg.get("host", "0.0.0.0"),
@@ -569,6 +576,35 @@ class JerryTraderBackendStarter:
                 self._shared_ws_loop.shutdown_asyncgens()
             )
             self._shared_ws_loop.close()
+
+    # ── Preload ──────────────────────────────────────────────────────
+
+    _PRELOAD_CLIENT = "__preload__"
+
+    def _preload_tickers(self, tickers: list[str]) -> None:
+        """Batch-preload Parquet data for *tickers* with the clock paused.
+
+        Uses ``batch_preload`` to scan each Parquet file only once for
+        all tickers (instead of N separate scans).  The clock is paused
+        during loading so virtual time does not advance.
+        """
+        import time as _time
+
+        from jerry_trader import clock as clock_mod
+
+        logger.info("Pre-loading %d ticker(s): %s", len(tickers), tickers)
+        t0 = _time.monotonic()
+
+        # Pause the clock so virtual time doesn't drift during I/O.
+        clock_mod.pause()
+        try:
+            # Batch-load: 1 Parquet scan per data type for ALL tickers.
+            self._tick_replayer.batch_preload(tickers, ["Q", "T"])
+        finally:
+            clock_mod.resume()
+
+        elapsed = _time.monotonic() - t0
+        logger.info("Pre-load complete: %d ticker(s) in %.1fs", len(tickers), elapsed)
 
     def _start_async_worker_in_thread(self, worker, name: str):
         """Start an async worker in a separate thread with its own event loop."""

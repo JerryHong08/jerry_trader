@@ -40,8 +40,8 @@ from typing import Any, Dict, List, Optional
 import clickhouse_connect
 import redis
 
+from jerry_trader import clock as clock_mod
 from jerry_trader._rust import BarBuilder
-from jerry_trader.clock import clock
 from jerry_trader.DataSupply.tickDataSupply.unified_tick_manager import (
     UnifiedTickManager,
 )
@@ -54,7 +54,6 @@ logger = setup_logger("bars_builder", log_to_file=True, level=logging.DEBUG)
 # ── Constants ────────────────────────────────────────────────────────────
 CLIENT_ID = "bars_builder"  # queue fan-out identity in UnifiedTickManager
 BATCH_SIZE = 500  # ClickHouse insert batch size
-FLUSH_INTERVAL_SEC = 2.0  # max seconds before flushing pending bars
 
 
 class BarsBuilderService:
@@ -433,13 +432,30 @@ class BarsBuilderService:
     # ════════════════════════════════════════════════════════════════════
 
     def _flush_loop(self) -> None:
-        """Periodically check for expired bars and flush to ClickHouse."""
+        """Periodically check for expired bars and flush to ClickHouse.
+
+        Polls every 50 ms real-time.  When virtual time crosses a 500 ms
+        boundary we run ``check_expired``; any completed bars are flushed
+        to ClickHouse immediately so writes land right at :00, :10, …
+        """
+        POLL_SEC = 0.05  # 50 ms real-time poll
+
         logger.info("Flush loop started")
+        # Align to the current virtual-time 500 ms slot.
+        last_slot = clock_mod.now_ms() // 500
+
         while self._running:
-            time.sleep(FLUSH_INTERVAL_SEC)
+            time.sleep(POLL_SEC)
+
+            now_ms = clock_mod.now_ms()
+            cur_slot = now_ms // 500
+
+            if cur_slot <= last_slot:
+                continue  # haven't crossed a 500 ms boundary yet
+            last_slot = cur_slot
+
             # Wall-time bar completion: close any bars whose boundary
             # has passed, even if no new trade arrived.
-            now_ms = clock.now_ms()
             expired = self.bar_builder.check_expired(now_ms)
             if expired:
                 self._stats["bars_completed"] += len(expired)
@@ -449,7 +465,13 @@ class BarsBuilderService:
                 logger.debug(
                     f"check_expired closed {len(expired)} bars " f"(now_ms={now_ms})"
                 )
-            self._flush_to_clickhouse()
+
+            # Flush to ClickHouse immediately when bars are pending.
+            if self._pending_bars:
+                self._flush_to_clickhouse()
+
+        # Final flush on shutdown
+        self._flush_to_clickhouse()
         logger.info("Flush loop stopped")
 
     def _flush_to_clickhouse(self) -> None:

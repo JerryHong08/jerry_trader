@@ -71,6 +71,9 @@ machines:
         port: 8000
         redis: "redis-a"
         manager_type: "synced-replayer"
+        preload_tickers:          # loaded at startup while clock is paused
+          - "NIPG"
+          - "PRSO"
       # FactorEngine:
       #   enabled: true
       #   manager_type: "replayer" # choices=["polygon", "theta", "replayer", "synced-replayer"]

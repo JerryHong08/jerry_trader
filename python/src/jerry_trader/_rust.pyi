@@ -221,6 +221,23 @@ class TickDataReplayer:
         """Unsubscribe a symbol (stops its replay tasks)."""
         ...
 
+    def batch_preload(
+        self,
+        symbols: list[str],
+        events: list[str],
+    ) -> None:
+        """Batch-preload Parquet data for multiple symbols at once.
+
+        Each data-type file is scanned only once (with ``is_in`` filter)
+        instead of once per symbol.  Subsequent :meth:`subscribe` calls
+        for these symbols will skip I/O entirely.
+
+        Args:
+            symbols: List of tickers, e.g. ``["AAPL", "MSFT"]``.
+            events: ``["Q"]``, ``["T"]``, or ``["Q", "T"]``.
+        """
+        ...
+
     def set_speed(self, speed: float) -> None:
         """Change replay speed (re-anchors the timeline)."""
         ...

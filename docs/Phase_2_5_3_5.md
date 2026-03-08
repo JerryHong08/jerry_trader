@@ -503,6 +503,18 @@ Trade-off: polars adds ~20MB to the `.so` and ~30-60s compile time. Acceptable f
   - Part 7: end-to-end mock pipeline (mock fire_tick → _on_tick → queue → normalize_data)
   - Part 8: real integration with Rust `TickDataReplayer` + Parquet data (NIPG ticker, pause-then-resume pattern)
 
+### Phase C.5 — Wall-time BarBuilder ✅
+
+Previously `BarBuilder` only completed bars reactively (on the next trade). Low-volume tickers
+could have bars stuck open well past their boundary. Now a periodic `check_expired(now_ms)` call
+closes bars at the correct wall-time, using `clock.now_ms()` (correct in both live and replay mode).
+
+- [x] Rust `BarBuilder.check_expired(now_ms)` — scans all open bars, completes and removes any with `bar_end <= now_ms`
+- [x] 2 new Rust unit tests (`test_bar_state_expired_detection`, `test_ticker_bars_expired_drain`)
+- [x] Python `BarsBuilderService._flush_loop` calls `check_expired(clock.now_ms())` every 2s, publishes + persists expired bars
+- [x] Updated `_rust.pyi` type stubs
+- [x] 9 new Python pytest tests in `TestCheckExpired` class (empty, unexpired, expired, removed-from-state, mixed timeframes, multi-ticker, re-ingest, field validation)
+
 ### Phase D — Remote machine sync + snapshot replayer
 
 The **ChartBFF machine** is the clock domain master (also runs

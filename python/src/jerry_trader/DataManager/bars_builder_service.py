@@ -41,6 +41,7 @@ import clickhouse_connect
 import redis
 
 from jerry_trader._rust import BarBuilder
+from jerry_trader.clock import clock
 from jerry_trader.DataSupply.tickDataSupply.unified_tick_manager import (
     UnifiedTickManager,
 )
@@ -432,10 +433,22 @@ class BarsBuilderService:
     # ════════════════════════════════════════════════════════════════════
 
     def _flush_loop(self) -> None:
-        """Periodically flush accumulated completed bars to ClickHouse."""
+        """Periodically check for expired bars and flush to ClickHouse."""
         logger.info("Flush loop started")
         while self._running:
             time.sleep(FLUSH_INTERVAL_SEC)
+            # Wall-time bar completion: close any bars whose boundary
+            # has passed, even if no new trade arrived.
+            now_ms = clock.now_ms()
+            expired = self.bar_builder.check_expired(now_ms)
+            if expired:
+                self._stats["bars_completed"] += len(expired)
+                self._pending_bars.extend(expired)
+                for bar in expired:
+                    self._publish_bar(bar)
+                logger.debug(
+                    f"check_expired closed {len(expired)} bars " f"(now_ms={now_ms})"
+                )
             self._flush_to_clickhouse()
         logger.info("Flush loop stopped")
 

@@ -519,6 +519,43 @@ impl BarBuilder {
         }
     }
 
+    /// Check all open bars and complete any whose `bar_end <= now_ms`.
+    ///
+    /// This enables **wall-time driven** bar completion: call this
+    /// periodically with `clock.now_ms()` so that bars close at the correct
+    /// boundary even when no trade arrives.
+    ///
+    /// Expired bars are removed from the rolling state (the next trade will
+    /// start a fresh bar).
+    ///
+    /// Returns:
+    ///   List of completed bar dicts (may be empty).
+    fn check_expired(
+        &mut self,
+        py: Python<'_>,
+        now_ms: i64,
+    ) -> PyResult<Vec<Py<PyAny>>> {
+        let mut completed = Vec::new();
+
+        for (ticker, ticker_bars) in &mut self.tickers {
+            let expired_tfs: Vec<Timeframe> = ticker_bars
+                .bars
+                .iter()
+                .filter(|(_, bar)| now_ms >= bar.bar_end)
+                .map(|(&tf, _)| tf)
+                .collect();
+
+            for tf in expired_tfs {
+                if let Some(bar) = ticker_bars.bars.remove(&tf) {
+                    let cb = bar.to_completed(ticker, tf);
+                    completed.push(cb.to_py_dict(py)?);
+                }
+            }
+        }
+
+        Ok(completed)
+    }
+
     /// Flush all open bars — force-complete and return them.
     ///
     /// Useful at session end or shutdown.
@@ -746,5 +783,56 @@ mod tests {
         let wed = BASE_DAY_MS + 2 * 86_400_000 + 10 * 3_600_000;
         let bs_wed = SessionCalendar::bar_start(wed, Timeframe::Week1);
         assert_eq!(bs_wed, BASE_DAY_MS);
+    }
+
+    // ── check_expired (pure-Rust) ───────────────────────────────────
+
+    #[test]
+    fn test_bar_state_expired_detection() {
+        // A 1m bar from 10:00:00 to 10:01:00.
+        let bar = BarState::new(100.0, 50.0, ts(10, 0, 0), ts(10, 1, 0), Session::Regular);
+        // At 10:00:30, bar should NOT be expired.
+        assert!(ts(10, 0, 30) < bar.bar_end);
+        // At 10:01:00 exactly, bar IS expired (now_ms >= bar_end).
+        assert!(ts(10, 1, 0) >= bar.bar_end);
+        // At 10:01:30, bar IS expired.
+        assert!(ts(10, 1, 30) >= bar.bar_end);
+    }
+
+    #[test]
+    fn test_ticker_bars_expired_drain() {
+        // Verify that expired bars can be drained from a TickerBars map.
+        let mut tb = TickerBars::new();
+        // Insert 1m bar ending at 10:01
+        tb.bars.insert(
+            Timeframe::Min1,
+            BarState::new(100.0, 50.0, ts(10, 0, 0), ts(10, 1, 0), Session::Regular),
+        );
+        // Insert 5m bar ending at 10:05
+        tb.bars.insert(
+            Timeframe::Min5,
+            BarState::new(100.0, 50.0, ts(10, 0, 0), ts(10, 5, 0), Session::Regular),
+        );
+
+        // At 10:02, only the 1m bar is expired.
+        let now = ts(10, 2, 0);
+        let expired: Vec<Timeframe> = tb
+            .bars
+            .iter()
+            .filter(|(_, bar)| now >= bar.bar_end)
+            .map(|(&tf, _)| tf)
+            .collect();
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0], Timeframe::Min1);
+
+        // At 10:05, both are expired.
+        let now2 = ts(10, 5, 0);
+        let expired2: Vec<Timeframe> = tb
+            .bars
+            .iter()
+            .filter(|(_, bar)| now2 >= bar.bar_end)
+            .map(|(&tf, _)| tf)
+            .collect();
+        assert_eq!(expired2.len(), 2);
     }
 }

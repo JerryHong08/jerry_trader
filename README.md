@@ -278,6 +278,7 @@ Phase 2.5.4 — Downstream consumers + InfluxDB→ClickHouse migration
 mainly focus on strategy computation,execution,replay backtest.
 
 - [ ]tickers fit in strategy/condition pre locate.
+- [ ]pre-located tickers pipeline backtest visualization& validation.
 - ✅separated works to other computuers using ssh. configured in config.yaml.
 - [ ]visualization of factors in chart module.
 - [ ]real-time risk management engine/trigger.

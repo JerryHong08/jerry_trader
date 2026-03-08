@@ -21,7 +21,6 @@ Note: Ensure Redis and InfluxDB are running before starting.
 
 import argparse
 import asyncio
-import copy
 import logging
 import os
 import signal
@@ -31,7 +30,6 @@ from datetime import datetime
 from datetime import time as dtime
 from pathlib import Path
 from threading import Thread
-from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
 
 import exchange_calendars as xcals
@@ -39,261 +37,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-import yaml
-
+from jerry_trader.utils.config_builder import (
+    DEFAULT_CONFIG_PATH,
+    build_runtime_config,
+    load_yaml_config,
+    parse_override_args,
+)
 from jerry_trader.utils.logger import setup_logger
-from jerry_trader.utils.paths import PROJECT_ROOT
 from jerry_trader.utils.session import make_session_id
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.INFO)
-DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
-
-
-def load_yaml_config(config_path: Path = DEFAULT_CONFIG_PATH) -> dict:
-    """Load YAML configuration file."""
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
-
-
-def deep_merge(base: dict, override: dict) -> dict:
-    """Deep merge override into base dict. Override values take precedence."""
-    result = copy.deepcopy(base)
-    for key, value in override.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-            result[key] = deep_merge(result[key], value)
-        else:
-            result[key] = value
-    return result
-
-
-def set_nested_value(d: dict, key_path: str, value: Any) -> None:
-    """
-    Set a nested value in a dict using dot notation.
-    e.g., set_nested_value(d, "llm.models.deepseek.thinking_mode", True)
-    """
-    keys = key_path.split(".")
-    current = d
-    for key in keys[:-1]:
-        if key not in current:
-            current[key] = {}
-        current = current[key]
-
-    # Type coercion for common cases
-    final_key = keys[-1]
-    if isinstance(value, str):
-        # Convert string to appropriate type
-        if value.lower() == "true":
-            value = True
-        elif value.lower() == "false":
-            value = False
-        elif value.lower() == "null" or value.lower() == "none":
-            value = None
-        else:
-            try:
-                value = int(value)
-            except ValueError:
-                try:
-                    value = float(value)
-                except ValueError:
-                    pass  # Keep as string
-
-    current[final_key] = value
-
-
-def parse_override_args(unknown_args: list) -> Dict[str, Any]:
-    """
-    Parse unknown args as config overrides.
-    Supports: --key.subkey.subsubkey value or --key.subkey=value
-    """
-    overrides = {}
-    i = 0
-    while i < len(unknown_args):
-        arg = unknown_args[i]
-        if arg.startswith("--"):
-            key = arg[2:]  # Remove --
-
-            if "=" in key:
-                # Handle --key=value format
-                key, value = key.split("=", 1)
-                overrides[key] = value
-            elif i + 1 < len(unknown_args) and not unknown_args[i + 1].startswith("--"):
-                # Handle --key value format
-                overrides[key] = unknown_args[i + 1]
-                i += 1
-            else:
-                # Flag without value, treat as True
-                overrides[key] = True
-        i += 1
-    return overrides
-
-
-def build_runtime_config(
-    yaml_cfg: dict,
-    machine: str,
-    overrides: Dict[str, Any],
-) -> dict:
-    """
-    Build runtime configuration by merging:
-    1. Defaults from YAML
-    2. Machine-specific config
-    3. CLI overrides
-
-    Overrides can use dot notation:
-    - "replay_date" or "defaults.replay_date" -> sets replay_date
-    - "llm.active_model" -> sets llm.active_model
-    - "roles.JerryTraderBFF.port" -> sets role-specific param
-
-    Database references use "db-name@MACHINE" format:
-    - "redis-b@OLDMAN" -> resolves host from OLDMAN_IP env var
-    - "redis-b" -> defaults to LOCAL (127.0.0.1)
-    """
-    if machine not in yaml_cfg.get("machines", {}):
-        available = list(yaml_cfg.get("machines", {}).keys())
-        raise ValueError(f"Unknown machine '{machine}'. Available: {available}")
-
-    machine_cfg = yaml_cfg["machines"][machine]
-
-    # Start with defaults (these become top-level in runtime config)
-    runtime = copy.deepcopy(yaml_cfg.get("defaults", {}))
-
-    # Add machine-level limit (market_open | market_close | null)
-    runtime["limit"] = machine_cfg.get("limit", None)
-
-    # Add LLM config
-    runtime["llm"] = copy.deepcopy(yaml_cfg.get("llm", {}))
-
-    # Add enabled roles with their config, resolving database references
-    runtime["roles"] = {}
-    for role_name, role_cfg in machine_cfg.get("roles", {}).items():
-        if role_cfg.get("enabled", True):
-            resolved_cfg = copy.deepcopy(role_cfg)
-
-            # Resolve database references (redis, postgres, influxdb, clickhouse)
-            for db_type in ["redis", "postgres", "influxdb", "clickhouse"]:
-                db_ref = role_cfg.get(db_type)
-                if db_ref and isinstance(db_ref, str):
-                    resolved_cfg[db_type] = _resolve_db_reference(
-                        yaml_cfg, db_type, db_ref, role_name
-                    )
-
-            runtime["roles"][role_name] = resolved_cfg
-
-    # Apply CLI overrides using dot notation
-    # Support both "replay_date" and "defaults.replay_date" for convenience
-    for key_path, value in overrides.items():
-        # Strip "defaults." prefix if present (for convenience)
-        if key_path.startswith("defaults."):
-            key_path = key_path[9:]  # Remove "defaults."
-        set_nested_value(runtime, key_path, value)
-
-    # Normalize date fields to strings (YAML parses YYYYMMDD as int)
-    _normalize_date_fields(runtime)
-
-    return runtime
-
-
-def _resolve_db_reference(
-    yaml_cfg: dict, db_type: str, db_ref: str, role_name: str
-) -> Optional[dict]:
-    """
-    Resolve database reference string to actual config.
-
-    Format: "db-name@MACHINE" or "db-name" (defaults to LOCAL)
-
-    Examples:
-        "redis-b@OLDMAN" -> {host: env(OLDMAN_IP), port: 6379, db: 0}
-        "redis-b" -> {host: "127.0.0.1", port: 6379, db: 0}
-        "postgres-a@WSL2" -> {host: ..., port: 5432, database: ..., url: "postgresql://..."}
-    """
-    # Parse "db-name@MACHINE" format
-    if "@" in db_ref:
-        db_name, machine_name = db_ref.rsplit("@", 1)
-    else:
-        db_name = db_ref
-        machine_name = "LOCAL"
-
-    # Get database template from databases section
-    databases = yaml_cfg.get("databases", {})
-    db_configs = databases.get(db_type, {})
-
-    if db_name not in db_configs:
-        logger.warning(
-            f"{db_type.capitalize()} config '{db_name}' not found for role {role_name}. "
-            f"Available: {list(db_configs.keys())}"
-        )
-        return None
-
-    # Copy database template (handle None/empty entries in YAML)
-    template = db_configs[db_name]
-    resolved = copy.deepcopy(template) if template is not None else {}
-
-    # Resolve host from network section
-    network = yaml_cfg.get("network", {})
-    if machine_name not in network:
-        logger.warning(
-            f"Machine '{machine_name}' not found in network section for {role_name}.{db_type}. "
-            f"Available: {list(network.keys())}"
-        )
-        return None
-
-    host_env_var = network[machine_name]
-
-    if host_env_var is None:
-        # LOCAL = 127.0.0.1
-        resolved["host"] = "127.0.0.1"
-    else:
-        # Resolve from environment variable
-        host_value = os.getenv(host_env_var)
-        if host_value:
-            resolved["host"] = host_value
-        else:
-            logger.warning(
-                f"Environment variable '{host_env_var}' not set for {role_name}.{db_type}. "
-                f"Using env var name as placeholder."
-            )
-            # Keep env var name as placeholder for debugging
-            resolved["host"] = f"${{{host_env_var}}}"
-
-    # For influxdb, resolve the URL env var based on machine
-    if db_type == "influxdb":
-        resolved["influx_url_env"] = f"{machine_name}_INFLUXDB_URL"
-
-    # For postgres, resolve the URL env var based on machine
-    if db_type == "postgres":
-        database_url_env = f"{machine_name}_DATABASE_URL"
-        resolved["database_url_env"] = database_url_env
-        # Also resolve the actual URL for convenience
-        resolved["url"] = os.getenv(database_url_env)
-
-    return resolved
-
-
-def _normalize_date_fields(config: dict) -> None:
-    """
-    Convert date fields from int to string format.
-    YAML interprets values like 20260115 as integers, but we need them as strings.
-    """
-    date_fields = [
-        "replay_date",
-        "replay_time",
-        "load_history",
-        "start_from",
-        "rollback_to",
-    ]
-
-    for field in date_fields:
-        if field in config and config[field] is not None:
-            config[field] = str(config[field])
-
-    # Also check in roles for role-specific date fields
-    if "roles" in config:
-        for role_name, role_cfg in config["roles"].items():
-            if isinstance(role_cfg, dict):
-                for field in date_fields:
-                    if field in role_cfg and role_cfg[field] is not None:
-                        role_cfg[field] = str(role_cfg[field])
 
 
 class JerryTraderBackendStarter:
@@ -345,8 +98,72 @@ class JerryTraderBackendStarter:
         self.tz = ZoneInfo("America/New_York")
         self.calendar = xcals.get_calendar("XNYS")
 
+        # Initialize clock *before* services — synced-replayer needs
+        # the ReplayClock to exist so create_tick_replayer() can read
+        # data_start_ts_ns and speed from it.
+        self._init_clock()
+
         # Initialize only enabled services based on roles
         self._init_services()
+
+    def _init_clock(self):
+        """Initialize the global clock (replay or live mode).
+
+        Must run before ``_init_services()`` because the synced-replayer
+        path calls ``clock.create_tick_replayer()`` which requires an
+        active ``ReplayClock``.
+        """
+        from jerry_trader import clock
+
+        if self.replay_date:
+            # Build replay start timestamp from replay_date (YYYYMMDD) + replay_time (HHMMSS).
+            # Priority for start time:
+            #   1. defaults.replay_time (HHMMSS)  — CLI or config.yaml
+            #   2. Replayer role's start_from (HH:MM)
+            #   3. 04:00:00 ET (premarket open)
+            rd = str(self.replay_date)
+
+            if len(rd) != 8 or not rd.isdigit():
+                raise ValueError(f"replay_date must be YYYYMMDD, got: {rd!r}")
+
+            year, month, day = int(rd[:4]), int(rd[4:6]), int(rd[6:8])
+
+            rt = str(self.replay_time).zfill(6) if self.replay_time else None
+            if rt and len(rt) == 6 and rt.isdigit():
+                # replay_time = HHMMSS
+                hour, minute, second = int(rt[:2]), int(rt[2:4]), int(rt[4:6])
+            elif rt and len(rt) == 4 and rt.isdigit():
+                # replay_time = HHMM
+                hour, minute, second = int(rt[:2]), int(rt[2:4]), 0
+            else:
+                second = 0
+                # Fallback: Replayer role's start_from (HH:MM)
+                start_time_str = None
+                if "Replayer" in self.roles:
+                    start_time_str = self.roles["Replayer"].get("start_from")
+                if start_time_str:
+                    parts = start_time_str.split(":")
+                    hour, minute = int(parts[0]), int(parts[1])
+                else:
+                    hour, minute = 4, 0  # premarket open
+
+            replay_start_dt = datetime(
+                year, month, day, hour, minute, second, tzinfo=self.tz
+            )
+            data_start_ts_ns = int(replay_start_dt.timestamp() * 1_000_000_000)
+
+            replay_speed = 1.0
+            if "Replayer" in self.roles:
+                replay_speed = self.roles["Replayer"].get("speed", 1.0)
+
+            clock.init_replay(data_start_ts_ns, speed=replay_speed)
+            logger.info(
+                f"🕐 ReplayClock initialized: {replay_start_dt.strftime('%Y-%m-%d %H:%M')} ET, "
+                f"speed={replay_speed}x"
+            )
+        else:
+            clock.set_live_mode()
+            logger.info("🕐 Clock: live mode (time.time)")
 
     def _init_services(self):
         """Initialize backend services based on enabled roles."""
@@ -504,7 +321,50 @@ class JerryTraderBackendStarter:
                 manager_type = self.roles["FactorEngine"].get("manager_type")
 
             # Create shared UnifiedTickManager
-            self._shared_ws_manager = UnifiedTickManager(provider=manager_type)
+            if manager_type == "synced-replayer":
+                # In-process Rust TickDataReplayer — no WebSocket hop.
+                from jerry_trader.clock import create_tick_replayer
+                from jerry_trader.config import lake_data_dir
+                from jerry_trader.DataSupply.tickDataSupply.synced_replayer_manager import (
+                    SyncedReplayerManager,
+                )
+
+                if not self.replay_date:
+                    raise ValueError(
+                        "synced-replayer requires defaults.replay_date in config"
+                    )
+
+                # Build start_time in HH:MM:SS for the Rust replayer
+                start_time_hms: str | None = None
+                if self.replay_time:
+                    t = str(self.replay_time).zfill(6)  # "080015" → "08:00:15"
+                    start_time_hms = f"{t[:2]}:{t[2:4]}:{t[4:6]}"
+                elif "Replayer" in self.roles and self.roles["Replayer"].get(
+                    "start_from"
+                ):
+                    start_time_hms = self.roles["Replayer"]["start_from"]
+
+                replayer_speed = 1.0
+                if "Replayer" in self.roles:
+                    replayer_speed = float(self.roles["Replayer"].get("speed", 1.0))
+
+                tick_replayer = create_tick_replayer(
+                    replay_date=self.replay_date,
+                    lake_data_dir=lake_data_dir,
+                    start_time=start_time_hms,
+                )
+                synced_mgr = SyncedReplayerManager(tick_replayer)
+                self._shared_ws_manager = UnifiedTickManager(
+                    provider="synced-replayer", manager=synced_mgr
+                )
+                self._tick_replayer = tick_replayer  # keep reference
+                logger.info(
+                    "Created synced-replayer (in-process Rust) for date=%s",
+                    self.replay_date,
+                )
+            else:
+                self._shared_ws_manager = UnifiedTickManager(provider=manager_type)
+                self._tick_replayer = None
 
             # Create shared event loop for the ws_manager
             self._shared_ws_loop = asyncio.new_event_loop()
@@ -746,61 +606,6 @@ class JerryTraderBackendStarter:
         logger.info(f"Session: {self.session_id}")
 
         self._running = True
-
-        # ── Initialize global clock ──────────────────────────────
-        # Must happen *before* any service starts so every module sees the
-        # same time source from the very first call.
-        from jerry_trader import clock
-
-        if self.replay_date:
-            # Build replay start timestamp from replay_date (YYYYMMDD) + replay_time (HHMMSS).
-            # Priority for start time:
-            #   1. defaults.replay_time (HHMMSS)  — CLI or config.yaml
-            #   2. Replayer role's start_from (HH:MM)
-            #   3. 04:00:00 ET (premarket open)
-            rd = str(self.replay_date)
-
-            if len(rd) != 8 or not rd.isdigit():
-                raise ValueError(f"replay_date must be YYYYMMDD, got: {rd!r}")
-
-            year, month, day = int(rd[:4]), int(rd[4:6]), int(rd[6:8])
-
-            rt = str(self.replay_time) if self.replay_time else None
-            if rt and len(rt) == 6 and rt.isdigit():
-                # replay_time = HHMMSS
-                hour, minute, second = int(rt[:2]), int(rt[2:4]), int(rt[4:6])
-            elif rt and len(rt) == 4 and rt.isdigit():
-                # replay_time = HHMM
-                hour, minute, second = int(rt[:2]), int(rt[2:4]), 0
-            else:
-                second = 0
-                # Fallback: Replayer role's start_from (HH:MM)
-                start_time_str = None
-                if "Replayer" in self.roles:
-                    start_time_str = self.roles["Replayer"].get("start_from")
-                if start_time_str:
-                    parts = start_time_str.split(":")
-                    hour, minute = int(parts[0]), int(parts[1])
-                else:
-                    hour, minute = 4, 0  # premarket open
-
-            replay_start_dt = datetime(
-                year, month, day, hour, minute, second, tzinfo=self.tz
-            )
-            data_start_ts_ns = int(replay_start_dt.timestamp() * 1_000_000_000)
-
-            replay_speed = 1.0
-            if "Replayer" in self.roles:
-                replay_speed = self.roles["Replayer"].get("speed", 1.0)
-
-            clock.init_replay(data_start_ts_ns, speed=replay_speed)
-            logger.info(
-                f"🕐 ReplayClock initialized: {replay_start_dt.strftime('%Y-%m-%d %H:%M')} ET, "
-                f"speed={replay_speed}x"
-            )
-        else:
-            clock.set_live_mode()
-            logger.info("🕐 Clock: live mode (time.time)")
 
         # Start limit watchdog if a limit is configured (and not in replay mode)
         if self.limit and not self.replay_date:

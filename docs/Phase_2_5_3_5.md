@@ -450,7 +450,7 @@ Trade-off: polars adds ~20MB to the `.so` and ~30-60s compile time. Acceptable f
 - [x] Update `_rust.pyi` stubs
 - [x] Unit tests: `python/tests/core/test_replay_clock.py` — 46 pytest tests (Rust direct, Python singleton, drift accuracy, monotonicity)
 - [x] Wire into `backend_starter.py`: `init_replay()` in replay, `set_live_mode()` in live
-- [x] CLI accepts `YYYYMMDD` (defaults 04:00 ET) or `YYYYMMDDHHMMSS` for exact start time
+- [x] `replay_date` accepts `YYYYMMDD` only; start time from separate `replay_time` field (`HHMMSS`/`HHMM`), fallback to Replayer `start_from`, default 04:00 ET
 
 ### Phase A.5 — Frontend clock sync ✅
 
@@ -468,7 +468,7 @@ Trade-off: polars adds ~20MB to the `.so` and ~30-60s compile time. Acceptable f
 - [x] NewsWorker: `_get_current_time()` → `clock.now_datetime()`
 - [x] Verify: live mode unchanged (`_clock is None` → falls through)
 
-### Phase C — Merge TickDataReplayer into `jerry_trader._rust`
+### Phase C — Merge TickDataReplayer into `jerry_trader._rust` ✅
 
 - [x] Port `local_tickdata_replayer/src/` into `rust/src/replayer/`
   - `config.rs` — ReplayConfig (Parquet path builder, no clap)
@@ -484,8 +484,14 @@ Trade-off: polars adds ~20MB to the `.so` and ~30-60s compile time. Acceptable f
 - [x] Update `Cargo.toml` with polars/tokio/chrono/anyhow dependencies
 - [x] Update `_rust.pyi` type stubs
 - [x] Add `clock.create_tick_replayer()` convenience factory
-- [ ] Python integration: callback → queue distribution to BarsBuilder/FactorEngine
-- [ ] Retire `replayer_manager.py` (keep `local_tickdata_replayer/` as archive/reference)
+- [x] Python integration: `SyncedReplayerManager` wraps Rust `TickDataReplayer` with same interface as `ReplayerWebSocketManager`
+  - `_on_tick()` callback converts Polygon wire-format → normalised payload, fans out via `loop.call_soon_threadsafe(q.put_nowait)`
+  - `subscribe()` runs `TickDataReplayer.subscribe()` in thread-pool executor (GIL-released)
+  - `stream_forever()` captures event loop reference; Rust engine pushes data via callback (no WebSocket recv loop)
+- [x] `UnifiedTickManager` accepts `provider="synced-replayer"` + pre-built `manager` parameter
+- [x] `backend_starter.py`: when `manager_type == "synced-replayer"`, creates `TickDataReplayer` → `SyncedReplayerManager` → `UnifiedTickManager`
+- [x] Config updated: `manager_type: "synced-replayer"` in `config.yaml` (wsl2 / TickDataServer)
+- [x] Old `replayer_manager.py` (WebSocket path) preserved — `manager_type: "replayer"` still works unchanged
 
 ### Phase D — Remote machine sync + snapshot replayer
 

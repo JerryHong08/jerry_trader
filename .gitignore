@@ -119,3 +119,5 @@ docs/_build/
 *.snm
 *.vrb
 *.xdv
+
+local_tickdata_replayer/

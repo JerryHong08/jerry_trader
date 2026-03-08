@@ -186,7 +186,9 @@ class StateEngine:
 
         trade_rate_z = float(trade_rate_z_str) if trade_rate_z_str else None
         accel = float(accel_str) if accel_str else None
-        ts_ms = int(ts_ms_str) if ts_ms_str else int(time.time() * 1000)
+        from jerry_trader import clock
+
+        ts_ms = int(ts_ms_str) if ts_ms_str else clock.now_ms()
 
         # Get or create tracker
         if symbol not in self._trackers:
@@ -203,7 +205,7 @@ class StateEngine:
             and accel > 0
         )
 
-        now = time.time()
+        now = clock.now_s()
         old_state = tracker.state
 
         if old_state == TickerState.QUIET and active_condition:

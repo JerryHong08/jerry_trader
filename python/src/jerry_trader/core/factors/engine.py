@@ -444,10 +444,12 @@ class FactorManager:
         step_ms = int(COMPUTE_INTERVAL_SEC * 1000)
         earliest_possible = _snap_sec(snap[0][0] + RATE_WINDOW_MS)
 
-        # Wall-clock snapped to clean second — this will become
+        # Clock-snapped to clean second — this will become
         # bootstrap_end_ms AND the grid endpoint, so ctx deques and
         # the bootstrap InfluxDB data end at the exact same point.
-        wall_sec = _snap_sec(int(time.time() * 1000))
+        from jerry_trader import clock
+
+        wall_sec = _snap_sec(clock.now_ms())
 
         # Only need BASELINE_LEN steps back from wall_sec
         tail_start = max(wall_sec - BASELINE_LEN * step_ms, earliest_possible)
@@ -666,9 +668,11 @@ class FactorManager:
           bootstrap uses event-time grid; real-time uses wall-clock grid.
           compute_ts is always > bootstrap_end_ms → no overlap.
         """
-        # Wall-clock compute timestamp, snapped to clean second boundary
-        # to align with the bootstrap grid (both at ...00.000, ...01.000, ...)
-        compute_ts = _snap_sec(int(time.time() * 1000))
+        # Compute timestamp (wall-clock in live, simulated in replay),
+        # snapped to clean second boundary to align with bootstrap grid.
+        from jerry_trader import clock
+
+        compute_ts = _snap_sec(clock.now_ms())
 
         with ctx.lock:
             if len(ctx.trades) < MIN_TRADES_FOR_RATE:

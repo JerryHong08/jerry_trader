@@ -82,3 +82,68 @@ class BarBuilder:
         ...
 
     def __repr__(self) -> str: ...
+
+class ReplayClock:
+    """Monotonic, drift-free virtual clock for replay mode.
+
+    Maps wall-clock elapsed time to a data-time range anchored at
+    ``data_start_ts_ns``.  Supports pause/resume, speed control, and
+    arbitrary seek (``jump_to``).
+
+    In live mode the Python ``clock.py`` singleton bypasses this entirely.
+    """
+
+    def __init__(self, data_start_ts_ns: int, speed: float = 1.0) -> None:
+        """Create a new ReplayClock.
+
+        Args:
+            data_start_ts_ns: Market-data epoch nanosecond timestamp that
+                corresponds to the replay start.
+            speed: Replay speed multiplier (1.0 = real-time).
+        """
+        ...
+
+    def now_ns(self) -> int:
+        """Current replay time as epoch nanoseconds."""
+        ...
+
+    def now_ms(self) -> int:
+        """Current replay time as epoch milliseconds."""
+        ...
+
+    def elapsed_ns(self) -> int:
+        """Effective wall-clock nanoseconds elapsed (speed-adjusted)."""
+        ...
+
+    def set_speed(self, speed: float) -> None:
+        """Change replay speed (re-anchors current position)."""
+        ...
+
+    @property
+    def speed(self) -> float:
+        """Current speed multiplier."""
+        ...
+
+    def pause(self) -> None:
+        """Freeze the clock."""
+        ...
+
+    def resume(self) -> None:
+        """Resume from where it was frozen."""
+        ...
+
+    @property
+    def is_paused(self) -> bool:
+        """Whether the clock is currently paused."""
+        ...
+
+    def jump_to(self, target_ts_ns: int) -> None:
+        """Seek to an arbitrary point in market-data time."""
+        ...
+
+    @property
+    def data_start_ts_ns(self) -> int:
+        """The current data-start anchor (epoch ns)."""
+        ...
+
+    def __repr__(self) -> str: ...

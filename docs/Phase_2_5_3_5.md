@@ -283,17 +283,29 @@ replayer.subscribe(["AAPL", "TSLA"], ["T", "Q"])
 
 ### Component 4: Remote Machine Sync — Redis Heartbeat
 
-For `MarketSnapshotReplayer` running on a different machine (same network or Tailscale):
+The **ChartBFF machine** is the **domain master** of the replay clock. It runs
+both ChartBFF and `local_tickdata_replayer`, owns the `ReplayClock` Rust
+instance, and publishes heartbeats via Redis. Remote machines (e.g. the one
+running `MarketSnapshotReplayer`) **follow** the clock via `RemoteClockFollower`.
 
 ```
-Machine A (tick replayer)              Machine B (snapshot replayer)
+Machine A (ChartBFF + tick replayer    Machine B (snapshot replayer)
+         — clock master)
 ┌─────────────────────┐                ┌─────────────────────────┐
 │ ReplayClock          │  Redis SET     │ RemoteClockFollower      │
-│ publishes heartbeat  │──every 100ms──▶│ reads heartbeat          │
-│ replay_clock:{sid}   │                │ interpolates between     │
-│ {ts_ns, speed}       │                │ beats using monotonic_ns │
+│ ChartBFF             │──every 100ms──▶│ reads heartbeat          │
+│ local_tickdata_      │                │ interpolates between     │
+│   replayer           │                │ beats using monotonic_ns │
+│ replay_clock:{sid}   │                │                         │
+│ {ts_ns, speed,       │                │ MarketSnapshotReplayer   │
+│  paused}             │                │ polls follower.now_ns()  │
 └─────────────────────┘                └─────────────────────────┘
 ```
+
+**Rationale:** The ChartBFF is the orchestrator that the frontend controls
+(play/pause/seek/speed). Both ChartBFF and the tick replayer run on the same
+machine and share the same `ReplayClock` in-process. Control commands from
+the UI take effect immediately without cross-machine round-trips.
 
 ```python
 class RemoteClockFollower:
@@ -430,24 +442,31 @@ Trade-off: polars adds ~20MB to the `.so` and ~30-60s compile time. Acceptable f
 
 ## Implementation Phases
 
-### Phase A — `ReplayClock` Rust core + Python singleton
+### Phase A — `ReplayClock` Rust core + Python singleton ✅
 
-- [ ] `rust/src/clock.rs` — `ReplayClock` `#[pyclass]` with `now_ns/ms`, `jump_to`, `set_speed`, `pause/resume`
-- [ ] Register in `rust/src/lib.rs`
-- [ ] `python/src/jerry_trader/clock.py` — singleton with live-mode fallback
-- [ ] Update `_rust.pyi` stubs
-- [ ] Unit tests (Rust + Python)
-- [ ] Wire into `backend_starter.py`: `init_clock()` in replay, `set_live_mode()` in live
+- [x] `rust/src/clock.rs` — `ReplayClock` `#[pyclass]` with `now_ns/ms`, `jump_to`, `set_speed`, `pause/resume` (11 Rust unit tests, 33 total pass)
+- [x] Register in `rust/src/lib.rs`
+- [x] `python/src/jerry_trader/clock.py` — singleton with live-mode fallback
+- [x] Update `_rust.pyi` stubs
+- [x] Unit tests: `python/tests/core/test_replay_clock.py` — 46 pytest tests (Rust direct, Python singleton, drift accuracy, monotonicity)
+- [x] Wire into `backend_starter.py`: `init_replay()` in replay, `set_live_mode()` in live
+- [x] CLI accepts `YYYYMMDD` (defaults 04:00 ET) or `YYYYMMDDHHMMSS` for exact start time
 
-### Phase B — Module migration (local machine)
+### Phase A.5 — Frontend clock sync ✅
 
-- [ ] FactorEngine: `time.time()` → `clock.now_ms()` (2 lines, highest impact)
-- [ ] StateEngine: `time.time()` → `clock.now_ms()` for cooldowns
-- [ ] BFF: `datetime.now()` → `clock.now_datetime()`
-- [ ] ChartDataBFF: `datetime.now()` → `clock.now_datetime()`
-- [ ] StaticDataWorker: `datetime.now(ET)` → `clock.now_datetime()`
-- [ ] NewsWorker: `_get_current_time()` → `clock.now_datetime()`
-- [ ] Verify: live mode unchanged (`_clock is None` → falls through)
+- [x] `GET /api/clock` endpoint on ChartDataBFF (port 5002) — returns `{mode, now_ms, speed, paused, data_start_ts_ns, session_id}`
+- [x] `TimelineClock.tsx` — polls `/api/clock` every 1s, interpolates between polls via `performance.now() × speed`
+- [x] Visual indicators: orange `REPLAY` badge + pulsing dot, speed multiplier, `⏸ PAUSED` state, red dot on disconnect
+- [x] Live mode: unchanged green "Market Time" display
+
+### Phase B — Module migration (local machine) ✅
+
+- [x] FactorEngine: `time.time()` → `clock.now_ms()` (2 lines, highest impact)
+- [x] StateEngine: `time.time()` → `clock.now_ms()` / `clock.now_s()` for cooldowns
+- [x] ChartDataBFF: `datetime.now()` → `clock.now_datetime()`
+- [x] StaticDataWorker: `datetime.now(ET)` → `clock.now_datetime()`
+- [x] NewsWorker: `_get_current_time()` → `clock.now_datetime()`
+- [x] Verify: live mode unchanged (`_clock is None` → falls through)
 
 ### Phase C — Merge TickDataReplayer into `jerry_trader._rust`
 
@@ -462,9 +481,13 @@ Trade-off: polars adds ~20MB to the `.so` and ~30-60s compile time. Acceptable f
 
 ### Phase D — Remote machine sync + snapshot replayer
 
-- [ ] Redis heartbeat publisher in `clock.py` (100ms interval)
+The **ChartBFF machine** is the clock domain master (also runs
+`local_tickdata_replayer` in-process). Remote machines (running
+`MarketSnapshotReplayer`) follow via Redis heartbeat.
+
+- [ ] Redis heartbeat publisher in `clock.py` (100ms interval, from ChartBFF machine)
 - [ ] `RemoteClockFollower` class (monotonic interpolation between heartbeats)
-- [ ] Modify `MarketSnapshotReplayer` to poll clock instead of `asyncio.sleep`
+- [ ] Modify `MarketSnapshotReplayer` to poll `RemoteClockFollower.now_ns()` instead of `asyncio.sleep`
 - [ ] Test cross-machine sync (same network + Tailscale)
 
 ### Phase E — Jump + control plane

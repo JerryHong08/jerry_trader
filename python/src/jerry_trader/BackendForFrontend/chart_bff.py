@@ -393,6 +393,42 @@ class ChartDataBFF:
                     )
             return {"timeframes": base_tfs}
 
+        # ============ Clock API (for TimelineClock sync) ============
+
+        @self.app.get("/api/clock")
+        async def get_clock():
+            """Return the current clock state for frontend TimelineClock sync.
+
+            Response:
+                mode: "replay" | "live"
+                now_ms: current epoch ms (replay-aware)
+                speed: replay speed multiplier (1.0 in live)
+                paused: whether replay clock is paused
+                data_start_ts_ns: replay start epoch ns (null in live)
+                session_id: current session ID
+            """
+            from jerry_trader import clock
+
+            if clock.is_replay():
+                rc = clock.get_clock()
+                return {
+                    "mode": "replay",
+                    "now_ms": clock.now_ms(),
+                    "speed": rc.speed if rc else 1.0,
+                    "paused": rc.is_paused if rc else False,
+                    "data_start_ts_ns": rc.data_start_ts_ns if rc else None,
+                    "session_id": self.session_id,
+                }
+            else:
+                return {
+                    "mode": "live",
+                    "now_ms": clock.now_ms(),
+                    "speed": 1.0,
+                    "paused": False,
+                    "data_start_ts_ns": None,
+                    "session_id": self.session_id,
+                }
+
         # ============ WebSocket Endpoint ============
 
         @self.app.websocket("/ws/{client_id}")
@@ -457,10 +493,12 @@ class ChartDataBFF:
             return None
 
         # Default date range based on timeframe
+        from jerry_trader import clock
+
         if to_date:
             end_dt = datetime.strptime(to_date, "%Y-%m-%d").date()
         else:
-            end_dt = datetime.now().date()
+            end_dt = clock.now_datetime().date()
 
         if from_date:
             start_dt = datetime.strptime(from_date, "%Y-%m-%d").date()
@@ -562,10 +600,12 @@ class ChartDataBFF:
 
         dur = self._TF_DURATION_SEC.get(builder_tf, 60)
 
+        from jerry_trader import clock
+
         end_dt = (
             datetime.strptime(to_date, "%Y-%m-%d").date()
             if to_date
-            else datetime.now().date()
+            else clock.now_datetime().date()
         )
         if from_date:
             start_dt = datetime.strptime(from_date, "%Y-%m-%d").date()

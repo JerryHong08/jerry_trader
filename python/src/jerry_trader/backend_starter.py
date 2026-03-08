@@ -740,6 +740,57 @@ class JerryTraderBackendStarter:
 
         self._running = True
 
+        # ── Initialize global clock ──────────────────────────────
+        # Must happen *before* any service starts so every module sees the
+        # same time source from the very first call.
+        from jerry_trader import clock
+
+        if self.replay_date:
+            # Build replay start timestamp from replay_date.
+            # Accepts YYYYMMDD (defaults to 04:00 ET) or YYYYMMDDHHMMSS.
+            # The Replayer role's ``start_from`` (HH:MM) overrides time when
+            # replay_date is 8 digits.
+            rd = str(self.replay_date)
+
+            if len(rd) == 14 and rd.isdigit():
+                # Full timestamp: YYYYMMDDHHMMSS
+                year, month, day = int(rd[:4]), int(rd[4:6]), int(rd[6:8])
+                hour, minute, second = int(rd[8:10]), int(rd[10:12]), int(rd[12:14])
+            elif len(rd) == 8 and rd.isdigit():
+                year, month, day = int(rd[:4]), int(rd[4:6]), int(rd[6:8])
+                second = 0
+                # Check if Replayer role specifies start_from (HH:MM)
+                start_time_str = None
+                if "Replayer" in self.roles:
+                    start_time_str = self.roles["Replayer"].get("start_from")
+                if start_time_str:
+                    parts = start_time_str.split(":")
+                    hour, minute = int(parts[0]), int(parts[1])
+                else:
+                    hour, minute = 4, 0  # premarket open
+            else:
+                raise ValueError(
+                    f"replay_date must be YYYYMMDD or YYYYMMDDHHMMSS, got: {rd!r}"
+                )
+
+            replay_start_dt = datetime(
+                year, month, day, hour, minute, second, tzinfo=self.tz
+            )
+            data_start_ts_ns = int(replay_start_dt.timestamp() * 1_000_000_000)
+
+            replay_speed = 1.0
+            if "Replayer" in self.roles:
+                replay_speed = self.roles["Replayer"].get("speed", 1.0)
+
+            clock.init_replay(data_start_ts_ns, speed=replay_speed)
+            logger.info(
+                f"🕐 ReplayClock initialized: {replay_start_dt.strftime('%Y-%m-%d %H:%M')} ET, "
+                f"speed={replay_speed}x"
+            )
+        else:
+            clock.set_live_mode()
+            logger.info("🕐 Clock: live mode (time.time)")
+
         # Start limit watchdog if a limit is configured (and not in replay mode)
         if self.limit and not self.replay_date:
             if not self.in_limit_window():

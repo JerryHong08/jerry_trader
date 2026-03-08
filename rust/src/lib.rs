@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 
 mod factors;
 mod bars;
+mod clock;
 
 /// The Rust computation core, exposed to Python as `jerry_trader._rust`.
 #[pymodule]
@@ -27,4 +28,8 @@ mod _rust {
     // ── Bar builder ─────────────────────────────────────────────────
     #[pymodule_export]
     use super::bars::BarBuilder;
+
+    // ── Replay clock ────────────────────────────────────────────────
+    #[pymodule_export]
+    use super::clock::ReplayClock;
 }

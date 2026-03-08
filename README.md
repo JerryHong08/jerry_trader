@@ -251,9 +251,14 @@ Phase 2.5.3 — Frontend integration
 
 Phase 2.5.3.5 - Key features implement(current stage):
 
-- [ ]wall-time global clock driven by rust, apply on live&replay mode.
-- [ ]local_tickdata_replayer to python orchestration.
-- [ ]localdata_loader/data_loader.py -> ClickHouse backfill in replay mode.
+- ✅ReplayClock — Rust `#[pyclass]` wall-time global clock + Python `clock.py` singleton, 46 tests
+- ✅Frontend clock sync — `GET /api/clock` + `TimelineClock.tsx` (REPLAY badge, speed, pause indicators)
+- ✅Module migration — 7 `time.time()`/`datetime.now()` calls replaced across 5 modules with `clock.now_ms()`/`clock.now_datetime()`
+- ✅TickDataReplayer — Rust replayer ported into `jerry_trader._rust` (6 Rust files, PyO3 callback delivery)
+- ✅SyncedReplayerManager — drop-in replacement for WebSocket path, in-process tick delivery
+- ✅UnifiedTickManager — `provider="synced-replayer"` support
+- ✅Config refactor — `utils/config_builder.py` extracted from `backend_starter.py`
+- ✅Validation tests — `test_synced_replayer.py` (35 tests: unit + real Parquet integration)
 - ✅Historical bar bootstrap from Polygon API → ClickHouse backfill in live mode
   (`_needs_historical_backfill()` + `_backfill_to_clickhouse()` in Chart BFF).
 - ✅Split BFF into two independent services for multi-machine deployment:
@@ -263,6 +268,8 @@ Phase 2.5.3.5 - Key features implement(current stage):
   stale responses discarded on arrival.
 - ✅Added `ChartDataBFF` role to `config.yaml` and `backend_starter.py`.
 - ✅Frontend `VITE_CHART_BFF_URL` env var (`getChartBffBaseUrl()` defaults to port 5002).
+- [ ] localdata_loader/data_loader.py -> ClickHouse backfill in replay mode.
+- [ ] wall-time bar_builder(current is trades driven, could miss the bar update time) in live&replay mode.
 
 Phase 2.5.4 — Downstream consumers + InfluxDB→ClickHouse migration
 

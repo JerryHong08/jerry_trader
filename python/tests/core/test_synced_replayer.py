@@ -736,8 +736,7 @@ skip_integration = pytest.mark.skipif(
 
 # data_start_ts_ns for 2026-03-06 09:30 ET
 # 2026-03-06 09:30:00 ET = 2026-03-06 14:30:00 UTC
-# Approximate epoch ns (used as timeline anchor)
-MAR06_0930_NS = 1_772_975_400_000_000_000  # 2026-03-06 14:30:00 UTC
+MAR06_0930_NS = 1_772_807_400_000_000_000  # 2026-03-06 14:30:00 UTC
 
 
 @skip_integration
@@ -746,28 +745,35 @@ class TestIntegrationRustReplayer:
 
     @pytest.fixture
     def rust_replayer(self):
-        """Create a real TickDataReplayer pointed at the data lake."""
+        """Create a real TickDataReplayer pointed at the data lake.
+
+        Starts **paused** so the virtual clock doesn't advance while
+        Parquet data is being loaded.  Each test must call
+        ``rust_replayer.resume()`` after subscribing.
+        """
         rpl = TickDataReplayer(
             replay_date=REPLAY_DATE,
-            lake_data_dir=os.path.join(LAKE_DATA_DIR, "us_stocks_sip"),
+            lake_data_dir=LAKE_DATA_DIR,
             data_start_ts_ns=MAR06_0930_NS,
-            speed=0.0,  # max speed — don't pace ticks
+            speed=10000.0,  # fast-forward — don't pace ticks
         )
+        rpl.pause()  # hold the clock until subscribe finishes
         yield rpl
         rpl.shutdown()
 
     @pytest.mark.asyncio
     async def test_real_quotes_arrive(self, rust_replayer):
-        """Subscribe to AAPL quotes and receive at least one tick."""
+        """Subscribe to NIPG quotes and receive at least one tick."""
         mgr = SyncedReplayerManager(rust_replayer)
 
         task = asyncio.create_task(mgr.stream_forever())
         await asyncio.sleep(0.05)
 
-        await mgr.subscribe("test_client", ["AAPL"], events=["Q"])
+        await mgr.subscribe("test_client", ["NIPG"], events=["Q"])
+        rust_replayer.resume()  # start the clock after data is loaded
 
         # Wait for ticks to arrive (Parquet loading + replay)
-        q = mgr.get_client_queue("test_client", "Q.AAPL")
+        q = mgr.get_client_queue("test_client", "Q.NIPG")
         assert q is not None
 
         received = []
@@ -787,12 +793,12 @@ class TestIntegrationRustReplayer:
 
         assert (
             len(received) >= 1
-        ), f"Expected at least 1 quote tick for AAPL, got {len(received)}"
+        ), f"Expected at least 1 quote tick for NIPG, got {len(received)}"
 
         # Validate structure of first tick
         tick = received[0]
         assert tick["event_type"] == "Q"
-        assert tick["symbol"] == "AAPL"
+        assert tick["symbol"] == "NIPG"
         assert "bid" in tick
         assert "ask" in tick
         assert "timestamp" in tick
@@ -802,15 +808,16 @@ class TestIntegrationRustReplayer:
 
     @pytest.mark.asyncio
     async def test_real_trades_arrive(self, rust_replayer):
-        """Subscribe to AAPL trades and receive at least one tick."""
+        """Subscribe to NIPG trades and receive at least one tick."""
         mgr = SyncedReplayerManager(rust_replayer)
 
         task = asyncio.create_task(mgr.stream_forever())
         await asyncio.sleep(0.05)
 
-        await mgr.subscribe("test_client", ["AAPL"], events=["T"])
+        await mgr.subscribe("test_client", ["NIPG"], events=["T"])
+        rust_replayer.resume()  # start the clock after data is loaded
 
-        q = mgr.get_client_queue("test_client", "T.AAPL")
+        q = mgr.get_client_queue("test_client", "T.NIPG")
         assert q is not None
 
         received = []
@@ -830,11 +837,11 @@ class TestIntegrationRustReplayer:
 
         assert (
             len(received) >= 1
-        ), f"Expected at least 1 trade tick for AAPL, got {len(received)}"
+        ), f"Expected at least 1 trade tick for NIPG, got {len(received)}"
 
         tick = received[0]
         assert tick["event_type"] == "T"
-        assert tick["symbol"] == "AAPL"
+        assert tick["symbol"] == "NIPG"
         assert "price" in tick
         assert "size" in tick
         assert isinstance(tick["price"], float)
@@ -850,9 +857,10 @@ class TestIntegrationRustReplayer:
         task = asyncio.create_task(mgr.stream_forever())
         await asyncio.sleep(0.05)
 
-        await mgr.subscribe("test_client", ["AAPL"], events=["Q"])
+        await mgr.subscribe("test_client", ["NIPG"], events=["Q"])
+        rust_replayer.resume()  # start the clock after data is loaded
 
-        q = mgr.get_client_queue("test_client", "Q.AAPL")
+        q = mgr.get_client_queue("test_client", "Q.NIPG")
 
         # Wait for one tick
         deadline = time.monotonic() + 15.0
@@ -890,18 +898,19 @@ class TestIntegrationRustReplayer:
         task = asyncio.create_task(mgr.stream_forever())
         await asyncio.sleep(0.05)
 
-        await mgr.subscribe("test_client", ["AAPL", "MSFT"], events=["Q"])
+        await mgr.subscribe("test_client", ["NIPG", "AMC"], events=["Q"])
+        rust_replayer.resume()  # start the clock after data is loaded
 
-        q_aapl = mgr.get_client_queue("test_client", "Q.AAPL")
-        q_msft = mgr.get_client_queue("test_client", "Q.MSFT")
+        q_nipg = mgr.get_client_queue("test_client", "Q.NIPG")
+        q_amc = mgr.get_client_queue("test_client", "Q.AMC")
 
-        aapl_ticks = []
-        msft_ticks = []
+        nipg_ticks = []
+        amc_ticks = []
         deadline = time.monotonic() + 20.0
         while time.monotonic() < deadline:
-            if len(aapl_ticks) >= 1 and len(msft_ticks) >= 1:
+            if len(nipg_ticks) >= 1 and len(amc_ticks) >= 1:
                 break
-            for q, bucket in [(q_aapl, aapl_ticks), (q_msft, msft_ticks)]:
+            for q, bucket in [(q_nipg, nipg_ticks), (q_amc, amc_ticks)]:
                 try:
                     bucket.append(q.get_nowait())
                 except asyncio.QueueEmpty:
@@ -914,7 +923,7 @@ class TestIntegrationRustReplayer:
         except asyncio.CancelledError:
             pass
 
-        assert len(aapl_ticks) >= 1, "Expected AAPL ticks"
-        assert len(msft_ticks) >= 1, "Expected MSFT ticks"
-        assert aapl_ticks[0]["symbol"] == "AAPL"
-        assert msft_ticks[0]["symbol"] == "MSFT"
+        assert len(nipg_ticks) >= 1, "Expected NIPG ticks"
+        assert len(amc_ticks) >= 1, "Expected AMC ticks"
+        assert nipg_ticks[0]["symbol"] == "NIPG"
+        assert amc_ticks[0]["symbol"] == "AMC"

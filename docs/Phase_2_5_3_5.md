@@ -492,6 +492,16 @@ Trade-off: polars adds ~20MB to the `.so` and ~30-60s compile time. Acceptable f
 - [x] `backend_starter.py`: when `manager_type == "synced-replayer"`, creates `TickDataReplayer` → `SyncedReplayerManager` → `UnifiedTickManager`
 - [x] Config updated: `manager_type: "synced-replayer"` in `config.yaml` (wsl2 / TickDataServer)
 - [x] Old `replayer_manager.py` (WebSocket path) preserved — `manager_type: "replayer"` still works unchanged
+- [x] Bug fix: clock init order — `_init_clock()` extracted and called before `_init_services()` in `__init__()` (Rust replayer needs clock to exist at subscribe time)
+- [x] Bug fix: `replay_time` leading-zero preservation — `set_nested_value()` coerces `"081500"` to int then back to str losing the leading zero; fixed with `.zfill(6)`
+- [x] Config refactor: extracted `load_yaml_config`, `build_runtime_config`, `parse_override_args`, `set_nested_value`, `deep_merge` into `utils/config_builder.py`
+- [x] Validation tests: `python/tests/core/test_synced_replayer.py` — 35 pytest tests across 8 groups:
+  - Part 1-2: `_on_tick()` payload conversion (Q/T wire-format → normalised) + queue fan-out
+  - Part 3: subscribe/unsubscribe lifecycle (queue management, Rust replayer idempotency, disconnect cleanup)
+  - Part 4-5: backward-compatible views (`queues`, `get_client_queue`) + `stream_forever`/`close`
+  - Part 6: `UnifiedTickManager` with `provider="synced-replayer"` (stream keys, `normalize_data` ns→ms)
+  - Part 7: end-to-end mock pipeline (mock fire_tick → _on_tick → queue → normalize_data)
+  - Part 8: real integration with Rust `TickDataReplayer` + Parquet data (NIPG ticker, pause-then-resume pattern)
 
 ### Phase D — Remote machine sync + snapshot replayer
 

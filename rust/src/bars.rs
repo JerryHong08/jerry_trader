@@ -19,6 +19,7 @@ pub enum Timeframe {
     Min1,
     Min5,
     Min15,
+    Min30,
     Hour1,
     Hour4,
     Day1,
@@ -33,6 +34,7 @@ impl Timeframe {
             Timeframe::Min1 => 60_000,
             Timeframe::Min5 => 300_000,
             Timeframe::Min15 => 900_000,
+            Timeframe::Min30 => 1_800_000,
             Timeframe::Hour1 => 3_600_000,
             Timeframe::Hour4 => 14_400_000,
             Timeframe::Day1 => 86_400_000,
@@ -47,6 +49,7 @@ impl Timeframe {
             Timeframe::Min1,
             Timeframe::Min5,
             Timeframe::Min15,
+            Timeframe::Min30,
             Timeframe::Hour1,
             Timeframe::Hour4,
             Timeframe::Day1,
@@ -61,6 +64,7 @@ impl Timeframe {
             "1m" => Some(Timeframe::Min1),
             "5m" => Some(Timeframe::Min5),
             "15m" => Some(Timeframe::Min15),
+            "30m" => Some(Timeframe::Min30),
             "1h" => Some(Timeframe::Hour1),
             "4h" => Some(Timeframe::Hour4),
             "1d" => Some(Timeframe::Day1),
@@ -76,6 +80,7 @@ impl Timeframe {
             Timeframe::Min1 => "1m",
             Timeframe::Min5 => "5m",
             Timeframe::Min15 => "15m",
+            Timeframe::Min30 => "30m",
             Timeframe::Hour1 => "1h",
             Timeframe::Hour4 => "4h",
             Timeframe::Day1 => "1d",
@@ -408,7 +413,7 @@ impl BarBuilder {
                         Some(tf) => parsed.push(tf),
                         None => {
                             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                                "Unknown timeframe: '{}'. Valid: 10s, 1m, 5m, 15m, 1h, 4h, 1d, 1w",
+                                "Unknown timeframe: '{}'. Valid: 10s, 1m, 5m, 15m, 30m, 1h, 4h, 1d, 1w",
                                 label
                             )));
                         }

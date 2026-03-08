@@ -44,6 +44,7 @@ export interface ChartBarsResponse {
   from: string;
   to: string;
   error?: string;
+  requestId?: string;
 }
 
 /** Per-symbol chart state */
@@ -55,6 +56,7 @@ export interface SymbolChartState {
   error: string | null;
   source: string | null;
   lastFetchTime: number | null; // When bars were last fetched (ms)
+  requestId: string | null;     // Echoed from BFF to detect stale responses
 }
 
 type ChartDataState = {
@@ -78,14 +80,14 @@ type ChartDataState = {
 // Config
 // ============================================================================
 
-function getBffBaseUrl(): string {
+function getChartBffBaseUrl(): string {
   const defaultHost =
     typeof window !== 'undefined' ? window.location.hostname : 'localhost';
   const url =
-    typeof import.meta !== 'undefined' && import.meta.env?.VITE_BFF_URL
-      ? (import.meta.env.VITE_BFF_URL as string)
-      : `http://${defaultHost}:5001`;
-  return url || `http://${defaultHost}:5001`;
+    typeof import.meta !== 'undefined' && import.meta.env?.VITE_CHART_BFF_URL
+      ? (import.meta.env.VITE_CHART_BFF_URL as string)
+      : `http://${defaultHost}:5002`;
+  return url || `http://${defaultHost}:5002`;
 }
 
 /** Bar duration in seconds for each timeframe */
@@ -144,6 +146,9 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
     }
 
     // Set loading state
+    // Generate a unique request ID so we can discard stale responses
+    const requestId = `${tickerUpper}-${timeframe}-${Date.now()}`;
+
     set((s) => ({
       symbolBars: {
         ...s.symbolBars,
@@ -155,13 +160,14 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
           error: null,
           source: existing?.source ?? null,
           lastFetchTime: existing?.lastFetchTime ?? null,
+          requestId,
         },
       },
     }));
 
     try {
-      const baseUrl = getBffBaseUrl();
-      const params = new URLSearchParams({ timeframe });
+      const baseUrl = getChartBffBaseUrl();
+      const params = new URLSearchParams({ timeframe, request_id: requestId });
       const url = `${baseUrl}/api/chart/bars/${tickerUpper}?${params}`;
 
       const res = await fetch(url);
@@ -170,6 +176,13 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
       }
 
       const data: ChartBarsResponse = await res.json();
+
+      // Race condition guard: if another fetch for this ticker was started
+      // while we were waiting, our requestId will no longer match — discard.
+      const current = get().symbolBars[tickerUpper];
+      if (current?.requestId !== requestId) {
+        return; // superseded by a newer fetch
+      }
 
       if (data.error) {
         set((s) => ({
@@ -180,6 +193,7 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
               loading: false,
               error: data.error ?? 'No data',
               lastFetchTime: Date.now(),
+              requestId,
             },
           },
         }));
@@ -197,6 +211,7 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
             error: null,
             source: data.source,
             lastFetchTime: Date.now(),
+            requestId,
           },
         },
       }));

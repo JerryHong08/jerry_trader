@@ -357,7 +357,6 @@ class JerryTraderBackendStarter:
                 session_id=self.session_id,
                 redis_config=role_cfg.get("redis"),
                 influxdb_config=role_cfg.get("influxdb"),
-                clickhouse_config=role_cfg.get("clickhouse"),
             )
             self._services.append(("JerryTraderBFF", self.bff))
         else:
@@ -574,6 +573,21 @@ class JerryTraderBackendStarter:
             self._services.append(("BarsBuilder", self.bars_builder))
         else:
             self.bars_builder = None
+
+        if "ChartDataBFF" in self.roles:
+            from jerry_trader.BackendForFrontend.chart_bff import ChartDataBFF
+
+            role_cfg = self.roles["ChartDataBFF"]
+            self.chart_data_bff = ChartDataBFF(
+                host=role_cfg.get("host", "0.0.0.0"),
+                port=role_cfg.get("port", 5002),
+                session_id=self.session_id,
+                redis_config=role_cfg.get("redis"),
+                clickhouse_config=role_cfg.get("clickhouse"),
+            )
+            self._services.append(("ChartDataBFF", self.chart_data_bff))
+        else:
+            self.chart_data_bff = None
 
         logger.info(f"Initialized {len(self._services)} services")
 
@@ -812,6 +826,24 @@ class JerryTraderBackendStarter:
             tick_thread.start()
             self._threads.append(tick_thread)
             logger.info("TickDataServer started")
+
+        # Start ChartDataBFF if enabled
+        # Runs in a separate thread since it's a blocking uvicorn server
+        if self.chart_data_bff:
+            chart_bff_cfg = self.roles.get("ChartDataBFF", {})
+            host = chart_bff_cfg.get("host", "0.0.0.0")
+            port = chart_bff_cfg.get("port", 5002)
+            logger.info(f"Starting Chart Data BFF on {host}:{port}")
+
+            def run_chart_bff():
+                self.chart_data_bff.run()
+
+            chart_bff_thread = Thread(
+                target=run_chart_bff, daemon=True, name="ChartDataBFF"
+            )
+            chart_bff_thread.start()
+            self._threads.append(chart_bff_thread)
+            logger.info("ChartDataBFF started")
 
         # Run BFF in the main thread (blocking) if enabled
         if self.bff:

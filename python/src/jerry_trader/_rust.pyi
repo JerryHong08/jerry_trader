@@ -30,8 +30,8 @@ class BarBuilder:
 
         Args:
             timeframes: List of timeframe labels (e.g. ["1m", "5m"]).
-                        If None, all 8 timeframes are used:
-                        10s, 1m, 5m, 15m, 1h, 4h, 1d, 1w.
+                        If None, all 9 timeframes are used:
+                        10s, 1m, 5m, 15m, 30m, 1h, 4h, 1d, 1w.
         """
         ...
 

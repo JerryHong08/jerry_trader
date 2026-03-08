@@ -10,6 +10,7 @@
 \setCJKmainfont{Microsoft YaHei}
 \setCJKmonofont{Microsoft YaHei}
 \usepackage{xcolor}
+\usepackage{graphicx}
 \usepackage{tabularx}
 \usepackage{ragged2e}
 \usepackage{array}
@@ -29,19 +30,91 @@
 \pagebreak
 
 \section{Introduction}
-Jerry Trader is a multi-language (Python + Rust + React) trading platform designed for real-time US pre-market momentum trading.
+
+\paragraph{Summary}
+Jerry Trader is a quant trading platform mainly focus on real-time US pre-market penny stock break out momentum trading strategy,
+written multi-language (Python + Rust + React).
 This documentation provides an overview of the app's features, architecture, and usage instructions \begin{em}based on my trading strategies\end{em}.
 
 The project follows a monorepo layout:
+
 \begin{itemize}
-\item \texttt{python/src/jerry\_trader/} --- Python backend (orchestration, I/O, services)
-\item \texttt{rust/src/} --- Rust computation core (compiled via maturin/PyO3 as \texttt{jerry\_trader.\_rust})
-\item \texttt{frontend/} --- React + TypeScript frontend (Vite)
+\item \texttt{python} --- Python backend (orchestration, I/O, backend services)
+\item \texttt{rust} --- Rust computation core (compiled via maturin/PyO3 as \texttt{\seqsplit{jerry\_trader.\_rust}})
+\item \texttt{frontend} --- React + TypeScript frontend (Vite)
+\end{itemize}
+
+\paragraph{Strategy}
+Here is a summary of my strategy based on emperical trading experience, and the modules are designed to better validate, automate this strategy:
+
+\begin{itemize}
+
+\item Entry Attention Condition:\\
+when tickers are getting active, it has a amount of gains suddenly, we do the momentum trading.
+for my current project, I use Top20 Entry as a detector.
+
+\item It's Better If:
+\begin{itemize}
+    \item it has recent hot news with it.
+    \item the float shares are relatively low, below 20M is preferred.
+    \item the country location is better not foreign-registered, etc.
+    \item price is preferred \$1--\$20
+    \item the market has all the attention on this one.
+    \item Order Book liquidity good(intense trade rates with good up-rising momentum)
+\end{itemize}
+
+\item It's Better NOT If:
+\begin{itemize}
+    \item Order Book liquidity good but with multiple key-level rejections.
+    \item price under 0.5
+    \item big cap companies earnings beat.
+\end{itemize}
+
+\end{itemize}
+
+It's not saying that if all the conditions fit it will definitly be a good trade.
+the conditions will be better if all fit, but sometimes there are unknown black swarn ones, so
+the key metrics will still be price-volume action and orderbook analysis etc.and besides of that,
+for a long-term profitable trading strategy, also it depends your trading execution and risk management like:
+
+\begin{itemize}
+    \item entry timing and price.
+    \item risk management(marginal account risk etc).
+    \item \ldots
+\end{itemize}
+
+\paragraph{Feature}
+for current version, here are some features that done:
+\begin{itemize}
+    \item modules decoupled, driven by redis stream msg.
+    \item rank list column and overview chart for top20 tickers visualization.
+    \item instant news data fetch, process, LLM system prompt sentiment process, persistence.
+    \item stock info data like: float data, basic information fetch, process, persistence.
+    \item ibkr order execution,management,persistence to PostgreSQL.
+    \item real-time bar build and persistence optimized using clickhouse\&rust.
+    \item live mode and replay mode support.
 \end{itemize}
 
 \pagebreak
 
 \section{Frontend Modules}
+\subsection{frontend overview}
+
+\begin{figure}[!ht]
+\centering
+\includegraphics[width=0.8\textwidth]{../assets/JerryTrader.png}
+\caption{Jerry Trader Application Interface}
+\label{fig:jerrytrader}
+\end{figure}
+
+\paragraph{Platform Overview}
+So, as you can see above, this is my current version of frontend web app interface.
+but you might wonder, as a vigorous quant trading platform, why would I develop a trading platform that UI is designed for human-centered trade execution?\\
+well, first, I just love trade, my goal is to be profitable quant trader, not researcher due to my lack of rigourous knowlegde of mathematics.
+second, this project is planned for long-term architecture, I don't have the experience and ability
+to develop a end-to-end tickdata to machine-decision execution quant platform. the graduate approach is the only choice.
+
+\subsection{modules breakdown}
 
 \begin{table}[!htbp]
 \centering
@@ -74,7 +147,17 @@ order-management & orders &  & OrderManagement \\
 \label{tab:module_descriptions}
 \end{table}
 
+In the next Chapter, I will break down the details of each module in the above table, which will include:
+\begin{itemize}
+    \item data preparation
+    \item data process
+    \item orchestration
+    \item roadmap
+\end{itemize}
+
 \section{Backend Architecture}
+
+\emph{not start to rewind yet. below is just lagacy llm-generated notes\&summary}
 
 \subsection{Package Layout}
 The Python backend is organized into the following top-level packages:
@@ -309,19 +392,12 @@ to WebSocket subscribers.
     as parallel consumers off a shared tick bus.
 \end{enumerate}
 
-\section{Strategy}
-This app is designed to implement my personal trading strategies, which focus on US pre-market momentum trading.
+
+\section{Roadmap}
 
 \begin{itemize}
-\item Trade when tickers are getting active, it has a amount of gains suddenly, we do the momentum trading.
-
-\item And the market has all the attention on this one. cross-section computation.
-
-\item And it has hot news with it.
-
-\item the float shares are relatively low, below 20M is preferred.
-
-\item the country location is not HK or China, etc.
-\item price is preferred \$1--\$20
+    \item
+    \item Break out Context build, model based.
 \end{itemize}
+
 \end{document}

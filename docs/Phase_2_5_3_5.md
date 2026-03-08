@@ -470,12 +470,20 @@ Trade-off: polars adds ~20MB to the `.so` and ~30-60s compile time. Acceptable f
 
 ### Phase C — Merge TickDataReplayer into `jerry_trader._rust`
 
-- [ ] Port `local_tickdata_replayer/src/` into `rust/src/replayer/`
-- [ ] Replace `GlobalTimeline` with shared `Arc<ReplayClock>`
-- [ ] Replace WebSocket output with PyO3 callback delivery
-- [ ] Add `ReplayCommand` channel (`Subscribe`, `JumpTo`, `SetSpeed`, `Pause`, `Resume`)
-- [ ] Register `TickDataReplayer` in `lib.rs`
-- [ ] Update `Cargo.toml` with polars/tokio/serde dependencies
+- [x] Port `local_tickdata_replayer/src/` into `rust/src/replayer/`
+  - `config.rs` — ReplayConfig (Parquet path builder, no clap)
+  - `types.rs` — QuotePayload/TradePayload + RawQuote/RawTrade + `to_py_dict()`
+  - `stats.rs` — ReplayStats
+  - `loader.rs` — Parquet loading via polars (spawn_blocking)
+  - `engine.rs` — Timeline + engine loop + 3-tier adaptive sleep replay
+  - `mod.rs` — `TickDataReplayer` `#[pyclass]`
+- [x] Replace `GlobalTimeline` with internal `Timeline` (mirrors ReplayClock logic)
+- [x] Replace WebSocket output with PyO3 callback delivery (`block_in_place` + `Python::attach`)
+- [x] Add `ReplayCommand` channel (`Subscribe`, `Unsubscribe`, `JumpTo`, `SetSpeed`, `Pause`, `Resume`, `Shutdown`)
+- [x] Register `TickDataReplayer` in `lib.rs`
+- [x] Update `Cargo.toml` with polars/tokio/chrono/anyhow dependencies
+- [x] Update `_rust.pyi` type stubs
+- [x] Add `clock.create_tick_replayer()` convenience factory
 - [ ] Python integration: callback → queue distribution to BarsBuilder/FactorEngine
 - [ ] Retire `replayer_manager.py` (keep `local_tickdata_replayer/` as archive/reference)
 

@@ -156,7 +156,8 @@ machines:
 # Defaults
 # =============================================================================
 defaults:
-  replay_date: null
+  replay_date: null #YYYYMMDD 20260306
+  replay_time: null #HHMMSS 080015
   suffix_id: null
   load_history: null
   log_level: "DEBUG"

@@ -9,3 +9,20 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = "0.27.0"
+
+# Async runtime (for TickDataReplayer replay loop)
+tokio = { version = "1.35", features = ["full"] }
+
+# Data processing — Parquet reading
+polars = { version = "0.43", features = ["parquet", "lazy", "dtype-datetime"] }
+
+# Date and time handling
+chrono = "0.4"
+chrono-tz = "0.10"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Error handling
+anyhow = "1.0"

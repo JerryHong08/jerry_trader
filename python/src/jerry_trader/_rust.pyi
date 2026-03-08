@@ -1,6 +1,6 @@
 """Type stubs for the Rust extension module (jerry_trader._rust)."""
 
-from typing import Optional
+from typing import Callable, Optional
 
 def z_score(value: float, history: list[float]) -> Optional[float]:
     """Return z-score of value relative to history, or None if < 2 samples.
@@ -144,6 +144,114 @@ class ReplayClock:
     @property
     def data_start_ts_ns(self) -> int:
         """The current data-start anchor (epoch ns)."""
+        ...
+
+    def __repr__(self) -> str: ...
+
+class TickDataReplayer:
+    """Tick-level data replayer, embedded in the Python process.
+
+    Reads Parquet files from the data lake, replays quotes and trades
+    at the correct pace using a virtual timeline, and delivers payloads
+    to a Python callback.
+
+    Example::
+
+        replayer = TickDataReplayer(
+            replay_date="20251113",
+            lake_data_dir="/mnt/data/lake",
+            data_start_ts_ns=clock.data_start_ts_ns,
+        )
+        replayer.subscribe("AAPL", ["Q", "T"], on_tick)
+    """
+
+    def __init__(
+        self,
+        replay_date: str,
+        lake_data_dir: str,
+        data_start_ts_ns: int,
+        speed: float = 1.0,
+        start_time: Optional[str] = None,
+        max_gap_ms: Optional[int] = None,
+    ) -> None:
+        """Create a new replayer.
+
+        Args:
+            replay_date: Date in YYYYMMDD format.
+            lake_data_dir: Path to the data-lake root.
+            data_start_ts_ns: Epoch-ns anchor for the virtual clock.
+            speed: Replay speed multiplier (1.0 = real-time).
+            start_time: Optional ``"HH:MM"`` or ``"HH:MM:SS"`` (ET).
+            max_gap_ms: Threshold for logging large time gaps (ms).
+        """
+        ...
+
+    def subscribe(
+        self,
+        symbol: str,
+        events: list[str],
+        callback: Callable[[str, dict], None],
+    ) -> None:
+        """Subscribe a symbol for replay.
+
+        Blocks until Parquet data is loaded; replay starts immediately.
+
+        Args:
+            symbol: Ticker symbol (e.g. ``"AAPL"``).
+            events: ``["Q"]``, ``["T"]``, or ``["Q", "T"]``.
+            callback: ``fn(symbol: str, payload: dict) -> None``
+        """
+        ...
+
+    def unsubscribe(self, symbol: str) -> None:
+        """Unsubscribe a symbol (stops its replay tasks)."""
+        ...
+
+    def set_speed(self, speed: float) -> None:
+        """Change replay speed (re-anchors the timeline)."""
+        ...
+
+    def pause(self) -> None:
+        """Pause playback."""
+        ...
+
+    def resume(self) -> None:
+        """Resume playback."""
+        ...
+
+    def jump_to(self, target_ts_ns: int) -> None:
+        """Jump to a specific data timestamp (epoch ns)."""
+        ...
+
+    def now_ns(self) -> int:
+        """Current virtual time as epoch nanoseconds."""
+        ...
+
+    def now_ms(self) -> int:
+        """Current virtual time as epoch milliseconds."""
+        ...
+
+    @property
+    def is_paused(self) -> bool:
+        """Whether playback is paused."""
+        ...
+
+    @property
+    def speed(self) -> float:
+        """Current speed multiplier."""
+        ...
+
+    @property
+    def data_start_ts_ns(self) -> int:
+        """Current data-start anchor (epoch ns)."""
+        ...
+
+    def get_stats(self) -> dict:
+        """Get replay statistics as a dict."""
+        ...
+
+    def shutdown(self) -> None:
+        """Shut down the engine thread."""
         ...
 
     def __repr__(self) -> str: ...

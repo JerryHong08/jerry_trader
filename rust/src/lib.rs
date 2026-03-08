@@ -3,6 +3,7 @@ use pyo3::prelude::*;
 mod factors;
 mod bars;
 mod clock;
+mod replayer;
 
 /// The Rust computation core, exposed to Python as `jerry_trader._rust`.
 #[pymodule]
@@ -32,4 +33,8 @@ mod _rust {
     // ── Replay clock ────────────────────────────────────────────────
     #[pymodule_export]
     use super::clock::ReplayClock;
+
+    // ── Tick-data replayer ───────────────────────────────────────────
+    #[pymodule_export]
+    use super::replayer::TickDataReplayer;
 }

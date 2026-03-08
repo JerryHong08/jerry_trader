@@ -35,7 +35,7 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from jerry_trader._rust import ReplayClock
+from jerry_trader._rust import ReplayClock, TickDataReplayer
 
 ET = ZoneInfo("America/New_York")
 
@@ -157,3 +157,35 @@ def resume() -> None:
     if _clock is None:
         raise RuntimeError("resume() requires replay mode (call init_replay first)")
     _clock.resume()
+
+
+# ── TickDataReplayer factory ─────────────────────────────────────────
+
+
+def create_tick_replayer(
+    replay_date: str,
+    lake_data_dir: str,
+    *,
+    start_time: str | None = None,
+    max_gap_ms: int | None = None,
+) -> TickDataReplayer:
+    """Create a ``TickDataReplayer`` that inherits the active clock's params.
+
+    Convenience wrapper: reads ``data_start_ts_ns`` and ``speed`` from the
+    module-level ``ReplayClock`` so the replayer's internal timeline is
+    automatically in sync.
+
+    Raises ``RuntimeError`` if no ``ReplayClock`` is active (live mode).
+    """
+    if _clock is None:
+        raise RuntimeError(
+            "create_tick_replayer() requires replay mode (call init_replay first)"
+        )
+    return TickDataReplayer(
+        replay_date=replay_date,
+        lake_data_dir=lake_data_dir,
+        data_start_ts_ns=_clock.data_start_ts_ns,
+        speed=_clock.speed,
+        start_time=start_time,
+        max_gap_ms=max_gap_ms,
+    )

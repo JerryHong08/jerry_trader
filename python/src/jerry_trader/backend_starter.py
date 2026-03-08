@@ -275,7 +275,13 @@ def _normalize_date_fields(config: dict) -> None:
     Convert date fields from int to string format.
     YAML interprets values like 20260115 as integers, but we need them as strings.
     """
-    date_fields = ["replay_date", "load_history", "start_from", "rollback_to"]
+    date_fields = [
+        "replay_date",
+        "replay_time",
+        "load_history",
+        "start_from",
+        "rollback_to",
+    ]
 
     for field in date_fields:
         if field in config and config[field] is not None:
@@ -315,6 +321,7 @@ class JerryTraderBackendStarter:
 
         # Extract common params from config
         self.replay_date = config.get("replay_date")
+        self.replay_time = config.get("replay_time")  # HHMMSS (optional)
         self.suffix_id = config.get("suffix_id")
         self.load_history = config.get("load_history")
         self.limit = config.get("limit")  # market_open | market_close | None
@@ -746,20 +753,28 @@ class JerryTraderBackendStarter:
         from jerry_trader import clock
 
         if self.replay_date:
-            # Build replay start timestamp from replay_date.
-            # Accepts YYYYMMDD (defaults to 04:00 ET) or YYYYMMDDHHMMSS.
-            # The Replayer role's ``start_from`` (HH:MM) overrides time when
-            # replay_date is 8 digits.
+            # Build replay start timestamp from replay_date (YYYYMMDD) + replay_time (HHMMSS).
+            # Priority for start time:
+            #   1. defaults.replay_time (HHMMSS)  — CLI or config.yaml
+            #   2. Replayer role's start_from (HH:MM)
+            #   3. 04:00:00 ET (premarket open)
             rd = str(self.replay_date)
 
-            if len(rd) == 14 and rd.isdigit():
-                # Full timestamp: YYYYMMDDHHMMSS
-                year, month, day = int(rd[:4]), int(rd[4:6]), int(rd[6:8])
-                hour, minute, second = int(rd[8:10]), int(rd[10:12]), int(rd[12:14])
-            elif len(rd) == 8 and rd.isdigit():
-                year, month, day = int(rd[:4]), int(rd[4:6]), int(rd[6:8])
+            if len(rd) != 8 or not rd.isdigit():
+                raise ValueError(f"replay_date must be YYYYMMDD, got: {rd!r}")
+
+            year, month, day = int(rd[:4]), int(rd[4:6]), int(rd[6:8])
+
+            rt = str(self.replay_time) if self.replay_time else None
+            if rt and len(rt) == 6 and rt.isdigit():
+                # replay_time = HHMMSS
+                hour, minute, second = int(rt[:2]), int(rt[2:4]), int(rt[4:6])
+            elif rt and len(rt) == 4 and rt.isdigit():
+                # replay_time = HHMM
+                hour, minute, second = int(rt[:2]), int(rt[2:4]), 0
+            else:
                 second = 0
-                # Check if Replayer role specifies start_from (HH:MM)
+                # Fallback: Replayer role's start_from (HH:MM)
                 start_time_str = None
                 if "Replayer" in self.roles:
                     start_time_str = self.roles["Replayer"].get("start_from")
@@ -768,10 +783,6 @@ class JerryTraderBackendStarter:
                     hour, minute = int(parts[0]), int(parts[1])
                 else:
                     hour, minute = 4, 0  # premarket open
-            else:
-                raise ValueError(
-                    f"replay_date must be YYYYMMDD or YYYYMMDDHHMMSS, got: {rd!r}"
-                )
 
             replay_start_dt = datetime(
                 year, month, day, hour, minute, second, tzinfo=self.tz

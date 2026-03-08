@@ -253,9 +253,9 @@ Phase 2.5.3.5 - Key features implement(current stage):
 
 - [ ]wall-time global clock driven by rust, apply on live&replay mode.
 - [ ]local_tickdata_replayer to python orchestration.
+- [ ]localdata_loader/data_loader.py -> ClickHouse backfill in replay mode.
 - ✅Historical bar bootstrap from Polygon API → ClickHouse backfill in live mode
   (`_needs_historical_backfill()` + `_backfill_to_clickhouse()` in Chart BFF).
-- [ ]localdata_loader/data_loader.py -> ClickHouse backfill in replay mode.
 - ✅Split BFF into two independent services for multi-machine deployment:
   - Market Data BFF (`bff.py`, port 5001): overview/dashboard, market snapshot WS, Redis streams
   - Chart Data BFF (`chart_bff.py`, port 5002): OHLCV bars, bar subscription WS, ClickHouse queries

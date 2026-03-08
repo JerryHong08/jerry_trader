@@ -220,7 +220,7 @@ mainly focus on basic modules development and strcuture buidling.
 Phase 2.5.1 — Rust BarBuilder core (`rust/src/bars.rs`)
 
 - ✅`BarState` struct (open/high/low/close/volume/trade_count/vwap/bar_start/session)
-- ✅`Timeframe` enum (10s, 1m, 5m, 15m, 1h, 4h, 1d, 1w)
+- ✅`Timeframe` enum (10s, 1m, 5m, 15m, 30m, 1h, 4h, 1d, 1w)
 - ✅`SessionCalendar` — US session boundaries (premarket 4:00, regular 9:30, afterhours 16:00–20:00)
 - ✅`BarBuilder` as `#[pyclass]` — maintains per-ticker, per-timeframe rolling state
 - ✅`ingest_trade(ticker, price, size, timestamp_ms)` → returns completed bars
@@ -253,8 +253,16 @@ Phase 2.5.3.5 - Key features implement(current stage):
 
 - [ ]wall-time global clock driven by rust, apply on live&replay mode.
 - [ ]local_tickdata_replayer to python orchestration.
-- [ ]Historical bar bootstrap from Polygon API → ClickHouse backfill in live mode,
-localdata_loader/data_loader.py -> ClickHouse backfill in replay mode.
+- ✅Historical bar bootstrap from Polygon API → ClickHouse backfill in live mode
+  (`_needs_historical_backfill()` + `_backfill_to_clickhouse()` in Chart BFF).
+- [ ]localdata_loader/data_loader.py -> ClickHouse backfill in replay mode.
+- ✅Split BFF into two independent services for multi-machine deployment:
+  - Market Data BFF (`bff.py`, port 5001): overview/dashboard, market snapshot WS, Redis streams
+  - Chart Data BFF (`chart_bff.py`, port 5002): OHLCV bars, bar subscription WS, ClickHouse queries
+- ✅`request_id` race condition prevention — frontend generates per-fetch ID, BFF echoes it,
+  stale responses discarded on arrival.
+- ✅Added `ChartDataBFF` role to `config.yaml` and `backend_starter.py`.
+- ✅Frontend `VITE_CHART_BFF_URL` env var (`getChartBffBaseUrl()` defaults to port 5002).
 
 Phase 2.5.4 — Downstream consumers + InfluxDB→ClickHouse migration
 
@@ -263,7 +271,7 @@ Phase 2.5.4 — Downstream consumers + InfluxDB→ClickHouse migration
 - [ ]Factor visualization overlay in Chart module
 - [ ]Snapshot data: InfluxDB → ClickHouse
 - [ ]Foundation for v3.0 stream bus architecture
-- [ ]add frontend request_id to prevent race conditions.
+- ✅add frontend request_id to prevent race conditions.
 
 ### Stage3
 

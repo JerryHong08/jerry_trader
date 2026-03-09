@@ -550,8 +550,18 @@ The **ChartBFF machine** is the clock domain master (also runs
 - [ ] Frontend timeline control UI (play/pause/seek bar/speed selector)
 - [ ] Strategy pre-locate orchestrator: accepts `(ticker, timestamp)` list, auto-sequences jumps
 
-### Phase F — Historical data backfill for replay mode
+### Phase F — Historical data backfill for replay mode ✅
 
-- [ ] `localdata_loader/data_loader.py` → ClickHouse backfill (OHLCV bars for replay date)
-- [ ] ChartDataBFF reads backfilled bars from ClickHouse (same path as live mode)
-- [ ] Frontend chart works identically in both modes
+In replay mode the Polygon API cannot serve historical bars for the replayed date.
+Instead of a separate backfill module, `ChartDataService.get_bars()` detects
+`clock.is_replay()` and routes directly to the local data loader
+(`data_loader.py` / `StockDataLoader`), which reads pre-aggregated OHLCV bars
+from the Polygon data-lake Parquet files. The existing
+`ChartDataBFF._backfill_to_clickhouse()` path works unchanged — it simply
+gets its data from local files instead of the Polygon REST API.
+
+- [x] `ChartDataService.get_bars()` — replay-mode shortcut: skip Redis cache + Polygon, go straight to `_fetch_from_local()` (uses `data_loader.StockDataLoader`)
+- [x] `ChartDataBFF._backfill_to_clickhouse()` — unchanged, backfills ClickHouse from whatever `get_bars()` returns
+- [x] Frontend chart works identically in both modes
+- [x] Removed unused `replay_backfill.py` module and `_backfill_replay_bars()` wiring in `backend_starter.py`
+- [x] Supported timeframes: 1m, 5m, 15m, 30m, 1h, 4h, 1d (no 10s — BarBuilder produces those in real-time)

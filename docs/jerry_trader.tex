@@ -93,6 +93,7 @@ for current version, here are some features that done:
     \item ibkr order execution,management,persistence to PostgreSQL.
     \item real-time bar build and persistence optimized using clickhouse\&rust.
     \item live mode and replay mode support.
+    \item rust based global clock for time accuracy.
 \end{itemize}
 
 \pagebreak
@@ -152,7 +153,7 @@ In the next Chapter, I will break down the details of each module in the above t
     \item data preparation
     \item data process
     \item orchestration
-    \item roadmap
+    \item module design
 \end{itemize}
 
 \section{Backend Architecture}
@@ -161,45 +162,6 @@ In the next Chapter, I will break down the details of each module in the above t
 
 \subsection{Package Layout}
 The Python backend is organized into the following top-level packages:
-
-    \begin{table}[!htbp]
-\centering
-\footnotesize
-\renewcommand{\arraystretch}{1.15}
-    \begin{tabularx}{\textwidth}{|>{\RaggedRight\arraybackslash}p{2.8cm}|Y|>{\RaggedRight\arraybackslash}p{2.5cm}|}
-\hline
-\textbf{Package} & \textbf{Purpose} & \textbf{Language} \\
-\hline
-\texttt{core/} & Computation core \& Rust migration boundary & Python + Rust \\
-\hline
-\texttt{core/snapshot/} & Snapshot processing: ranks, derived metrics, volume tracking & Python $\to$ Rust \\
-\hline
-\texttt{core/factors/} & Factor engine: trade\_rate, accel, z-scores & Python $\to$ Rust \\
-\hline
-\texttt{core/signals/} & State/signal detection (QUIET $\leftrightarrow$ ACTIVE) & Python \\
-\hline
-\texttt{core/news/} & News classification (LLM-based) & Python \\
-\hline
-\texttt{core/\_bridge.py} & Rust $\leftrightarrow$ Python dispatch (try \_rust, fallback to Python) & Python \\
-\hline
-BFF & BFF: FastAPI + WebSocket server & Python \\
-\hline
-\texttt{DataManager/} & Data-serving workers \& servers (static data, news, tick, chart) & Python \\
-\hline
-\texttt{DataSupply/} & External data sources (Polygon, ThetaData, local files) & Python \\
-\hline
-\texttt{OrderManagement/} & IBKR order placement, portfolio, persistence & Python \\
-\hline
-\texttt{MachineLearning/} & ML experimentation (LightGBM) & Python \\
-\hline
-\texttt{utils/} & Cross-cutting: config, logger, Redis keys, session & Python \\
-\hline
-\end{tabularx}
-\caption{Python backend package layout.}
-\label{tab:package_layout}
-\end{table}
-
-\pagebreak
 
 \subsection{Computation Core (\texttt{core/})}
 The \texttt{core/} package is the \textbf{Rust migration boundary}. Each subpackage follows a compute/orchestration split:

@@ -12,6 +12,7 @@
 - **rust/bars**: `BarBuilder.check_expired(now_ms)` — closes bars at correct wall-time boundary even without trades
 - **backend**: `preload_tickers` config field under `TickDataServer` in `config.yaml`; `_preload_tickers()` calls `batch_preload()` with clock paused during I/O
 - **backend**: `utils/config_builder.py` extracted from `backend_starter.py` (`load_yaml_config`, `build_runtime_config`, `parse_override_args`, `set_nested_value`, `deep_merge`)
+- **chart**: Replay-mode chart backfill — `ChartDataService.get_bars()` detects `clock.is_replay()` and routes to local `data_loader.py` (Parquet) instead of Polygon API; ClickHouse backfill path unchanged
 
 ### Fix
 

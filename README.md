@@ -274,7 +274,8 @@ Phase 2.5.3.5 - Key features implement(current stage):
   (was N scans), clock paused during I/O, ~4× faster.
 - ✅Flush loop alignment — 50ms poll, `check_expired` fires on virtual-time 500ms boundaries,
   immediate ClickHouse write on bar completion.
-- [ ]localdata_loader/data_loader.py -> ClickHouse backfill in replay mode.
+- ✅Replay-mode chart backfill — `ChartDataService` detects replay mode and routes to local
+  `data_loader.py` (Parquet) instead of Polygon API; ClickHouse backfill path unchanged.
 
 Phase 2.5.4 — Downstream consumers + InfluxDB→ClickHouse migration
 

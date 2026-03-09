@@ -6,28 +6,50 @@ Modules:
     date_utils: Date and calendar utilities (resolve_date_range, generate_backtest_dates)
     benchmark_loader: Benchmark data loading (load_irx_data, load_spx_benchmark)
     path_loader: Data path calculation (DataPathFetcher)
+
+Note:
+    All imports are guarded so that missing optional deps (e.g. s3fs)
+    do not prevent importing individual submodules like data_loader.py.
 """
 
-# Benchmark loaders
-from data.loader.benchmark_loader import load_irx_data, load_spx_benchmark
+from __future__ import annotations
 
-# Date utilities
-from data.loader.date_utils import (
-    generate_backtest_date,
-    generate_backtest_dates,
-    resolve_date_range,
-)
+import logging as _logging
 
-# Path loader
-from data.loader.path_loader import DataPathFetcher
+_log = _logging.getLogger(__name__)
 
-# Ticker utilities
-from data.loader.ticker_utils import (
-    clear_common_stocks_cache,
-    get_common_stocks,
-    get_common_stocks_full,
-    get_mapped_tickers,
-)
+# ── Lazy / guarded re-exports ────────────────────────────────────────
+# These are convenience re-exports only. All consumers should prefer
+# importing directly from the submodule (e.g. from .date_utils import ...).
+
+try:
+    from .benchmark_loader import load_irx_data, load_spx_benchmark
+except Exception:  # noqa: BLE001
+    _log.debug("benchmark_loader not available (missing deps?)")
+
+try:
+    from .date_utils import (
+        generate_backtest_date,
+        generate_backtest_dates,
+        resolve_date_range,
+    )
+except Exception:  # noqa: BLE001
+    _log.debug("date_utils not available (missing deps?)")
+
+try:
+    from .path_loader import DataPathFetcher
+except Exception:  # noqa: BLE001
+    _log.debug("path_loader not available (missing deps like s3fs?)")
+
+try:
+    from .ticker_utils import (
+        clear_common_stocks_cache,
+        get_common_stocks,
+        get_common_stocks_full,
+        get_mapped_tickers,
+    )
+except Exception:  # noqa: BLE001
+    _log.debug("ticker_utils not available (missing deps?)")
 
 __all__ = [
     # Ticker utilities

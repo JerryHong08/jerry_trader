@@ -13,6 +13,7 @@ import os
 import socket
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -183,10 +184,94 @@ class NewsProcessor:
             "skipped": 0,
         }
 
+        # Initialize JSON output file for structured logging
+        from jerry_trader.utils.paths import PROJECT_ROOT
+        log_dir = PROJECT_ROOT / "logs" / "jerry_trader" / datetime.now().strftime("%Y%m%d")
+        os.makedirs(log_dir, exist_ok=True)
+        module_name = __name__.split(".")[-1]
+        self._json_log_path = log_dir / f"{module_name}_{datetime.now().strftime('%Y%m%d')}.json"
+        self._json_entries = []
+        self._json_lock = asyncio.Lock()  # Protect JSON operations from race conditions
+
     def _get_symbol_lock(self, symbol: str) -> asyncio.Lock:
         if symbol not in self._symbol_locks:
             self._symbol_locks[symbol] = asyncio.Lock()
         return self._symbol_locks[symbol]
+
+    async def _write_json_entry(
+        self,
+        symbol: str,
+        result: NewsClassificationResult,
+        article: NewsArticle,
+        timestamp: str,
+    ) -> None:
+        """Write a news classification result to JSON log file (thread-safe)."""
+        try:
+            entry = {
+                "model": self.active_model,
+                "symbol": symbol,
+                "is_catalyst": result.is_catalyst,
+                "score": result.score,
+                "title": article.title,
+                "published_time": str(article.published_time),
+                "current_time": timestamp,
+                "explanation": json.loads(result.explanation) if result.explanation.startswith('{') else {"raw": result.explanation},
+                "url": article.url,
+                "content": article.text[:200] if article.text else "",
+                "sources": article.sources,
+                "source_from": article.source_from,
+            }
+
+            async with self._json_lock:
+                self._json_entries.append(entry)
+                should_flush = len(self._json_entries) >= 10
+
+            # Flush outside of the lock check, but flush itself is synchronized
+            if should_flush:
+                await self._flush_json_entries()
+
+        except Exception as e:
+            logger.error(f"Failed to write JSON entry: {e}")
+
+    async def _flush_json_entries(self) -> None:
+        """Flush accumulated JSON entries to file (thread-safe)."""
+        async with self._json_lock:
+            if not self._json_entries:
+                return
+
+            # Copy entries and clear immediately to minimize lock hold time
+            entries_to_write = self._json_entries.copy()
+            self._json_entries.clear()
+
+        # File I/O outside the lock (but only one flush can happen at a time due to lock)
+        try:
+            # Read existing data if file exists
+            if self._json_log_path.exists():
+                with open(self._json_log_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            else:
+                data = {
+                    "date": datetime.now().strftime("%Y%m%d"),
+                    "log_file": str(self._json_log_path).replace('.json', '.log'),
+                    "entry_count": 0,
+                    "entries": []
+                }
+
+            # Append new entries
+            data["entries"].extend(entries_to_write)
+            data["entry_count"] = len(data["entries"])
+
+            # Write atomically
+            temp_path = self._json_log_path.with_suffix('.tmp')
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            temp_path.replace(self._json_log_path)
+
+        except Exception as e:
+            logger.error(f"Failed to flush JSON entries: {e}")
+            # Re-add entries on failure
+            async with self._json_lock:
+                self._json_entries.extend(entries_to_write)
 
     async def start(self):
         """Start listener, worker pool, and monitor."""
@@ -237,6 +322,9 @@ class NewsProcessor:
 
         self._monitor_task = None
         self._worker_tasks = []
+
+        # Flush any remaining JSON entries before shutdown
+        await self._flush_json_entries()
 
         logger.info("NewsProcessor stopped")
 
@@ -491,6 +579,9 @@ class NewsProcessor:
                 if reasoning:
                     logger.debug(f"Reasoning: {reasoning}")
                 logger.info(f"{'=' * 50}\n")
+
+                # Write to JSON log (async)
+                await self._write_json_entry(task.symbol, result, task.article, task.timestamp)
             else:
                 logger.info(
                     f"Real-time classification failed for {task.symbol}: {task.article.title}"

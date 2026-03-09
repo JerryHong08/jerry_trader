@@ -511,9 +511,25 @@ closes bars at the correct wall-time, using `clock.now_ms()` (correct in both li
 
 - [x] Rust `BarBuilder.check_expired(now_ms)` — scans all open bars, completes and removes any with `bar_end <= now_ms`
 - [x] 2 new Rust unit tests (`test_bar_state_expired_detection`, `test_ticker_bars_expired_drain`)
-- [x] Python `BarsBuilderService._flush_loop` calls `check_expired(clock.now_ms())` every 2s, publishes + persists expired bars
+- [x] Python `BarsBuilderService._flush_loop` calls `check_expired(clock.now_ms())`, publishes + persists expired bars
 - [x] Updated `_rust.pyi` type stubs
 - [x] 9 new Python pytest tests in `TestCheckExpired` class (empty, unexpired, expired, removed-from-state, mixed timeframes, multi-ticker, re-ingest, field validation)
+
+### Phase C.6 — Batch preload + flush loop alignment ✅
+
+Preloading 2 tickers took ~252s because each `subscribe()` scanned the full day-level Parquet file
+separately (4 scans: 2 tickers × 2 data types). Batch preload scans each file once with `is_in()`
+filter, then partitions by ticker — ~4× faster.
+
+- [x] Rust `loader::load_multi_symbol_data()` — single Parquet scan per data type for all tickers, partitions result by ticker into `HashMap<cache_key, PreloadedData>`
+- [x] Rust `ReplayCommand::BatchPreload` variant + handler in `engine_loop` — inserts batch-loaded data into `preloaded_cache`
+- [x] Rust `TickDataReplayer.batch_preload(symbols, events)` PyO3 method — sends `BatchPreload` command, releases GIL while loading
+- [x] Python `_preload_tickers()` rewritten: calls `batch_preload()` directly instead of individual `subscribe()` calls
+- [x] Clock pause/resume around preload — `clock.pause()` before loading, `clock.resume()` after, so virtual time doesn't drift during I/O
+- [x] `preload_tickers` config field under `TickDataServer` in `config.yaml`
+- [x] Added `is_in` and `partition_by` polars features to `Cargo.toml`
+- [x] Updated `_rust.pyi` type stubs
+- [x] Flush loop rewritten: 50ms real-time poll, fires `check_expired` when virtual time crosses a 500ms boundary, immediate ClickHouse flush on pending bars (no separate 2s cadence)
 
 ### Phase D — Remote machine sync + snapshot replayer
 

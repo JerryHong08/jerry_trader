@@ -1,3 +1,39 @@
+## 1.1.0 (2026-03-09)
+
+### Feat
+
+- **rust/clock**: `ReplayClock` `#[pyclass]` — drift-proof global wall-time clock with `now_ns/ms`, `jump_to`, `set_speed`, `pause/resume` (11 Rust unit tests)
+- **clock**: `clock.py` Python singleton — `now_ms()`, `now_datetime()`, `pause()`, `resume()`, transparent live-mode fallback (`_clock is None` → `time.time()`)
+- **frontend**: `TimelineClock.tsx` — polls `GET /api/clock` every 1s, interpolates between polls; orange `REPLAY` badge, speed multiplier, `⏸ PAUSED` state
+- **rust/replayer**: TickDataReplayer ported from standalone binary into `jerry_trader._rust` — 6 Rust files (`config.rs`, `types.rs`, `stats.rs`, `loader.rs`, `engine.rs`, `mod.rs`), PyO3 callback delivery (replaces WebSocket JSON, ~10-30× lower latency)
+- **replayer**: `SyncedReplayerManager` — drop-in replacement for WebSocket path, in-process tick delivery via `TickDataReplayer` callback
+- **replayer**: `UnifiedTickManager` supports `provider="synced-replayer"` with pre-built manager parameter
+- **rust/replayer**: `batch_preload(symbols, events)` — scans each Parquet file once for all tickers using `is_in()` filter, partitions by ticker; subsequent `subscribe()` calls skip I/O entirely
+- **rust/bars**: `BarBuilder.check_expired(now_ms)` — closes bars at correct wall-time boundary even without trades
+- **backend**: `preload_tickers` config field under `TickDataServer` in `config.yaml`; `_preload_tickers()` calls `batch_preload()` with clock paused during I/O
+- **backend**: `utils/config_builder.py` extracted from `backend_starter.py` (`load_yaml_config`, `build_runtime_config`, `parse_override_args`, `set_nested_value`, `deep_merge`)
+
+### Fix
+
+- **modules**: 7 `time.time()`/`datetime.now()` calls replaced with `clock.now_ms()`/`clock.now_datetime()` across FactorEngine, StateEngine, ChartDataBFF, StaticDataWorker, NewsWorker
+- **backend**: clock init order — `_init_clock()` called before `_init_services()` (Rust replayer needs clock at subscribe time)
+- **backend**: `replay_time` leading-zero preservation — `set_nested_value()` no longer coerces `"081500"` to int
+- **bars_builder**: flush loop rewritten — 50ms real-time poll, fires `check_expired` on virtual-time 500ms boundaries via `clock_mod.now_ms()`, immediate ClickHouse flush
+- **bars_builder**: `from jerry_trader import clock as clock_mod` — fixed `ImportError: cannot import name 'clock'`
+
+### Perf
+
+- **replayer**: tick delivery latency ~5-20µs (PyO3 dict) vs ~200-600µs (WebSocket JSON) — eliminated WS serialization + TCP loopback
+- **replayer**: preloading 2 tickers reduced from ~252s (4 separate Parquet scans) to ~60s (2 scans with `is_in` filter)
+- **bars_builder**: bar expiry detection within 50ms of boundary crossing (was up to 4s)
+
+### Tests
+
+- **clock**: 46 pytest tests (`test_replay_clock.py`) — Rust direct, Python singleton, drift accuracy, monotonicity
+- **replayer**: 35 pytest tests (`test_synced_replayer.py`) — payload conversion, subscribe lifecycle, queue fan-out, UnifiedTickManager integration, real Parquet integration
+- **bars_builder**: 9 pytest tests in `TestCheckExpired` — empty, unexpired, expired, removed-from-state, mixed timeframes, multi-ticker, re-ingest, field validation
+- **rust**: 2 new Rust unit tests (`test_bar_state_expired_detection`, `test_ticker_bars_expired_drain`)
+
 ## 1.0.0 (2026-03-06)
 
 ### BREAKING CHANGES

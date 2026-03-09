@@ -141,7 +141,7 @@ mainly focus on basic modules development and strcuture buidling.
 
 - bootstrap using api&cache
 - write a data pipeline in Rust
-  - current architecture:
+  - previous architecture:
 
     ``` bash
     v1.0
@@ -157,7 +157,7 @@ mainly focus on basic modules development and strcuture buidling.
       hard to scale
     ```
 
-  - planned architecture(for better tradingng ui):
+  - current architecture(for better trading chart ui):
 
     ``` bash
     v2.0
@@ -268,9 +268,13 @@ Phase 2.5.3.5 - Key features implement(current stage):
   stale responses discarded on arrival.
 - ✅Added `ChartDataBFF` role to `config.yaml` and `backend_starter.py`.
 - ✅Frontend `VITE_CHART_BFF_URL` env var (`getChartBffBaseUrl()` defaults to port 5002).
-- [ ]localdata_loader/data_loader.py -> ClickHouse backfill in replay mode.
-- [ ]Wall-time `BarBuilder.check_expired(now_ms)` — bars close at correct boundary even without trades,
+- ✅Wall-time `BarBuilder.check_expired(now_ms)` — bars close at correct boundary even without trades,
   driven by `clock.now_ms()` in the flush loop (works in both live and replay mode).
+- ✅Batch preload — `batch_preload(symbols, events)` scans each Parquet file once for all tickers
+  (was N scans), clock paused during I/O, ~4× faster.
+- ✅Flush loop alignment — 50ms poll, `check_expired` fires on virtual-time 500ms boundaries,
+  immediate ClickHouse write on bar completion.
+- [ ]localdata_loader/data_loader.py -> ClickHouse backfill in replay mode.
 
 Phase 2.5.4 — Downstream consumers + InfluxDB→ClickHouse migration
 

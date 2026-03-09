@@ -13,6 +13,9 @@
 - **backend**: `preload_tickers` config field under `TickDataServer` in `config.yaml`; `_preload_tickers()` calls `batch_preload()` with clock paused during I/O
 - **backend**: `utils/config_builder.py` extracted from `backend_starter.py` (`load_yaml_config`, `build_runtime_config`, `parse_override_args`, `set_nested_value`, `deep_merge`)
 - **chart**: Replay-mode chart backfill — `ChartDataService.get_bars()` detects `clock.is_replay()` and routes to local `data_loader.py` (Parquet) instead of Polygon API; ClickHouse backfill path unchanged
+- **data_loader**: `_resample_calendar()` — weekly/monthly resampling via `group_by_dynamic` moved from `chart_data_service` into `data_loader.py`; extended `parse_timeframe()` for `w`/`mo` units
+- **data_loader**: `LoaderConfig.cutoff_ts` — pre-resample replay cutoff so aggregated bars (4h, 1W, 1M) never incorporate future source data; cache auto-disabled when cutoff is active
+- **data_loader**: mixed Parquet schema handling — per-file `scan_parquet` + `pl.concat(how="diagonal_relaxed")` auto-supertypes UInt32/UInt64 volume columns across dates
 
 ### Fix
 
@@ -21,6 +24,10 @@
 - **backend**: `replay_time` leading-zero preservation — `set_nested_value()` no longer coerces `"081500"` to int
 - **bars_builder**: flush loop rewritten — 50ms real-time poll, fires `check_expired` on virtual-time 500ms boundaries via `clock_mod.now_ms()`, immediate ClickHouse flush
 - **bars_builder**: `from jerry_trader import clock as clock_mod` — fixed `ImportError: cannot import name 'clock'`
+- **data_loader**: `_fill_missing_and_resample` routing — `"7d"`/`"30d"` parsed as `unit="d"` were incorrectly routed to session-based resampler; fixed with `or (unit == "d" and value > 1)` guard
+- **data_loader**: `localdata_loader/__init__.py` relative imports + try/except guards; `path_loader.py` lazy `@property` for s3fs import
+- **chart**: removed stale `day_aggs_v1` cache files (67 files) serving un-resampled daily bars as weekly/monthly
+- **chart**: removed redundant `lf.cast({"volume": pl.UInt64})` from `_fetch_from_local()` — handled by loader
 
 ### Perf
 
@@ -34,6 +41,8 @@
 - **replayer**: 35 pytest tests (`test_synced_replayer.py`) — payload conversion, subscribe lifecycle, queue fan-out, UnifiedTickManager integration, real Parquet integration
 - **bars_builder**: 9 pytest tests in `TestCheckExpired` — empty, unexpired, expired, removed-from-state, mixed timeframes, multi-ticker, re-ingest, field validation
 - **rust**: 2 new Rust unit tests (`test_bar_state_expired_detection`, `test_ticker_bars_expired_drain`)
+- **data_loader**: 57 pytest tests (`test_data_loader.py`) — parse_timeframe, _resample_calendar, timestamp generation, session resampling, forward-fill, routing, config consistency, pre-resample cutoff
+- **chart**: 62 pytest tests (`test_chart_data_service.py`) — added cutoff propagation (3), replay cutoff (2), updated weekly/monthly config assertions
 
 ## 1.0.0 (2026-03-06)
 

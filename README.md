@@ -6,22 +6,46 @@ Details in [Jerry_Trader.pdf](docs/jerry_trader.pdf)
 
 ## Installation & Quick Start
 
-this project is built for my multiple machines working under the same network or through tailscale. you can configure each machine's role in the through [config.yaml](/config.yaml.example)
+This project is designed for a multi-machine setup connected via a local network or [Tailscale](https://tailscale.com/). Each machine's role is defined in [`config.yaml`](/config.yaml.example).
 
 ### 1. Clone & Configure
 
 ```bash
 git clone <repo-url> jerry_trader && cd jerry_trader
+```
 
-Edit `.env` — at minimum you need:
+#### 1.1 `basic_config.yaml`
 
-- `POLYGON_API_KEY` — Polygon.io Advanced subscription (real-time snapshot + tick data)
-- Database URLs for PostgreSQL / InfluxDB (if using persistence)
-- `IB_PORT` — 7496 (paper) or 7497 (live) for IBKR TWS; 4002/4001 for Gateway
+| Key | Description |
+|-----|-------------|
+| `data.data_dir` | Local path where market data (Parquet files) is stored |
 
-Edit `basic_config.yaml`:
+#### 1.2 `.env`
 
-- `data.data_dir` — local path where market data is stored
+At minimum you need:
+
+| Variable | Purpose |
+|----------|---------|
+| `POLYGON_API_KEY` | Polygon.io Advanced subscription (real-time snapshot + tick data) |
+| `DATABASE_URL` | PostgreSQL connection string (order persistence) |
+| `INFLUXDB_URL` / `INFLUXDB_TOKEN` | InfluxDB connection (factor engine metrics) |
+| `IB_PORT` | `7496` (TWS paper) / `7497` (TWS live) / `4002` (Gateway paper) / `4001` (Gateway live) |
+
+> For the IB API client library, see [Download the TWS API](https://www.interactivebrokers.com/campus/ibkr-api-page/twsapi-doc/#find-the-api).
+
+#### 1.3 `config.yaml` — Machine Roles
+
+The system has multiple services that can be distributed across machines. my setup uses 3:
+
+| Machine | Services |
+|---------|----------|
+| **A** | TickData Engine, BarBuilder, Factor Engine, Order Execution |
+| **B** | Market Snapshot engine (collect/replay), strategy-driving pre-processing(top20, normalization) |
+| **C** | News Module (fetch, LLM classification) |
+
+See [`config.yaml.example`](/config.yaml.example) for the full schema and role definitions.
+
+I recommend at least 2 machines, and highly recommend separate order execution and tickdata process with other parts.
 
 ### 2. Install Python Dependencies
 
@@ -33,11 +57,12 @@ poetry install
 poetry env info
 ```
 
-for ibapi installation, see [Download the TWS API](https://www.interactivebrokers.com/campus/ibkr-api-page/twsapi-doc/#find-the-api)
-
 ### 3. Build the Rust Extension
 
 ```bash
+# before run maturin, make sure you have cargo installed and restarted the shell
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
 # Build and install the Rust extension into the Poetry venv
 poetry run maturin develop
 
@@ -135,156 +160,16 @@ mainly focus on basic modules development and strcuture buidling.
   - ✅then Stock Detail. the data request is driven by top gainers and backend data management, so it should use cache, and also the data request can be driven by the frontend button. it's basic the same as the static data column update in top gainers column.
   - ✅then the Portfolio and Order Management. this module is isolated, so it's easier to integrate.
 
-### Stage2.5(Current)
+### Stage2.5
 
-📌the last and the hardest one is the Chart module, based on tradingview lightweight chart, the focus is balance between the real-time update and historical data retrival. **data management and historical data bootstrap. also build a architecture prepared for stage3 strategy real-time/replay computation, execution, analysis**
+✅the last and the hardest one is the Chart module, based on tradingview lightweight chart, the focus is balance between the real-time update and historical data retrival. **data management and historical data bootstrap. also build a architecture prepared for stage3 strategy real-time/replay computation, execution, analysis**
 
-- bootstrap using api&cache
-- write a data pipeline in Rust
-  - previous architecture:
-
-    ``` bash
-    v1.0
-
-    frontend
-      -> request - bff for historical data api fetch(cache&incremental design)
-      -> subscribe - tickdataServer for real-time websocket
-
-    problem:
-      bar consistency issues
-      UI complexity
-      duplicate aggregation logic
-      hard to scale
-    ```
-
-  - current architecture(for better trading chart ui):
-
-    ``` bash
-    v2.0
-
-    frontend
-      -> request - bars builder for historical data api fetch(The builder maintains rolling bar states.)
-      -> subscribe - bars builder for real-time websocket
-
-    Backend pipeline:
-      polygon ticks
-          │
-          ▼
-      tick ingestion
-          │
-          ▼
-      Bar Builder Service
-          │
-          ├─ maintains rolling bar states
-          │
-          ├─ persists completed bars
-          │
-          └─ streams realtime bar updates
-
-    Frontend behavior:
-      getBars()
-      subscribeBars()
-
-    Advantages:
-      UI becomes simple
-      bar consistency guaranteed
-      deterministic bar generation
-      lower websocket bandwidth
-    ```
-
-  - planned architecture(for better quant strategy computation&execution):
-
-    ``` bash
-    v3.0
-
-    market feed
-      │
-      ▼
-    tick ingestion
-      │
-      ▼
-    stream bus
-      │
-      ├─ bar builder
-      ├─ feature engine
-      └─ strategy engine
-
-    more to be discussed yet.
-
-    ```
-
-- restructure and introduce rust
-
-#### Stage 2.5
-
-Phase 2.5.1 — Rust BarBuilder core (`rust/src/bars.rs`)
-
-- ✅`BarState` struct (open/high/low/close/volume/trade_count/vwap/bar_start/session)
-- ✅`Timeframe` enum (10s, 1m, 5m, 15m, 30m, 1h, 4h, 1d, 1w)
-- ✅`SessionCalendar` — US session boundaries (premarket 4:00, regular 9:30, afterhours 16:00–20:00)
-- ✅`BarBuilder` as `#[pyclass]` — maintains per-ticker, per-timeframe rolling state
-- ✅`ingest_trade(ticker, price, size, timestamp_ms)` → returns completed bars
-- ✅`get_current_bar(ticker, timeframe)` → returns partial bar
-- ✅`flush()` → force-complete all open bars
-- ✅Session-aware bar boundary truncation
-- ✅Rust unit tests
-- ✅`maturin develop --release`, verify import from Python
-
-Phase 2.5.2 — ClickHouse + Python BarsBuilderService
-
-- ✅ClickHouse `ohlcv_bars` table schema (ReplacingMergeTree, partitioned by date)
-- ✅Python ClickHouse client integration (clickhouse-connect)
-- ✅`BarsBuilderService` (Python): tick ingestion → Rust BarBuilder → ClickHouse write → Redis pub/sub
-- ✅Add `BarsBuilder` role to config.yaml machine profiles
-- ✅Register BarsBuilder in backend_starter.py
-
-Phase 2.5.3 — Frontend integration
-
-- ✅REST endpoint: BFF queries ClickHouse for BarBuilder timeframes, falls back to ChartDataService
-- ✅WebSocket relay: BFF subscribes to Redis `bars:*` pub/sub, relays `bar_update` to clients
-- ✅`subscribe_bars` / `unsubscribe_bars` WS message types
-- ✅`chartDataStore.ts`: added `applyBarUpdate()` for server-pushed completed bars
-- ✅`useWebSocket.ts`: handles `bar_update` message, exports `subscribeBarUpdates()`
-- ✅`ChartModule.tsx`: subscribes on mount, unsubscribes on cleanup, added `10s` timeframe
-- ✅`ChartTimeframe` type: added `10s`
-- ✅Remove frontend-side `updateFromTrade()` aggregation (kept as fallback for now)
-
-Phase 2.5.3.5 - Key features implement(current stage):
-
-- ✅ReplayClock — Rust `#[pyclass]` wall-time global clock + Python `clock.py` singleton, 46 tests
-- ✅Frontend clock sync — `GET /api/clock` + `TimelineClock.tsx` (REPLAY badge, speed, pause indicators)
-- ✅Module migration — 7 `time.time()`/`datetime.now()` calls replaced across 5 modules with `clock.now_ms()`/`clock.now_datetime()`
-- ✅TickDataReplayer — Rust replayer ported into `jerry_trader._rust` (6 Rust files, PyO3 callback delivery)
-- ✅SyncedReplayerManager — drop-in replacement for WebSocket path, in-process tick delivery
-- ✅UnifiedTickManager — `provider="synced-replayer"` support
-- ✅Config refactor — `utils/config_builder.py` extracted from `backend_starter.py`
-- ✅Validation tests — `test_synced_replayer.py` (35 tests: unit + real Parquet integration)
-- ✅Historical bar bootstrap from Polygon API → ClickHouse backfill in live mode
-  (`_needs_historical_backfill()` + `_backfill_to_clickhouse()` in Chart BFF).
-- ✅Split BFF into two independent services for multi-machine deployment:
-  - Market Data BFF (`bff.py`, port 5001): overview/dashboard, market snapshot WS, Redis streams
-  - Chart Data BFF (`chart_bff.py`, port 5002): OHLCV bars, bar subscription WS, ClickHouse queries
-- ✅`request_id` race condition prevention — frontend generates per-fetch ID, BFF echoes it,
-  stale responses discarded on arrival.
-- ✅Added `ChartDataBFF` role to `config.yaml` and `backend_starter.py`.
-- ✅Frontend `VITE_CHART_BFF_URL` env var (`getChartBffBaseUrl()` defaults to port 5002).
-- ✅Wall-time `BarBuilder.check_expired(now_ms)` — bars close at correct boundary even without trades,
-  driven by `clock.now_ms()` in the flush loop (works in both live and replay mode).
-- ✅Batch preload — `batch_preload(symbols, events)` scans each Parquet file once for all tickers
-  (was N scans), clock paused during I/O, ~4× faster.
-- ✅Flush loop alignment — 50ms poll, `check_expired` fires on virtual-time 500ms boundaries,
-  immediate ClickHouse write on bar completion.
-- ✅Replay-mode chart backfill — `ChartDataService` detects replay mode and routes to local
-  `data_loader.py` (Parquet) instead of Polygon API; ClickHouse backfill path unchanged.
-
-Phase 2.5.4 — Downstream consumers + InfluxDB→ClickHouse migration
-
+- ✅add frontend request_id to prevent race conditions.
+- [ ]frontend charts timespan seperated.
+- [ ]Downstream consumers + InfluxDB→ClickHouse migration
 - [ ]FactorEngine consumes batched bars/data (not raw ticks)
-- [ ]Factor output: InfluxDB → ClickHouse
-- [ ]Factor visualization overlay in Chart module
 - [ ]Snapshot data: InfluxDB → ClickHouse
 - [ ]Foundation for v3.0 stream bus architecture
-- ✅add frontend request_id to prevent race conditions.
 
 ### Stage3
 
@@ -302,14 +187,22 @@ mainly focus on strategy computation,execution,replay backtest.
   - build historical context model.
 - [ ]rewrite stateEngine in rust.
 - [ ]rewrite factorEegine in Rust.
+- [ ]Factor output: InfluxDB → ClickHouse
+- [ ]Factor visualization overlay in Chart module
+- [ ]News engine output from log to json log. route to openclaw/heartbeat llm in the future.
 
 ### optional features
 
 some other features to make it better.
 
-- historical orders analysis modules.
-- Add more modules, like Agent module to monitor the global staus also focus on one ticker at the same time.
-- news room
+- [] historical orders analysis modules.
+- [] Add more modules, like Agent module to monitor the global staus also focus on one ticker at the same time.
+- [] news room
+
+### open issues
+
+- [ ]frontend chart newest bar render will cover up the the last bar timespan duration time open,high,low price. always start a new bar based on incoming websocket since connected.
+- [ ]4h local data in replay fetch has a problem overlapping the bar though we have cut_off before resample in local_data_loader.
 
 ### Current frontend preview
 

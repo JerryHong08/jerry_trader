@@ -96,6 +96,7 @@ export interface ModuleConfig {
 }
 
 export interface ModuleProps {
+  moduleId: string;
   onRemove: () => void;
   syncGroup?: string | null;
   onSyncGroupChange?: (group: string | null) => void;

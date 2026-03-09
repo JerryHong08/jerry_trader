@@ -59,20 +59,28 @@ export interface SymbolChartState {
   requestId: string | null;     // Echoed from BFF to detect stale responses
 }
 
+/** Build the composite store key: "moduleId::TICKER" */
+export function chartStoreKey(moduleId: string, ticker: string): string {
+  return `${moduleId}::${ticker.toUpperCase()}`;
+}
+
 type ChartDataState = {
-  // Per-symbol bar data
+  // Per-instance + symbol bar data (keyed by "moduleId::TICKER")
   symbolBars: Record<string, SymbolChartState>;
 
-  // Actions
-  fetchBars: (ticker: string, timeframe: ChartTimeframe) => Promise<void>;
+  // Actions — moduleId scopes state per chart instance
+  fetchBars: (moduleId: string, ticker: string, timeframe: ChartTimeframe) => Promise<void>;
   updateFromTrade: (
+    moduleId: string,
     symbol: string,
     price: number,
     size: number,
     timestampMs: number,
   ) => void;
-  applyBarUpdate: (ticker: string, timeframe: string, bar: OHLCVBar) => void;
-  clearSymbol: (symbol: string) => void;
+  applyBarUpdate: (moduleId: string, ticker: string, timeframe: string, bar: OHLCVBar) => void;
+  /** Broadcast a bar update to ALL chart instances showing this ticker+timeframe */
+  broadcastBarUpdate: (ticker: string, timeframe: string, bar: OHLCVBar) => void;
+  clearSymbol: (moduleId: string, symbol: string) => void;
   reset: () => void;
 };
 
@@ -128,9 +136,10 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
   // ========================================================================
   // Fetch historical bars
   // ========================================================================
-  fetchBars: async (ticker: string, timeframe: ChartTimeframe) => {
+  fetchBars: async (moduleId: string, ticker: string, timeframe: ChartTimeframe) => {
     const tickerUpper = ticker.toUpperCase();
-    const existing = get().symbolBars[tickerUpper];
+    const key = chartStoreKey(moduleId, tickerUpper);
+    const existing = get().symbolBars[key];
 
     // Skip if already loading
     if (existing?.loading) return;
@@ -152,7 +161,7 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
     set((s) => ({
       symbolBars: {
         ...s.symbolBars,
-        [tickerUpper]: {
+        [key]: {
           bars: existing?.timeframe === timeframe ? existing.bars : [],
           timeframe,
           barDurationSec: TIMEFRAME_DURATION_SEC[timeframe],
@@ -179,7 +188,7 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
 
       // Race condition guard: if another fetch for this ticker was started
       // while we were waiting, our requestId will no longer match — discard.
-      const current = get().symbolBars[tickerUpper];
+      const current = get().symbolBars[key];
       if (current?.requestId !== requestId) {
         return; // superseded by a newer fetch
       }
@@ -188,8 +197,8 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
         set((s) => ({
           symbolBars: {
             ...s.symbolBars,
-            [tickerUpper]: {
-              ...s.symbolBars[tickerUpper],
+            [key]: {
+              ...s.symbolBars[key],
               loading: false,
               error: data.error ?? 'No data',
               lastFetchTime: Date.now(),
@@ -203,7 +212,7 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
       set((s) => ({
         symbolBars: {
           ...s.symbolBars,
-          [tickerUpper]: {
+          [key]: {
             bars: data.bars,
             timeframe,
             barDurationSec: data.barDurationSec || TIMEFRAME_DURATION_SEC[timeframe],
@@ -232,8 +241,8 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
       set((s) => ({
         symbolBars: {
           ...s.symbolBars,
-          [tickerUpper]: {
-            ...s.symbolBars[tickerUpper],
+          [key]: {
+            ...s.symbolBars[key],
             loading: false,
             error: errMsg,
             lastFetchTime: Date.now(),
@@ -247,13 +256,15 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
   // Real-time bar update from trade tick
   // ========================================================================
   updateFromTrade: (
+    moduleId: string,
     symbol: string,
     price: number,
     size: number,
     timestampMs: number,
   ) => {
     const tickerUpper = symbol.toUpperCase();
-    const state = get().symbolBars[tickerUpper];
+    const key = chartStoreKey(moduleId, tickerUpper);
+    const state = get().symbolBars[key];
     if (!state || state.bars.length === 0 || state.loading) return;
 
     const bars = [...state.bars];
@@ -314,7 +325,7 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
     set((s) => ({
       symbolBars: {
         ...s.symbolBars,
-        [tickerUpper]: {
+        [key]: {
           ...state,
           bars,
         },
@@ -325,9 +336,10 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
   // ========================================================================
   // Server-pushed completed bar (from BarsBuilder via BFF WebSocket)
   // ========================================================================
-  applyBarUpdate: (ticker: string, timeframe: string, bar: OHLCVBar) => {
+  applyBarUpdate: (moduleId: string, ticker: string, timeframe: string, bar: OHLCVBar) => {
     const tickerUpper = ticker.toUpperCase();
-    const state = get().symbolBars[tickerUpper];
+    const key = chartStoreKey(moduleId, tickerUpper);
+    const state = get().symbolBars[key];
     if (!state || state.loading) return;
 
     // Map BarBuilder timeframe names (lowercase) to frontend convention
@@ -358,7 +370,7 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
     set((s) => ({
       symbolBars: {
         ...s.symbolBars,
-        [tickerUpper]: {
+        [key]: {
           ...state,
           bars,
         },
@@ -367,12 +379,56 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
   },
 
   // ========================================================================
+  // Broadcast bar update to ALL instances showing this ticker+timeframe
+  // (called from WebSocket handler which doesn't know about moduleIds)
+  // ========================================================================
+  broadcastBarUpdate: (ticker: string, timeframe: string, bar: OHLCVBar) => {
+    const tickerUpper = ticker.toUpperCase();
+    const suffix = `::${tickerUpper}`;
+
+    // Map BarBuilder timeframe names to frontend convention
+    const tfMap: Record<string, string> = {
+      '10s': '10s', '1m': '1m', '5m': '5m', '15m': '15m',
+      '1h': '1h', '4h': '4h', '1d': '1D', '1w': '1W',
+    };
+    const frontendTf = tfMap[timeframe] ?? timeframe;
+
+    const allBars = get().symbolBars;
+    const updates: Record<string, SymbolChartState> = {};
+
+    for (const [key, state] of Object.entries(allBars)) {
+      if (!key.endsWith(suffix)) continue;
+      if (state.loading || state.timeframe !== frontendTf) continue;
+
+      const bars = [...state.bars];
+      const lastBar = bars[bars.length - 1];
+
+      if (lastBar && bar.time === lastBar.time) {
+        bars[bars.length - 1] = bar;
+      } else if (!lastBar || bar.time > lastBar.time) {
+        bars.push(bar);
+        if (bars.length > 2000) bars.splice(0, bars.length - 2000);
+      } else {
+        continue; // stale
+      }
+
+      updates[key] = { ...state, bars };
+    }
+
+    if (Object.keys(updates).length > 0) {
+      set((s) => ({
+        symbolBars: { ...s.symbolBars, ...updates },
+      }));
+    }
+  },
+
+  // ========================================================================
   // Cleanup
   // ========================================================================
-  clearSymbol: (symbol: string) => {
+  clearSymbol: (moduleId: string, symbol: string) => {
     set((s) => {
       const next = { ...s.symbolBars };
-      delete next[symbol.toUpperCase()];
+      delete next[chartStoreKey(moduleId, symbol)];
       return { symbolBars: next };
     });
   },

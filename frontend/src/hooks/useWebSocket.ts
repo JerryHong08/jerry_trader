@@ -611,7 +611,7 @@ function handleMessage(message: WebSocketMessage) {
       // Completed bar pushed by BarsBuilder via BFF Redis pub/sub
       const { ticker, timeframe, bar } = message;
       if (ticker && timeframe && bar) {
-        useChartDataStore.getState().applyBarUpdate(ticker, timeframe, bar);
+        useChartDataStore.getState().broadcastBarUpdate(ticker, timeframe, bar);
       }
       break;
     }

@@ -38,7 +38,7 @@ import type {
 import { Wifi, WifiOff, BarChart3, TrendingUp, Loader2 } from 'lucide-react';
 import type { ModuleProps, ChartTimeframe } from '../types';
 import { useTickDataStore, type Trade, type Quote } from '../stores/tickDataStore';
-import { useChartDataStore } from '../stores/chartDataStore';
+import { useChartDataStore, chartStoreKey } from '../stores/chartDataStore';
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -49,6 +49,7 @@ const TIMEFRAMES: ChartTimeframe[] = [
 type ChartMode = 'candle' | 'line';
 
 export function ChartModule({
+  moduleId,
   onRemove,
   selectedSymbol,
   onSymbolSelect,
@@ -72,7 +73,7 @@ export function ChartModule({
   // Chart data store (OHLCV bars)
   const fetchBars = useChartDataStore((s) => s.fetchBars);
   const symbolBars = useChartDataStore((s) => s.symbolBars);
-  const chartState = symbol ? symbolBars[symbol.toUpperCase()] : undefined;
+  const chartState = symbol ? symbolBars[chartStoreKey(moduleId, symbol)] : undefined;
 
   // Ref to read latest chartState inside effects without adding it as a dependency
   const chartStateRef = useRef(chartState);
@@ -112,8 +113,9 @@ export function ChartModule({
   // so trade ticks keep flowing during a timeframe fetch.
   const activeBarDurationRef = useRef<number>(0);
 
-  // Track whether we've done the initial fitContent for this symbol
-  const lastRenderedSymbolRef = useRef<string | null>(null);
+  // Track whether we've ever rendered data — fitContent only on very first render.
+  // After that, symbol switches keep X-axis (timeline) unchanged, Y-axis auto-scales.
+  const hasEverRenderedRef = useRef(false);
 
   // Ref to read current timeframe inside effects without adding it as a dependency
   const timeframeRef = useRef(timeframe);
@@ -234,16 +236,29 @@ export function ChartModule({
     if (!symbol) return;
 
     const tickerUpper = symbol.toUpperCase();
-    fetchBars(tickerUpper, timeframe);
+    fetchBars(moduleId, tickerUpper, timeframe);
 
     currentSymbolRef.current = tickerUpper;
     currentTimeframeRef.current = timeframe;
   }, [symbol, timeframe, fetchBars]);
 
-  // Reset refs when the symbol itself changes (different ticker = clean slate)
+  // Reset refs AND clear chart series when the symbol changes — prevents stale
+  // bars from the previous ticker lingering when the new ticker has no data
+  // (e.g. 10s timeframe with no API/ClickHouse data yet).
   useEffect(() => {
     lineDataRef.current = [];
     currentBarRef.current = null;
+
+    // Clear visible series so old ticker's bars don't remain on screen
+    if (candleSeriesRef.current) {
+      candleSeriesRef.current.setData([]);
+    }
+    if (volumeSeriesRef.current) {
+      volumeSeriesRef.current.setData([]);
+    }
+    if (lineSeriesRef.current) {
+      lineSeriesRef.current.setData([]);
+    }
   }, [symbol]);
 
   // ── Render bars on bootstrap fetch ────────────────────────────────────
@@ -277,13 +292,23 @@ export function ChartModule({
         volumeSeriesRef.current.setData(volumeData);
       }
 
-      // Only fitContent on symbol change (first load), not on timeframe switch
-      if (lastRenderedSymbolRef.current !== symbol) {
+      // First render: fitContent to establish a sensible initial view.
+      // Subsequent renders: only re-enable Y-axis autoScale so the price
+      // range adapts to the new ticker without moving the X-axis.
+      if (!hasEverRenderedRef.current) {
         chartRef.current.timeScale().fitContent();
-        lastRenderedSymbolRef.current = symbol;
+        hasEverRenderedRef.current = true;
       }
+      chartRef.current.priceScale('right').applyOptions({ autoScale: true });
       activeBarDurationRef.current = chartState.barDurationSec;
-      currentBarRef.current = null;
+
+      // Seed currentBarRef from the last historical bar so that the first
+      // incoming trade updates it in place rather than creating a brand-new
+      // bar that would overwrite the last bar's real OHLCV.
+      const lastHistBar = chartState.bars[chartState.bars.length - 1];
+      currentBarRef.current = lastHistBar
+        ? { time: lastHistBar.time, open: lastHistBar.open, high: lastHistBar.high, low: lastHistBar.low, close: lastHistBar.close, volume: lastHistBar.volume }
+        : null;
     } else if (chartMode === 'line') {
       ensureSeries('line');
 
@@ -296,12 +321,18 @@ export function ChartModule({
         lineSeriesRef.current.setData(lineData);
       }
 
-      if (lastRenderedSymbolRef.current !== symbol) {
+      if (!hasEverRenderedRef.current) {
         chartRef.current.timeScale().fitContent();
-        lastRenderedSymbolRef.current = symbol;
+        hasEverRenderedRef.current = true;
       }
+      chartRef.current.priceScale('right').applyOptions({ autoScale: true });
       activeBarDurationRef.current = chartState.barDurationSec;
-      currentBarRef.current = null;
+
+      // Seed currentBarRef from the last bar (same reason as candle mode)
+      const lastHistBarLine = chartState.bars[chartState.bars.length - 1];
+      currentBarRef.current = lastHistBarLine
+        ? { time: lastHistBarLine.time, open: lastHistBarLine.open, high: lastHistBarLine.high, low: lastHistBarLine.low, close: lastHistBarLine.close, volume: lastHistBarLine.volume }
+        : null;
     }
 
     // Update timeScale options to match the rendered timeframe.

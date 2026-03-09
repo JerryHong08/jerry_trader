@@ -491,6 +491,7 @@ export function GridItem({
         {/* Content */}
         <div className="flex-1 overflow-hidden no-drag">
           <ModuleComponent
+            moduleId={item.id}
             onRemove={onRemove}
             syncGroup={item.syncGroup}
             selectedSymbol={selectedSymbol}

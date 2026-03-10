@@ -171,6 +171,7 @@ mainly focus on basic modules development and strcuture buidling.
 - ✅ add frontend request_id to prevent race conditions.
 - ✅ frontend charts seperated.
 - [ ] deep review how current bar_buidler builds the bars in different senarios.
+  - [ ] add delay for fetch the back fill bars only after the websocket subcription/bar buidler started a while
 - [ ] Downstream consumers + InfluxDB→ClickHouse migration
 - [ ] FactorEngine consumes batched bars/data (not raw ticks)
 - [ ] Snapshot data: InfluxDB → ClickHouse
@@ -226,8 +227,8 @@ some other features to make it better.
 
 ### open issues
 
-- [ ] frontend chart newest bar render will cover up the the last bar timespan duration time open,high,low price. always start a new bar based on incoming websocket since connected.
-- [ ] 4h local data in replay fetch has a problem overlapping the bar though we have cut_off before resample in local_data_loader.
+- ✅ frontend chart newest bar render will cover up the the last bar timespan duration time open,high,low price. always start a new bar based on incoming websocket since connected.
+- ✅ 4h local data in replay fetch has a problem overlapping the bar though we have cut_off before resample in local_data_loader.
 
 ### Current frontend preview
 

@@ -401,6 +401,74 @@ def fetch_polygon_trades(symbol: str) -> List[Tuple[int, float]]:
     return all_trades
 
 
+def fetch_polygon_trades_window(
+    symbol: str,
+    from_ms: int,
+    to_ms: int,
+) -> List[Tuple[int, float, float]]:
+    """Fetch trades from Polygon /v3/trades for a specific time window.
+
+    Unlike fetch_polygon_trades() which only returns (ts_ms, price),
+    this returns (ts_ms, price, size) tuples — needed for bar building
+    with accurate volume.
+
+    Args:
+        symbol: Ticker symbol
+        from_ms: Start of window (epoch ms, inclusive)
+        to_ms: End of window (epoch ms, inclusive)
+
+    Returns:
+        List of (ts_ms, price, size) tuples, sorted ascending by ts.
+    """
+    from_ns = int(from_ms * 1_000_000)
+    to_ns = int(to_ms * 1_000_000)
+
+    all_trades: List[Tuple[int, float, float]] = []
+    url = (
+        f"{POLYGON_REST_BASE}/v3/trades/{symbol}"
+        f"?order=asc&limit={BOOTSTRAP_BATCH_SIZE}&sort=timestamp"
+        f"&timestamp.gte={from_ns}&timestamp.lte={to_ns}"
+        f"&apiKey={api_key}"
+    )
+
+    page = 0
+    while url:
+        page += 1
+        try:
+            resp = requests.get(url, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            logger.error(f"fetch_polygon_trades_window - {symbol} page {page}: {e}")
+            break
+
+        results = data.get("results", [])
+        if not results:
+            break
+
+        for trade in results:
+            sip_ts_ns = trade.get("sip_timestamp", 0)
+            price = trade.get("price", 0.0)
+            size = trade.get("size", 0.0)
+            ts_ms = sip_ts_ns // 1_000_000  # ns → ms
+            if price > 0:
+                all_trades.append((ts_ms, price, float(size)))
+
+        # Pagination: follow next_url if present
+        next_url = data.get("next_url")
+        if next_url:
+            url = f"{next_url}&apiKey={api_key}"
+        else:
+            break
+
+    logger.info(
+        f"fetch_polygon_trades_window - {symbol}: "
+        f"fetched {len(all_trades)} trades in {page} pages "
+        f"[{from_ms} → {to_ms}]"
+    )
+    return all_trades
+
+
 if __name__ == "__main__":
     import argparse
 

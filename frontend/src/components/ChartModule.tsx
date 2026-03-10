@@ -357,33 +357,62 @@ export function ChartModule({
     // Use the actively rendered bar duration, not the store's (which may be loading)
     const barDuration = activeBarDurationRef.current;
 
-    // Floor-align trade timestamp to bar boundary (seconds)
+    // Compute bar time for this trade.
+    // For bars >= 1h (3600s), timestamps are session-aligned (BarBuilder) or
+    // market-open-based, NOT clean multiples of barDuration from epoch.
+    // Use range comparison against currentBarRef instead of floor alignment.
     const tradeSec = Math.floor(latestTrade.timestamp / 1000);
-    const barTime = barDuration > 0
-      ? Math.floor(tradeSec / barDuration) * barDuration
-      : tradeSec;
 
     // If we have an active candlestick or line series, update via the ref directly
     const hasActiveSeries = candleSeriesRef.current || lineSeriesRef.current;
     if (hasActiveSeries && barDuration > 0) {
       // Accumulate OHLCV for the current bar
       const cur = currentBarRef.current;
-      if (cur && cur.time === barTime) {
-        // Same bar — update high/low/close/volume
-        cur.high = Math.max(cur.high, latestTrade.price);
-        cur.low = Math.min(cur.low, latestTrade.price);
-        cur.close = latestTrade.price;
-        cur.volume += latestTrade.size;
+
+      if (cur && barDuration >= 3600) {
+        // Session-aligned timeframes (1h, 4h, 1D, 1W, 1M):
+        // Use range comparison against the current bar's time.
+        if (tradeSec >= cur.time && tradeSec < cur.time + barDuration) {
+          // Trade falls within current bar — update
+          cur.high = Math.max(cur.high, latestTrade.price);
+          cur.low = Math.min(cur.low, latestTrade.price);
+          cur.close = latestTrade.price;
+          cur.volume += latestTrade.size;
+        } else if (tradeSec >= cur.time + barDuration) {
+          // Trade is past current bar — start new bar
+          currentBarRef.current = {
+            time: cur.time + barDuration,
+            open: latestTrade.price,
+            high: latestTrade.price,
+            low: latestTrade.price,
+            close: latestTrade.price,
+            volume: latestTrade.size,
+          };
+        }
+        // else: trade before current bar — stale, ignore
       } else {
-        // New bar boundary — start fresh
-        currentBarRef.current = {
-          time: barTime,
-          open: latestTrade.price,
-          high: latestTrade.price,
-          low: latestTrade.price,
-          close: latestTrade.price,
-          volume: latestTrade.size,
-        };
+        // Floor-aligned timeframes (10s, 1m, 5m, 15m, 30m)
+        const barTime = barDuration > 0
+          ? Math.floor(tradeSec / barDuration) * barDuration
+          : tradeSec;
+
+        if (cur && cur.time === barTime) {
+          // Same bar — update high/low/close/volume
+          cur.high = Math.max(cur.high, latestTrade.price);
+          cur.low = Math.min(cur.low, latestTrade.price);
+          cur.close = latestTrade.price;
+          cur.volume += latestTrade.size;
+        } else {
+          // New bar boundary — start fresh
+          currentBarRef.current = {
+            time: barTime,
+            open: latestTrade.price,
+            high: latestTrade.price,
+            low: latestTrade.price,
+            close: latestTrade.price,
+            volume: latestTrade.size,
+          };
+        }
       }
 
       const bar = currentBarRef.current!;

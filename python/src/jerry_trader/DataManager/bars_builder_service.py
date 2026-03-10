@@ -590,3 +590,17 @@ class BarsBuilderService:
     def get_partial_bar(self, ticker: str, timeframe: str) -> Optional[Dict]:
         """Get the current in-progress bar from the Rust BarBuilder."""
         return self.bar_builder.get_current_bar(ticker, timeframe)
+
+    def get_pending_bars(self, ticker: str, timeframe: str) -> List[Dict]:
+        """Return completed bars not yet flushed to ClickHouse.
+
+        These bars exist in ``_pending_bars`` for up to ~50 ms before
+        the flush loop writes them to ClickHouse.  Including them in
+        REST responses prevents a gap between ClickHouse and the
+        partial (in-progress) bar.
+        """
+        return [
+            bar
+            for bar in self._pending_bars
+            if bar.get("ticker") == ticker and bar.get("timeframe") == timeframe
+        ]

@@ -144,11 +144,12 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
     // Skip if already loading
     if (existing?.loading) return;
 
-    // Skip if recently fetched for the same timeframe
+    // Skip if recently fetched for the same timeframe (unless previous fetch errored)
     if (
       existing &&
       existing.timeframe === timeframe &&
       existing.lastFetchTime &&
+      !existing.error &&
       Date.now() - existing.lastFetchTime < MIN_REFETCH_INTERVAL[timeframe]
     ) {
       return;
@@ -273,11 +274,11 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
     const tradeSec = Math.floor(timestampMs / 1000);
 
     // Compute the bar boundary this trade belongs to.
-    // For daily+ bars (>= 86400s), Polygon bar timestamps are NOT exact
-    // multiples of barDuration (they use market-open or date-based offsets).
-    // Use range comparison instead of floor alignment for those.
+    // For bars >= 1h (3600s), bar timestamps are session-aligned (BarBuilder)
+    // or market-open-based, NOT exact multiples of barDuration from epoch.
+    // Use range comparison against the last bar instead of floor alignment.
     let tradeBarTime: number;
-    if (barDuration >= 86400) {
+    if (barDuration >= 3600) {
       if (tradeSec >= lastBar.time && tradeSec < lastBar.time + barDuration) {
         // Trade falls within the current bar's expected range
         tradeBarTime = lastBar.time;

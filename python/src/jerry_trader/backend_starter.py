@@ -458,6 +458,7 @@ class JerryTraderBackendStarter:
                 session_id=self.session_id,
                 redis_config=role_cfg.get("redis"),
                 clickhouse_config=role_cfg.get("clickhouse"),
+                bars_builder=self.bars_builder,
             )
             self._services.append(("ChartDataBFF", self.chart_data_bff))
         else:

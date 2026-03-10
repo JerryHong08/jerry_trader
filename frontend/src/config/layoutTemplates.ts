@@ -541,4 +541,4 @@ export const getAllTemplates = (): LayoutTemplate[] => {
 };
 
 // Default template ID
-export const DEFAULT_TEMPLATE_ID = "default-trading";
+export const DEFAULT_TEMPLATE_ID = "minimal layout";

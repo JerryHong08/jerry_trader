@@ -98,11 +98,13 @@ class ChartDataBFF:
     Co-located with BarsBuilderService + ClickHouse for minimal latency.
     """
 
-    # Timeframes served by BarBuilder/ClickHouse (lowercase)
+    # Timeframes with live partial-bar updates from Rust BarBuilder.
+    # Only these have pending/partial bar state at runtime.
     BARS_BUILDER_TIMEFRAMES = {"10s", "1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"}
 
-    # Map frontend timeframe names → BarBuilder names
-    _TF_TO_BUILDER: Dict[str, str] = {
+    # Map frontend timeframe names → canonical ClickHouse timeframe keys.
+    # All timeframes go through ClickHouse (with Polygon backfill).
+    _TF_TO_CH: Dict[str, str] = {
         "10s": "10s",
         "1m": "1m",
         "5m": "5m",
@@ -112,6 +114,7 @@ class ChartDataBFF:
         "4h": "4h",
         "1D": "1d",
         "1W": "1w",
+        "1M": "1M",
         "1d": "1d",
         "1w": "1w",
     }
@@ -126,6 +129,7 @@ class ChartDataBFF:
         "4h": 14400,
         "1d": 86400,
         "1w": 604800,
+        "1M": 2592000,
     }
 
     def __init__(
@@ -135,9 +139,14 @@ class ChartDataBFF:
         session_id: Optional[str] = None,
         redis_config: Optional[Dict[str, Any]] = None,
         clickhouse_config: Optional[Dict[str, Any]] = None,
+        bars_builder: Optional[Any] = None,
     ):
         self.host = host
         self.port = port
+
+        # BarsBuilder reference — used to fetch partial (in-progress) bars
+        # so the REST response includes the current bar state.
+        self._bars_builder = bars_builder
 
         # Unified session id — single source of truth for mode & date
         self.session_id = session_id or make_session_id()
@@ -157,7 +166,7 @@ class ChartDataBFF:
             host=redis_host, port=redis_port, db=redis_db, decode_responses=True
         )
 
-        # Initialize chart data service (Polygon fallback for non-BarBuilder TFs)
+        # Polygon historical data source (used for ClickHouse backfill)
         self.chart_data_service = ChartDataService(
             redis_config=redis_config,
             session_id=self.session_id,
@@ -291,9 +300,9 @@ class ChartDataBFF:
         ):
             """Fetch OHLCV bars for the ChartModule.
 
-            Queries ClickHouse for BarBuilder timeframes (10s–1w),
-            falls back to ChartDataService (Polygon) for others (1M)
-            or when ClickHouse has no data.
+            All timeframes go through ClickHouse as the single source
+            of truth. Missing historical data is backfilled from Polygon
+            on first request.
 
             Args:
                 ticker: Stock ticker symbol
@@ -307,71 +316,80 @@ class ChartDataBFF:
             Returns:
                 JSON with bars array formatted for lightweight-charts CandlestickSeries
             """
-            builder_tf = self._TF_TO_BUILDER.get(timeframe)
+            ch_tf = self._TF_TO_CH.get(timeframe)
             ticker_upper = ticker.upper()
 
-            # ── ClickHouse path (BarBuilder timeframes) ───────────────
-            if builder_tf and self.ch_client:
-                ch_result = self._query_bars_clickhouse(
+            if not ch_tf:
+                return {
+                    "ticker": ticker_upper,
+                    "timeframe": timeframe,
+                    "bars": [],
+                    "barCount": 0,
+                    "error": f"Unknown timeframe: {timeframe}",
+                    **({"requestId": request_id} if request_id else {}),
+                }
+
+            if not self.ch_client:
+                return {
+                    "ticker": ticker_upper,
+                    "timeframe": timeframe,
+                    "bars": [],
+                    "barCount": 0,
+                    "error": "ClickHouse unavailable",
+                    **({"requestId": request_id} if request_id else {}),
+                }
+
+            # ── Query ClickHouse ──────────────────────────────────────
+            ch_result = self._query_bars_clickhouse(
+                ticker_upper,
+                ch_tf,
+                from_date,
+                to_date,
+                limit,
+            )
+            ch_bars = ch_result["bars"] if ch_result else []
+
+            # If ClickHouse is missing historical coverage, backfill
+            # from Polygon and persist into ClickHouse.
+            if self._needs_historical_backfill(
+                ch_bars,
+                ch_tf,
+                from_date,
+                to_date,
+            ):
+                n = self._backfill_to_clickhouse(
                     ticker_upper,
-                    builder_tf,
+                    timeframe,
+                    ch_tf,
                     from_date,
                     to_date,
                     limit,
                 )
-                ch_bars = ch_result["bars"] if ch_result else []
-
-                # If ClickHouse is missing historical coverage, backfill
-                # from Polygon and persist into ClickHouse.
-                if self._needs_historical_backfill(
-                    ch_bars,
-                    builder_tf,
-                    from_date,
-                    to_date,
-                ):
-                    n = self._backfill_to_clickhouse(
+                if n > 0:
+                    ch_result = self._query_bars_clickhouse(
                         ticker_upper,
-                        timeframe,
-                        builder_tf,
+                        ch_tf,
                         from_date,
                         to_date,
                         limit,
                     )
-                    if n > 0:
-                        # Re-query for merged result
-                        ch_result = self._query_bars_clickhouse(
-                            ticker_upper,
-                            builder_tf,
-                            from_date,
-                            to_date,
-                            limit,
-                        )
 
-                if ch_result and ch_result["barCount"] > 0:
-                    ch_result["timeframe"] = timeframe
-                    if request_id:
-                        ch_result["requestId"] = request_id
-                    return ch_result
-
-            # ── Fallback for non-BarBuilder timeframes (1M, …) ───
-            result = self.chart_data_service.get_bars(
-                ticker=ticker,
-                timeframe=timeframe,
-                from_date=from_date,
-                to_date=to_date,
-                limit=limit,
-            )
-            if result:
+            if ch_result and ch_result["barCount"] > 0:
+                # Append pending + partial bar for BarBuilder timeframes
+                if ch_tf in self.BARS_BUILDER_TIMEFRAMES:
+                    self._append_partial_bar(ch_result, ticker_upper, ch_tf)
+                ch_result["timeframe"] = timeframe
                 if request_id:
-                    result["requestId"] = request_id
-                return result
+                    ch_result["requestId"] = request_id
+                return ch_result
+
             return {
                 "ticker": ticker_upper,
                 "timeframe": timeframe,
                 "bars": [],
                 "barCount": 0,
                 "error": "No data available",
-                **(({"requestId": request_id}) if request_id else {}),
+                **({"requestId": request_id} if request_id else {}),
             }
 
         @self.app.get("/api/chart/timeframes")
@@ -455,7 +473,7 @@ class ChartDataBFF:
             # Subscribe this client to real-time bar updates for a ticker+timeframe
             ticker = (payload.get("ticker") or "").upper()
             tf = payload.get("timeframe", "")
-            builder_tf = self._TF_TO_BUILDER.get(tf, tf)
+            builder_tf = self._TF_TO_CH.get(tf, tf)
             if ticker and builder_tf in self.BARS_BUILDER_TIMEFRAMES:
                 key = f"{ticker}:{builder_tf}"
                 self._bar_subscriptions.setdefault(key, set()).add(client_id)
@@ -464,7 +482,7 @@ class ChartDataBFF:
         elif msg_type == "unsubscribe_bars":
             ticker = (payload.get("ticker") or "").upper()
             tf = payload.get("timeframe", "")
-            builder_tf = self._TF_TO_BUILDER.get(tf, tf)
+            builder_tf = self._TF_TO_CH.get(tf, tf)
             key = f"{ticker}:{builder_tf}"
             subs = self._bar_subscriptions.get(key)
             if subs:
@@ -476,6 +494,96 @@ class ChartDataBFF:
     # ════════════════════════════════════════════════════════════════════════
     # ClickHouse bar query
     # ════════════════════════════════════════════════════════════════════════
+
+    def _append_partial_bar(
+        self,
+        result: Dict,
+        ticker: str,
+        builder_tf: str,
+    ) -> None:
+        """Append pending (unflushed) + in-progress bars from BarsBuilder.
+
+        The bars_builder keeps completed bars in ``_pending_bars`` for
+        up to ~50 ms before flushing them to ClickHouse.  If a REST
+        request lands in that window, ClickHouse won't have them yet.
+        We also append the current partial (in-progress) bar so the
+        frontend seeds ``currentBarRef`` with correct OHLCV.
+
+        This guarantees zero gaps between historical bars and the
+        real-time trade-tick stream.
+        """
+        if not self._bars_builder:
+            return
+
+        bars = result.get("bars", [])
+        last_time = bars[-1]["time"] if bars else 0
+
+        try:
+            # 1. Insert any completed bars not yet flushed to ClickHouse
+            pending = self._bars_builder.get_pending_bars(ticker, builder_tf)
+            for pbar in pending:
+                pbar_time = pbar["bar_start"] // 1000  # ms → seconds
+                if pbar_time > last_time:
+                    bars.append(
+                        {
+                            "time": pbar_time,
+                            "open": pbar["open"],
+                            "high": pbar["high"],
+                            "low": pbar["low"],
+                            "close": pbar["close"],
+                            "volume": pbar["volume"],
+                        }
+                    )
+                    last_time = pbar_time
+                elif pbar_time == last_time:
+                    # Pending bar is more recent than ClickHouse copy
+                    bars[-1] = {
+                        "time": pbar_time,
+                        "open": pbar["open"],
+                        "high": pbar["high"],
+                        "low": pbar["low"],
+                        "close": pbar["close"],
+                        "volume": pbar["volume"],
+                    }
+
+            # 2. Append the current in-progress (partial) bar
+            partial = self._bars_builder.get_partial_bar(ticker, builder_tf)
+            if partial is not None:
+                partial_time = partial["bar_start"] // 1000
+                if partial_time > last_time:
+                    bars.append(
+                        {
+                            "time": partial_time,
+                            "open": partial["open"],
+                            "high": partial["high"],
+                            "low": partial["low"],
+                            "close": partial["close"],
+                            "volume": partial["volume"],
+                        }
+                    )
+                elif partial_time == last_time:
+                    # Update in place — partial bar has the most recent data
+                    bars[-1] = {
+                        "time": partial_time,
+                        "open": partial["open"],
+                        "high": partial["high"],
+                        "low": partial["low"],
+                        "close": partial["close"],
+                        "volume": partial["volume"],
+                    }
+
+            result["bars"] = bars
+            result["barCount"] = len(bars)
+
+            logger.debug(
+                f"Appended {len(pending)} pending + "
+                f"{'1 partial' if partial else '0 partial'} bar(s) "
+                f"for {ticker}/{builder_tf}"
+            )
+        except Exception as e:
+            logger.debug(
+                f"Could not get pending/partial bars for {ticker}/{builder_tf}: {e}"
+            )
 
     def _query_bars_clickhouse(
         self,
@@ -511,8 +619,10 @@ class ChartDataBFF:
                 days_back = 5
             elif dur <= 14400:  # 1h, 4h
                 days_back = 30
-            else:  # 1d, 1w
+            elif dur <= 86400:  # 1d
                 days_back = 365
+            else:  # 1w, 1M
+                days_back = 1825
             start_dt = end_dt - timedelta(days=days_back)
 
         start_ms = int(
@@ -524,6 +634,8 @@ class ChartDataBFF:
             ).timestamp()
             * 1000
         )
+
+        logger.debug(f"ClickHouse query start:{start_ms}, end:{end_ms}")
 
         try:
             query = """
@@ -617,8 +729,10 @@ class ChartDataBFF:
                 days_back = 5
             elif dur <= 14400:
                 days_back = 30
-            else:
+            elif dur <= 86400:
                 days_back = 365
+            else:
+                days_back = 1825
             start_dt = end_dt - timedelta(days=days_back)
 
         requested_start = int(

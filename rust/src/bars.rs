@@ -492,6 +492,72 @@ impl BarBuilder {
         Ok(completed)
     }
 
+    /// Bulk-ingest trades for a single ticker. Returns all completed bars.
+    ///
+    /// Much faster than calling `ingest_trade()` N times from Python because
+    /// the FFI boundary is crossed only once.  Trades are processed in pure
+    /// Rust with no per-trade GIL interaction — Python dicts are built only
+    /// for the completed bars at the end.
+    ///
+    /// Arguments:
+    ///   ticker:  Ticker symbol (e.g. "AAPL")
+    ///   trades:  List of `(timestamp_ms, price, size)` tuples, should be
+    ///            sorted ascending by timestamp for correct bar alignment.
+    ///
+    /// Returns:
+    ///   List of completed bar dicts (may be empty).
+    fn ingest_trades_batch(
+        &mut self,
+        py: Python<'_>,
+        ticker: &str,
+        trades: Vec<(i64, f64, f64)>,
+    ) -> PyResult<Vec<Py<PyAny>>> {
+        // Accumulate CompletedBars in Rust, convert to Python at the end.
+        let mut completed_bars: Vec<CompletedBar> = Vec::new();
+
+        let ticker_bars = self
+            .tickers
+            .entry(ticker.to_string())
+            .or_insert_with(TickerBars::new);
+
+        for (timestamp_ms, price, size) in trades {
+            let session = SessionCalendar::classify(timestamp_ms);
+            if session == Session::Closed {
+                continue;
+            }
+
+            for &tf in &self.timeframes {
+                let bar_start_ts = SessionCalendar::bar_start(timestamp_ms, tf);
+                let bar_end_ts = SessionCalendar::bar_end(bar_start_ts, tf);
+
+                match ticker_bars.bars.get_mut(&tf) {
+                    Some(bar) => {
+                        if timestamp_ms >= bar.bar_end {
+                            completed_bars.push(bar.to_completed(ticker, tf));
+                            *bar = BarState::new(price, size, bar_start_ts, bar_end_ts, session);
+                        } else {
+                            bar.update(price, size);
+                        }
+                    }
+                    None => {
+                        ticker_bars.bars.insert(
+                            tf,
+                            BarState::new(price, size, bar_start_ts, bar_end_ts, session),
+                        );
+                    }
+                }
+            }
+        }
+
+        // Convert to Python dicts only once at the end
+        let mut result = Vec::with_capacity(completed_bars.len());
+        for cb in completed_bars {
+            result.push(cb.to_py_dict(py)?);
+        }
+
+        Ok(result)
+    }
+
     /// Get the current (partial) bar for a ticker+timeframe.
     ///
     /// Returns a dict with OHLCV fields, or None if no bar is in progress.

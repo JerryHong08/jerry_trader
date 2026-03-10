@@ -332,10 +332,11 @@ class CustomBarsFetcher:
         return data
 
 
-def fetch_polygon_trades(symbol: str) -> List[Tuple[int, float]]:
+def fetch_polygon_trades(symbol: str) -> List[Tuple[int, float, int]]:
     """Paginate Polygon /v3/trades/{symbol} from now back to 4 AM ET.
 
-    Returns list of (ts_ms, price) tuples, sorted ascending by ts.
+    Returns list of (ts_ms, price, size) tuples, sorted ascending by ts.
+    Timestamps are  from Polygon (UTC epoch ms).
     """
     # Compute cutoff: today 4:00 AM ET
     now_et = datetime.now(ZoneInfo("America/New_York"))
@@ -370,9 +371,10 @@ def fetch_polygon_trades(symbol: str) -> List[Tuple[int, float]]:
         for trade in results:
             sip_ts_ns = trade.get("sip_timestamp", 0)
             price = trade.get("price", 0.0)
+            size = trade.get("size", 0)
             ts_ms = sip_ts_ns // 1_000_000  # ns → ms
             if price > 0:
-                all_trades.append((ts_ms, price))
+                all_trades.append((ts_ms, price, size))
 
         # Check if we've reached data before cutoff
         oldest_ns = results[-1].get("sip_timestamp", 0)

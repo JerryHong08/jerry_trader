@@ -170,8 +170,7 @@ mainly focus on basic modules development and strcuture buidling.
 
 - ✅ add frontend request_id to prevent race conditions.
 - ✅ frontend charts seperated.
-- [ ] deep review how current bar_buidler builds the bars in different senarios.
-  - [ ] add delay for fetch the back fill bars only after the websocket subcription/bar buidler started a while
+- ✅ deep review how current bar_buidler builds the bars in different senarios. 10s bootstrap done.
 - [ ] Downstream consumers + InfluxDB→ClickHouse migration
 - [ ] FactorEngine consumes batched bars/data (not raw ticks)
 - [ ] Snapshot data: InfluxDB → ClickHouse
@@ -212,6 +211,7 @@ ochesration:
 
 frontend:
 
+- [ ] simple indicators visualization
 - [ ] visualization of factors in chart module.
 - [ ] abstract all the search box into one.
 

@@ -555,3 +555,132 @@ pub async fn load_multi_symbol_data(
 
     Ok(result)
 }
+
+// ── Standalone trade loader (for bootstrap) ─────────────────────────
+
+/// Load trades from parquet for a single symbol/date synchronously.
+///
+/// Returns `Vec<(ts_ms, price, size)>` sorted ascending by timestamp.
+/// Tries partitioned file first, falls back to monolithic.
+///
+/// `end_ts_ms` — if > 0, only trades with `participant_timestamp < end_ts_ms`
+/// (in milliseconds) are returned.  The filter is pushed down into the
+/// Polars scan as `participant_timestamp < end_ts_ns` for efficiency.
+///
+/// This is a simpler, non-async alternative to `load_symbol_data`
+/// designed for the 10s bootstrap path which runs on a Python thread.
+pub fn load_trades_from_parquet_sync(
+    lake_data_dir: &str,
+    symbol: &str,
+    date_yyyymmdd: &str,
+    end_ts_ms: i64,
+) -> Result<Vec<(i64, f64, i64)>> {
+    let year = &date_yyyymmdd[0..4];
+    let month = &date_yyyymmdd[4..6];
+    let day = &date_yyyymmdd[6..8];
+    let date_iso = format!("{}-{}-{}", year, month, day);
+
+    let base = std::path::Path::new(lake_data_dir).join("us_stocks_sip");
+
+    // Partitioned path: .../trades_v1_partitioned/{symbol}/{YYYY-MM-DD}.parquet
+    let partitioned_path = base
+        .join("trades_v1_partitioned")
+        .join(symbol)
+        .join(format!("{}.parquet", date_iso));
+
+    // Monolithic path: .../trades_v1/{YYYY}/{MM}/{YYYY-MM-DD}.parquet
+    let monolithic_path = base
+        .join("trades_v1")
+        .join(year)
+        .join(month)
+        .join(format!("{}.parquet", date_iso));
+
+    let load_start = Instant::now();
+
+    let (file_path, needs_ticker_filter) = if partitioned_path.exists() {
+        info!(
+            "load_trades_from_parquet_sync: {} partitioned {}",
+            symbol,
+            partitioned_path.display()
+        );
+        (partitioned_path, false)
+    } else if monolithic_path.exists() {
+        info!(
+            "load_trades_from_parquet_sync: {} monolithic {}",
+            symbol,
+            monolithic_path.display()
+        );
+        (monolithic_path, true)
+    } else {
+        anyhow::bail!(
+            "No parquet found for {} on {} (tried {} and {})",
+            symbol,
+            date_yyyymmdd,
+            partitioned_path.display(),
+            monolithic_path.display()
+        );
+    };
+
+    let mut lazy = LazyFrame::scan_parquet(&file_path, Default::default())
+        .context("Failed to scan parquet")?;
+
+    if needs_ticker_filter {
+        lazy = lazy.filter(col("ticker").eq(lit(symbol)));
+    }
+
+    // Apply upper-bound time filter (predicate pushdown)
+    if end_ts_ms > 0 {
+        let end_ts_ns = end_ts_ms * 1_000_000i64;
+        lazy = lazy.filter(
+            col("participant_timestamp")
+                .cast(polars::datatypes::DataType::Int64)
+                .lt(lit(end_ts_ns)),
+        );
+    }
+
+    let df = lazy
+        .select(&[
+            col("participant_timestamp").cast(polars::datatypes::DataType::Int64),
+            col("price").cast(polars::datatypes::DataType::Float64),
+            col("size").cast(polars::datatypes::DataType::Int64),
+        ])
+        .sort(
+            ["participant_timestamp"],
+            SortMultipleOptions::default(),
+        )
+        .collect()
+        .context("Failed to collect trades dataframe")?;
+
+    let n = df.height();
+    if n == 0 {
+        info!(
+            "load_trades_from_parquet_sync: {} no trades found in {:.1}ms",
+            symbol,
+            load_start.elapsed().as_secs_f64() * 1000.0
+        );
+        return Ok(Vec::new());
+    }
+
+    let timestamps = df.column("participant_timestamp")?.i64()?;
+    let prices = df.column("price")?.f64()?;
+    let sizes = df.column("size")?.i64()?;
+
+    let mut trades = Vec::with_capacity(n);
+    for i in 0..n {
+        if let (Some(ts_ns), Some(price), Some(size)) =
+            (timestamps.get(i), prices.get(i), sizes.get(i))
+        {
+            // Convert nanoseconds → milliseconds
+            trades.push((ts_ns / 1_000_000, price, size));
+        }
+    }
+
+    info!(
+        "load_trades_from_parquet_sync: {} loaded {} trades in {:.1}ms",
+        symbol,
+        trades.len(),
+        load_start.elapsed().as_secs_f64() * 1000.0
+    );
+
+    Ok(trades)
+}

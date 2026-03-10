@@ -41,7 +41,11 @@ import clickhouse_connect
 import redis
 
 from jerry_trader import clock as clock_mod
-from jerry_trader._rust import BarBuilder
+from jerry_trader._rust import BarBuilder, load_trades_from_parquet
+from jerry_trader.config import lake_data_dir
+from jerry_trader.DataSupply.bootstrapdataSupply.polygon_fetcher import (
+    fetch_polygon_trades,
+)
 from jerry_trader.DataSupply.tickDataSupply.unified_tick_manager import (
     UnifiedTickManager,
 )
@@ -169,6 +173,16 @@ class BarsBuilderService:
         self._running = True
         self._shutdown = False
         self._stats = {"ticks_ingested": 0, "bars_completed": 0, "bars_written": 0}
+
+        # ── 10s bootstrap / WS merge state ───────────────────────────
+        # first_ws_tick_ts:   epoch ms of the very first WS tick per ticker
+        # meeting_bar_start:  bar_start of the 10s bar that straddles the
+        #                     REST→WS boundary (REST has prefix, WS has suffix)
+        # ws_meeting_bars:    completed WS meeting bar, held for later merge
+        self._first_ws_tick_ts: Dict[str, int] = {}
+        self._meeting_bar_start: Dict[str, int] = {}
+        self._ws_meeting_bars: Dict[str, dict] = {}
+        self._bootstrap_done: set = set()  # tickers that finished bootstrap
 
     # ════════════════════════════════════════════════════════════════════
     # Lifecycle
@@ -328,6 +342,18 @@ class BarsBuilderService:
         self.stream_consumers[stream_key] = future
         logger.debug(f"Created consumer for {stream_key}")
 
+        # Check if 10s bars need bootstrap (single-date only)
+        # Live mode: fetch from Polygon REST API
+        # Replay mode: TODO - fetch from local parquet files
+        if "10s" in self.timeframes:
+            if not self._has_10s_bars_today(symbol):
+                Thread(
+                    target=self._bootstrap_10s_bars,
+                    args=(symbol,),
+                    daemon=True,
+                    name=f"bootstrap-10s-{symbol}",
+                ).start()
+
     def _remove_ticker(self, symbol: str) -> None:
         if symbol not in self.active_tickers:
             return
@@ -346,6 +372,272 @@ class BarsBuilderService:
             self._stats["bars_completed"] += len(completed)
 
         self.active_tickers.discard(symbol)
+
+    # ════════════════════════════════════════════════════════════════════
+    # 10s Bootstrap (Polygon REST → BarBuilder → ClickHouse)
+    # ════════════════════════════════════════════════════════════════════
+
+    def _has_10s_bars_today(self, symbol: str) -> bool:
+        """Check if any 10s bars exist in ClickHouse for this ticker on this replay date.
+
+        Returns True if bars exist (skip bootstrap), False if empty (need bootstrap).
+        Only checks current replay date — no cross-date bootstrap for 10s.
+        """
+        from datetime import datetime, timedelta
+
+        # Get date boundaries for current replay date
+        start_dt = datetime.strptime(self.db_date, "%Y%m%d")
+        end_dt = start_dt + timedelta(days=1)
+        start_ms = int(start_dt.timestamp() * 1000)
+        end_ms = int(end_dt.timestamp() * 1000)
+
+        try:
+            query = """
+                SELECT COUNT(*) as cnt
+                FROM ohlcv_bars
+                WHERE ticker = {ticker:String}
+                  AND timeframe = '10s'
+                  AND bar_start >= {start_ms:Int64}
+                  AND bar_start < {end_ms:Int64}
+            """
+            result = self.ch_client.query(
+                query,
+                parameters={
+                    "ticker": symbol,
+                    "start_ms": start_ms,
+                    "end_ms": end_ms,
+                },
+            )
+            count = result.result_rows[0][0] if result.result_rows else 0
+            logger.info(
+                f"_has_10s_bars_today - {symbol}: {count} bars on {self.db_date}"
+            )
+            return count > 0
+        except Exception as e:
+            logger.error(f"_has_10s_bars_today - {symbol}: {e}")
+            return False  # On error, assume no bars → trigger bootstrap
+
+    def _load_trades_from_parquet(self, symbol: str) -> List[tuple]:
+        """Load trades from local parquet via Rust.
+
+        Delegates to jerry_trader._rust.load_trades_from_parquet which
+        handles partitioned/monolithic fallback, ticker filtering, ns→ms
+        conversion, and sorting — all in Rust/Polars.
+
+        Uses the replay clock's current time as the upper bound so only
+        trades up to "now" are loaded (predicate pushdown at scan time).
+
+        Returns List[(ts_ms, price, size)] sorted ascending by timestamp.
+        """
+        end_ts_ms = clock_mod.now_ms()
+        trades = load_trades_from_parquet(
+            lake_data_dir, symbol, self.db_date, end_ts_ms
+        )
+        logger.info(
+            f"_load_trades_from_parquet - {symbol}: "
+            f"loaded {len(trades)} trades from parquet (via Rust), "
+            f"end_ts={self._ms_to_et(end_ts_ms)}"
+        )
+        return trades
+
+    def _bootstrap_10s_bars(self, symbol: str) -> None:
+        """Fetch historical trades and merge with WS at the meeting bar.
+
+        Uses a dedicated BarBuilder(["10s"]) to avoid thread-race with the
+        real-time WebSocket path.
+
+        Only feeds trades where ts < first_ws_tick_ts to avoid
+        double-counting.  The "meeting bar" (the 10s window straddling
+        the boundary) is merged from both sources:
+          historical prefix  [bar_start … first_ws_ts)
+          WS         suffix  [first_ws_ts … bar_end)
+        producing a single complete bar written to ClickHouse.
+
+        Live mode:   Polygon REST API (fetch_polygon_trades)
+        Replay mode: local parquet files (partitioned or monolithic)
+        """
+        logger.info(f"_bootstrap_10s_bars - {symbol}: starting ({self.run_mode} mode)")
+
+        try:
+            # Dispatch trade loading based on mode
+            if self.run_mode == "live":
+                raw_trades = fetch_polygon_trades(symbol)
+            else:
+                raw_trades = self._load_trades_from_parquet(symbol)
+
+            if not raw_trades:
+                logger.info(
+                    f"_bootstrap_10s_bars - {symbol}: no historical trades found"
+                )
+                return
+
+            # Normalise to List[(ts_ms, price, size)]
+            trades: List[tuple] = raw_trades
+
+            first_trade = trades[0]
+            last_trade = trades[-1]
+            logger.info(
+                f"_bootstrap_10s_bars - {symbol}: fetched {len(trades)} trades, "
+                f"range [{self._ms_to_et(first_trade[0])} → {self._ms_to_et(last_trade[0])}]"
+            )
+
+            # Filter: only keep REST trades BEFORE first WS tick
+            # to avoid double-counting in the overlap zone.
+            first_ws_ts = self._first_ws_tick_ts.get(symbol)
+            if first_ws_ts:
+                original_len = len(trades)
+                trades = [(t, p, s) for t, p, s in trades if t < first_ws_ts]
+                dropped = original_len - len(trades)
+                if dropped:
+                    logger.info(
+                        f"_bootstrap_10s_bars - {symbol}: filtered {dropped} trades "
+                        f"after first_ws_ts={self._ms_to_et(first_ws_ts)}"
+                    )
+
+            if not trades:
+                logger.info(
+                    f"_bootstrap_10s_bars - {symbol}: no trades before WS start"
+                )
+                return
+
+            # Build 10s bars with separate BarBuilder using bulk batch API
+            # (single FFI call instead of 441K individual calls — ~10-20x faster)
+            bootstrap_builder = BarBuilder(["10s"])
+            bootstrap_bars = bootstrap_builder.ingest_trades_batch(symbol, trades)
+
+            # Flush the last open bar (partial meeting bar from REST prefix)
+            remaining = bootstrap_builder.flush()
+            if remaining:
+                bootstrap_bars.extend(remaining)
+
+            # Separate meeting bar from clean bars
+            meeting_start = self._meeting_bar_start.get(symbol)
+            clean_bars: List[Dict] = []
+            rest_meeting_bar: Optional[Dict] = None
+
+            for bar in bootstrap_bars:
+                if meeting_start is not None and bar["bar_start"] == meeting_start:
+                    rest_meeting_bar = bar
+                else:
+                    clean_bars.append(bar)
+
+            # Write clean bars (no overlap with WS)
+            self._pending_bars.extend(clean_bars)
+
+            # Merge meeting bar: REST prefix + WS suffix
+            if rest_meeting_bar:
+                ws_bar = self._ws_meeting_bars.get(symbol)
+                if ws_bar:
+                    merged = self._merge_10s_bars(rest_meeting_bar, ws_bar)
+                    self._pending_bars.append(merged)
+                    logger.info(
+                        f"_bootstrap_10s_bars - {symbol}: merged meeting bar "
+                        f"bar_start={self._ms_to_et(merged['bar_start'])}, "
+                        f"REST trades={rest_meeting_bar['trade_count']}, "
+                        f"WS trades={ws_bar['trade_count']}, "
+                        f"merged trades={merged['trade_count']}"
+                    )
+                else:
+                    # WS meeting bar not available yet — write REST partial
+                    # (ClickHouse ReplacingMergeTree will keep whichever has
+                    #  later inserted_at; if WS bar was already flushed,
+                    #  REST partial overwrites it — acceptable since REST
+                    #  has the prefix WS was missing)
+                    self._pending_bars.append(rest_meeting_bar)
+                    logger.warning(
+                        f"_bootstrap_10s_bars - {symbol}: WS meeting bar not captured, "
+                        f"writing REST partial only"
+                    )
+
+            total = len(clean_bars) + (1 if rest_meeting_bar else 0)
+            logger.info(
+                f"_bootstrap_10s_bars - {symbol}: completed, "
+                f"generated {total} 10s bars (clean={len(clean_bars)}, "
+                f"meeting={'merged' if rest_meeting_bar and self._ws_meeting_bars.get(symbol) else 'partial' if rest_meeting_bar else 'none'}), "
+                f"last_trade={self._ms_to_et(trades[-1][0])}"
+            )
+
+            # Clean up merge state — no longer needed
+            self._meeting_bar_start.pop(symbol, None)
+            self._ws_meeting_bars.pop(symbol, None)
+            self._bootstrap_done.add(symbol)
+
+        except Exception as e:
+            logger.error(f"_bootstrap_10s_bars - {symbol}: {e}", exc_info=True)
+
+    def _capture_meeting_bar(self, bar: dict) -> None:
+        """Hold a copy of the WS meeting bar for later merge with bootstrap.
+
+        Called for every completed bar (from ingest_trade or check_expired).
+        Only captures the first 10s bar matching the meeting bar start.
+        """
+        ticker = bar.get("ticker", "")
+        if (
+            bar.get("timeframe") == "10s"
+            and ticker in self._meeting_bar_start
+            and bar["bar_start"] == self._meeting_bar_start[ticker]
+            and ticker not in self._ws_meeting_bars
+        ):
+            self._ws_meeting_bars[ticker] = dict(bar)  # defensive copy
+            logger.info(
+                f"MEETING_BAR_WS - {ticker}: captured WS meeting bar "
+                f"bar_start={self._ms_to_et(bar['bar_start'])}, "
+                f"trades={bar['trade_count']}"
+            )
+
+    @staticmethod
+    def _merge_10s_bars(rest_bar: dict, ws_bar: dict) -> dict:
+        """Merge REST-prefix and WS-suffix partial bars into one complete bar.
+
+        REST bar has trades [bar_start … first_ws_ts).
+        WS  bar has trades [first_ws_ts … bar_end).
+        No double-counting because trades were filtered at first_ws_ts.
+
+        Merge rules:
+          open  = REST (has earlier trades)
+          close = WS   (has later trades)
+          high  = max(REST, WS)
+          low   = min(REST, WS)
+          volume      = REST + WS
+          trade_count = REST + WS
+          vwap  = volume-weighted average
+        """
+        total_vol = rest_bar["volume"] + ws_bar["volume"]
+        vwap = (
+            (
+                (
+                    rest_bar["vwap"] * rest_bar["volume"]
+                    + ws_bar["vwap"] * ws_bar["volume"]
+                )
+                / total_vol
+            )
+            if total_vol > 0
+            else 0.0
+        )
+
+        return {
+            "ticker": rest_bar["ticker"],
+            "timeframe": "10s",
+            "bar_start": rest_bar["bar_start"],
+            "bar_end": rest_bar["bar_end"],
+            "open": rest_bar["open"],
+            "close": ws_bar["close"],
+            "high": max(rest_bar["high"], ws_bar["high"]),
+            "low": min(rest_bar["low"], ws_bar["low"]),
+            "volume": total_vol,
+            "trade_count": rest_bar["trade_count"] + ws_bar["trade_count"],
+            "vwap": vwap,
+            "session": rest_bar["session"],
+        }
+
+    @staticmethod
+    def _ms_to_et(ts_ms: int) -> str:
+        """Convert epoch ms to ET time string for logging."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        dt = datetime.fromtimestamp(ts_ms / 1000, tz=ZoneInfo("America/New_York"))
+        return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] + " ET"
 
     # ════════════════════════════════════════════════════════════════════
     # Tick consumption (async, runs on ws_loop)
@@ -399,19 +691,42 @@ class BarsBuilderService:
         if ts_ms <= 0:
             return
 
-        # Feed to Rust BarBuilder
+        # Log first WebSocket tick — record timestamp for bootstrap merge
+        if symbol not in self._first_ws_tick_ts:
+            self._first_ws_tick_ts[symbol] = ts_ms
+            logger.info(
+                f"FIRST_WS_TICK - {symbol}: ts={self._ms_to_et(ts_ms)}, "
+                f"price={price}, size={size}"
+            )
+
+        # Feed to Rust BarBuilder (uses UTC epoch ms — same as clock_mod.now_ms())
         completed = self.bar_builder.ingest_trade(
             symbol, float(price), float(size), ts_ms
         )
         self._stats["ticks_ingested"] += 1
 
+        # Identify meeting bar start from the first WS tick for this ticker
+        # Skip if bootstrap already completed (avoid spurious re-detection)
+        if (
+            symbol not in self._meeting_bar_start
+            and symbol not in self._bootstrap_done
+            and "10s" in self.timeframes
+        ):
+            partial = self.bar_builder.get_current_bar(symbol, "10s")
+            if partial:
+                self._meeting_bar_start[symbol] = partial["bar_start"]
+                logger.info(
+                    f"MEETING_BAR - {symbol}: bar_start={self._ms_to_et(partial['bar_start'])}"
+                )
+
         if completed:
             self._stats["bars_completed"] += len(completed)
-            self._pending_bars.extend(completed)
-
-            # Publish completed bars to Redis for real-time WebSocket delivery
             for bar in completed:
+                self._pending_bars.append(bar)
                 self._publish_bar(bar)
+
+                # Hold a copy of the WS meeting bar for merge with bootstrap
+                self._capture_meeting_bar(bar)
 
     # ════════════════════════════════════════════════════════════════════
     # Redis pub/sub: broadcast completed bars
@@ -459,9 +774,10 @@ class BarsBuilderService:
             expired = self.bar_builder.check_expired(now_ms)
             if expired:
                 self._stats["bars_completed"] += len(expired)
-                self._pending_bars.extend(expired)
                 for bar in expired:
+                    self._pending_bars.append(bar)
                     self._publish_bar(bar)
+                    self._capture_meeting_bar(bar)
                 logger.debug(
                     f"check_expired closed {len(expired)} bars " f"(now_ms={now_ms})"
                 )

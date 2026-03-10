@@ -125,6 +125,8 @@ class ConnectionManager:
                 await self.active_connections[client_id].send_json(message)
             except Exception as e:
                 logger.error(f"Error sending to {client_id}: {e}")
+                # Remove failed connection to prevent repeated errors
+                self.disconnect(client_id)
 
     async def broadcast_to_subscribers(self, message: dict, domain: str):
         """Send message to all clients subscribed to a domain."""

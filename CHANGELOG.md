@@ -1,3 +1,29 @@
+## 1.2.0 (2026-03-11)
+
+### Feat
+
+- **bars_builder**: 10s bar bootstrap — on subscription, checks ClickHouse for existing 10s bars; if empty, fetches historical trades (REST in live, Parquet in replay) and builds bars with a dedicated `BarBuilder(["10s"])` to avoid thread-race with the real-time WS path
+- **bars_builder**: meeting-bar merge — records first WS tick timestamp, filters bootstrap trades at boundary, merges the straddling 10s bar from both REST/Parquet prefix and WS suffix (open=REST, close=WS, high/low=max/min, volume/trades=sum, vwap=weighted)
+- **rust/bars**: `ingest_trades_batch(ticker, trades)` — bulk FFI method processes all trades in a single Rust call, accumulates `CompletedBar` structs internally, converts to Python dicts once at the end; **4.2× faster** than per-trade calls (0.039s vs 0.164s for 441K trades)
+- **rust/replayer**: `load_trades_from_parquet(lake_data_dir, symbol, date, end_ts_ms)` — standalone synchronous Parquet trade loader for bootstrap; tries partitioned file first, falls back to monolithic with ticker filter; `end_ts_ms` predicate pushdown filters at scan time (replay clock boundary)
+- **news_room**: news room agent BFF endpoint and frontend module
+- **data_pipeline**: `tickdata_extract` script for per-ticker partitioned Parquet generation from monolithic files
+
+### Fix
+
+- **bars_builder**: thread-safety — bootstrap uses separate `BarBuilder(["10s"])` instance; WS ticks no longer jump shared BarBuilder state forward, preventing all-trades-in-one-bar mega-bar bug
+- **bars_builder**: spurious `MEETING_BAR` log after bootstrap completes — added `_bootstrap_done` set to skip meeting-bar re-detection
+- **bars_builder**: concurrent ClickHouse session error — removed direct `_flush_to_clickhouse()` from bootstrap thread; flush loop handles all persistence
+- **chart**: ticker chart switch price axis autoscale
+- **chart**: replay mode 4h timespan cutoff in local data loader
+- **news_processor**: output log format changed to JSON for downstream consumption
+
+### Perf
+
+- **rust/bars**: `ingest_trades_batch` single-FFI bulk ingestion — 4.2× speedup over per-trade `ingest_trade` calls (441K trades: 39ms vs 164ms)
+- **rust/replayer**: per-ticker partitioned Parquet loading ~1s per ticker (was full-file scan + filter)
+- **rust/replayer**: `load_trades_from_parquet` with `end_ts_ms` predicate pushdown — avoids materializing future trades in replay mode
+
 ## 1.1.0 (2026-03-09)
 
 ### Feat

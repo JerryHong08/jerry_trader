@@ -18,6 +18,23 @@ def price_accel(
     """
     ...
 
+def load_trades_from_parquet(
+    lake_data_dir: str,
+    symbol: str,
+    date_yyyymmdd: str,
+    end_ts_ms: int = 0,
+) -> list[tuple[int, float, int]]:
+    """Load trades from parquet for a single symbol/date.
+
+    Tries partitioned file first, falls back to monolithic.
+    Returns List[(ts_ms, price, size)] sorted ascending.
+
+    If end_ts_ms > 0, only trades with timestamp < end_ts_ms are returned
+    (predicate pushdown at scan time).
+    Raises RuntimeError if no parquet file is found.
+    """
+    ...
+
 class BarBuilder:
     """High-performance tick-to-OHLCV bar builder.
 
@@ -54,6 +71,26 @@ class BarBuilder:
             List of completed bar dicts with keys:
             ticker, timeframe, open, high, low, close, volume,
             trade_count, vwap, bar_start, bar_end, session.
+        """
+        ...
+
+    def ingest_trades_batch(
+        self,
+        ticker: str,
+        trades: list[tuple[int, float, float]],
+    ) -> list[dict]:
+        """Bulk-ingest trades for a single ticker. Returns all completed bars.
+
+        Much faster than calling ingest_trade() N times because the FFI
+        boundary is crossed only once.
+
+        Args:
+            ticker: Symbol (e.g. "AAPL")
+            trades: List of (timestamp_ms, price, size) tuples, sorted
+                    ascending by timestamp.
+
+        Returns:
+            List of completed bar dicts.
         """
         ...
 

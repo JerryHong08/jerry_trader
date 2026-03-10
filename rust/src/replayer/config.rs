@@ -35,4 +35,20 @@ impl ReplayConfig {
             .join(month)
             .join(format!("{}.parquet", date_iso))
     }
+
+    /// Build the partitioned Parquet path for a specific ticker.
+    ///
+    /// Pattern: `{lake_data_dir}/us_stocks_sip/{subdir}_partitioned/{ticker}/{YYYY-MM-DD}.parquet`
+    pub fn parquet_path_partitioned(&self, subdir: &str, ticker: &str) -> PathBuf {
+        let year = &self.replay_date[0..4];
+        let month = &self.replay_date[4..6];
+        let day = &self.replay_date[6..8];
+        let date_iso = format!("{}-{}-{}", year, month, day);
+
+        Path::new(&self.lake_data_dir)
+            .join("us_stocks_sip")
+            .join(format!("{}_partitioned", subdir))
+            .join(ticker)
+            .join(format!("{}.parquet", date_iso))
+    }
 }

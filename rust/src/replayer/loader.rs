@@ -34,20 +34,35 @@ pub async fn load_symbol_data(
     data_type: DataType,
 ) -> Result<PreloadedData> {
     let subdir = data_type.parquet_subdir();
-    let file_path = config.parquet_path(subdir);
 
-    anyhow::ensure!(
-        file_path.exists(),
-        "Data file not found: {}",
-        file_path.display()
-    );
+    // Try partitioned file first (per-ticker, much faster)
+    let partitioned_path = config.parquet_path_partitioned(subdir, symbol);
+    let (file_path, use_ticker_filter) = if partitioned_path.exists() {
+        info!(
+            "Loading partitioned parquet for {} ({:?}): {}",
+            symbol,
+            data_type,
+            partitioned_path.display()
+        );
+        (partitioned_path, false)  // No ticker filter needed
+    } else {
+        // Fall back to monolithic file
+        let monolithic_path = config.parquet_path(subdir);
+        anyhow::ensure!(
+            monolithic_path.exists(),
+            "Data file not found (tried both partitioned and monolithic): {} and {}",
+            partitioned_path.display(),
+            monolithic_path.display()
+        );
+        info!(
+            "Loading from monolithic parquet for {} ({:?}): {}",
+            symbol,
+            data_type,
+            monolithic_path.display()
+        );
+        (monolithic_path, true)  // Need ticker filter
+    };
 
-    info!(
-        "Loading parquet for {} ({:?}): {}",
-        symbol,
-        data_type,
-        file_path.display()
-    );
     let load_start = Instant::now();
     let start_ts = config.start_timestamp_ns;
 
@@ -55,12 +70,18 @@ pub async fn load_symbol_data(
         DataType::Quotes => {
             let fp = file_path.clone();
             let sym = symbol.to_string();
+            let needs_filter = use_ticker_filter;
 
             let df = tokio::task::spawn_blocking(move || -> Result<DataFrame> {
-                LazyFrame::scan_parquet(&fp, Default::default())
-                    .context("Failed to scan parquet")?
-                    .filter(col("ticker").eq(lit(sym.as_str())))
-                    .select(&[
+                let mut lazy = LazyFrame::scan_parquet(&fp, Default::default())
+                    .context("Failed to scan parquet")?;
+
+                // Only filter by ticker if using monolithic file
+                if needs_filter {
+                    lazy = lazy.filter(col("ticker").eq(lit(sym.as_str())));
+                }
+
+                lazy.select(&[
                         col("participant_timestamp")
                             .cast(polars::datatypes::DataType::Int64),
                         col("bid_price").cast(polars::datatypes::DataType::Float64),
@@ -117,12 +138,18 @@ pub async fn load_symbol_data(
         DataType::Trades => {
             let fp = file_path.clone();
             let sym = symbol.to_string();
+            let needs_filter = use_ticker_filter;
 
             let df = tokio::task::spawn_blocking(move || -> Result<DataFrame> {
-                LazyFrame::scan_parquet(&fp, Default::default())
-                    .context("Failed to scan parquet")?
-                    .filter(col("ticker").eq(lit(sym.as_str())))
-                    .select(&[
+                let mut lazy = LazyFrame::scan_parquet(&fp, Default::default())
+                    .context("Failed to scan parquet")?;
+
+                // Only filter by ticker if using monolithic file
+                if needs_filter {
+                    lazy = lazy.filter(col("ticker").eq(lit(sym.as_str())));
+                }
+
+                lazy.select(&[
                         col("participant_timestamp")
                             .cast(polars::datatypes::DataType::Int64),
                         col("price").cast(polars::datatypes::DataType::Float64),
@@ -254,6 +281,35 @@ pub async fn load_multi_symbol_data(
 
     for &dt in data_types {
         let subdir = dt.parquet_subdir();
+
+        // Check if first symbol has partitioned file
+        let first_partitioned = symbols.first()
+            .map(|sym| config.parquet_path_partitioned(subdir, sym))
+            .filter(|p| p.exists());
+
+        if let Some(_) = first_partitioned {
+            // Use partitioned files (load each ticker separately)
+            info!(
+                "Loading {:?} for {} symbols from partitioned files",
+                dt,
+                symbols.len()
+            );
+
+            for symbol in symbols {
+                match load_symbol_data(config, symbol, dt).await {
+                    Ok(data) => {
+                        let cache_key = format!("{}_{:?}", symbol, dt);
+                        result.insert(cache_key, data);
+                    }
+                    Err(e) => {
+                        warn!("Failed to load {} {:?}: {}", symbol, dt, e);
+                    }
+                }
+            }
+            continue;  // Skip batch loading
+        }
+
+        // Fall back to batch loading from monolithic file
         let file_path = config.parquet_path(subdir);
 
         if !file_path.exists() {
@@ -262,7 +318,7 @@ pub async fn load_multi_symbol_data(
         }
 
         info!(
-            "Batch loading {:?} for {} symbols from {}",
+            "Batch loading {:?} for {} symbols from monolithic file: {}",
             dt,
             symbols.len(),
             file_path.display()

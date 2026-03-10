@@ -216,6 +216,20 @@ class NewsProcessor:
     ) -> None:
         """Write a news classification result to JSON log file (thread-safe)."""
         try:
+            # Handle explanation - could be string or dict
+            if isinstance(result.explanation, dict):
+                explanation = result.explanation
+            elif isinstance(result.explanation, str):
+                if result.explanation.startswith("{"):
+                    try:
+                        explanation = json.loads(result.explanation)
+                    except Exception:
+                        explanation = {"raw": result.explanation}
+                else:
+                    explanation = {"raw": result.explanation}
+            else:
+                explanation = {"raw": str(result.explanation)}
+
             entry = {
                 "model": self.active_model,
                 "symbol": symbol,
@@ -224,11 +238,7 @@ class NewsProcessor:
                 "title": article.title,
                 "published_time": str(article.published_time),
                 "current_time": timestamp,
-                "explanation": (
-                    json.loads(result.explanation)
-                    if result.explanation.startswith("{")
-                    else {"raw": result.explanation}
-                ),
+                "explanation": explanation,
                 "url": article.url,
                 "content": article.text[:200] if article.text else "",
                 "sources": article.sources,
@@ -295,14 +305,19 @@ class NewsProcessor:
     ) -> None:
         """Publish news classification result to Redis stream for real-time consumption."""
         try:
-            # Build the detailed explanation object
-            if result.explanation.startswith("{"):
-                try:
-                    explanation = json.loads(result.explanation)
-                except Exception:
+            # Build the detailed explanation object - handle string or dict
+            if isinstance(result.explanation, dict):
+                explanation = result.explanation
+            elif isinstance(result.explanation, str):
+                if result.explanation.startswith("{"):
+                    try:
+                        explanation = json.loads(result.explanation)
+                    except Exception:
+                        explanation = {"raw": result.explanation}
+                else:
                     explanation = {"raw": result.explanation}
             else:
-                explanation = {"raw": result.explanation}
+                explanation = {"raw": str(result.explanation)}
 
             # Prepare stream entry
             stream_data = {
@@ -679,12 +694,6 @@ class NewsProcessor:
                         f"Classification failed for {task.symbol}: {article.title}"
                     )
                     continue
-
-                # TODO: save result to persistent store
-                # Update summary hasNews field
-                # summary_key = f"{self.SUMMARY_KEY_PREFIX}:{symbol}"
-                # self.r.hset(summary_key, "hasNews", "1" if has_news else "0")
-                # self.r.hset(summary_key, "lastUpdated", current_timestamp.isoformat())
 
             self._applied_versions.setdefault(task.symbol, {})["news"] = task.version
 

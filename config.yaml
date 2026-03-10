@@ -114,6 +114,11 @@ machines:
           - fmp
         redis: "redis-b@OLDMAN"
         postgres: "postgres-b@OLDMAN"
+      AgentBFF:
+        enabled: true
+        host: "0.0.0.0"
+        port: 5003
+        redis: "redis-a"  # or "redis-b@MACHINE_B" for remote
 
   oldman:
     limit: "market_open"    # market_open | market_close | null (never stop)

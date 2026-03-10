@@ -34,6 +34,17 @@ console.debug('[WebSocket] Using BFF URL:', BFF_URL_RESOLVED);
 // Convert HTTP URL to WebSocket URL
 const BFF_WS_URL = BFF_URL_RESOLVED.replace(/^http/, 'ws');
 
+// AgentBFF Configuration for news processor results
+const AGENT_BFF_HTTP_URL =
+  typeof import.meta !== 'undefined' && import.meta.env?.VITE_AGENT_BFF_URL
+    ? (import.meta.env.VITE_AGENT_BFF_URL as string)
+    : 'http://localhost:5003';
+
+const AGENT_BFF_URL_RESOLVED = AGENT_BFF_HTTP_URL || 'http://localhost:5003';
+console.debug('[WebSocket] Using AgentBFF URL:', AGENT_BFF_URL_RESOLVED);
+
+const AGENT_BFF_WS_URL = AGENT_BFF_URL_RESOLVED.replace(/^http/, 'ws');
+
 // Generate unique client ID
 const CLIENT_ID = `JerryTrader_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
@@ -372,6 +383,13 @@ export type NewsProcessorResultPayload = {
 
 const newsProcessorResultHandlers = new Set<(result: NewsProcessorResultPayload) => void>();
 
+// AgentBFF WebSocket instance and state
+let agentWsInstance: WebSocket | null = null;
+let agentReconnectAttempts = 0;
+let agentReconnectTimeout: NodeJS.Timeout | null = null;
+const AGENT_MAX_RECONNECT_ATTEMPTS = 10;
+const AGENT_RECONNECT_DELAY = 2000;
+
 export function subscribeNewsUpdates(handler: (payload: NewsUpdatePayload) => void) {
   newsUpdateHandlers.add(handler);
   return () => { newsUpdateHandlers.delete(handler); };
@@ -379,6 +397,8 @@ export function subscribeNewsUpdates(handler: (payload: NewsUpdatePayload) => vo
 
 export function subscribeNewsProcessorResults(handler: (result: NewsProcessorResultPayload) => void) {
   newsProcessorResultHandlers.add(handler);
+  // Initialize AgentBFF WebSocket connection when first subscriber registers
+  getAgentWebSocket();
   return () => { newsProcessorResultHandlers.delete(handler); };
 }
 
@@ -614,30 +634,8 @@ function handleMessage(message: WebSocketMessage) {
       break;
 
     case 'news_processor_result':
-      // News processor classification results for NewsRoom component
-      if (message.symbol) {
-        const result: NewsProcessorResultPayload = {
-          model: message.model || '',
-          symbol: message.symbol || '',
-          is_catalyst: message.is_catalyst || false,
-          classification: message.classification || 'NO',
-          score: message.score || '0/10',
-          title: message.title || '',
-          published_time: message.published_time || '',
-          current_time: message.current_time || '',
-          explanation: message.explanation || {},
-          url: message.url || '',
-          content_preview: message.content_preview || '',
-          sources: message.sources || '[]',
-          source_from: message.source_from || '',
-          timestamp: message.timestamp || '',
-        };
-
-        // Notify all subscribers
-        newsProcessorResultHandlers.forEach((handler) => {
-          handler(result);
-        });
-      }
+      // News processor results now handled by AgentBFF WebSocket (see handleAgentMessage)
+      console.debug('[WebSocket] news_processor_result received on main BFF (expected on AgentBFF)');
       break;
 
     case 'stock_detail':
@@ -1012,6 +1010,104 @@ export function useStockDetail(ticker: string | null): {
 }
 
 /**
+ * Get or create AgentBFF WebSocket connection for news processor results
+ */
+function getAgentWebSocket(): WebSocket | null {
+  if (IS_DEMO) {
+    return null;
+  }
+
+  if (!agentWsInstance || agentWsInstance.readyState === WebSocket.CLOSED) {
+    const wsUrl = `${AGENT_BFF_WS_URL}/ws/${CLIENT_ID}`;
+    console.log('[AgentBFF WebSocket] Connecting to:', wsUrl);
+
+    try {
+      agentWsInstance = new WebSocket(wsUrl);
+    } catch (e) {
+      console.warn('[AgentBFF WebSocket] Failed to connect:', e);
+      return null;
+    }
+
+    agentWsInstance.onopen = () => {
+      console.log('[AgentBFF WebSocket] Connected');
+      agentReconnectAttempts = 0;
+    };
+
+    agentWsInstance.onclose = (event) => {
+      console.log('[AgentBFF WebSocket] Disconnected:', event.code, event.reason);
+      agentWsInstance = null;
+
+      // Auto-reconnect
+      if (agentReconnectAttempts < AGENT_MAX_RECONNECT_ATTEMPTS) {
+        agentReconnectAttempts++;
+        console.log(
+          `[AgentBFF WebSocket] Reconnecting in ${AGENT_RECONNECT_DELAY}ms (attempt ${agentReconnectAttempts}/${AGENT_MAX_RECONNECT_ATTEMPTS})`
+        );
+        agentReconnectTimeout = setTimeout(() => {
+          getAgentWebSocket();
+        }, AGENT_RECONNECT_DELAY * agentReconnectAttempts);
+      }
+    };
+
+    agentWsInstance.onerror = (error) => {
+      console.error('[AgentBFF WebSocket] Connection error:', error);
+    };
+
+    agentWsInstance.onmessage = (event) => {
+      try {
+        const message: WebSocketMessage = JSON.parse(event.data);
+        handleAgentMessage(message);
+      } catch (e) {
+        console.error('[AgentBFF WebSocket] Failed to parse message:', e);
+      }
+    };
+  }
+
+  return agentWsInstance;
+}
+
+/**
+ * Handle messages from AgentBFF WebSocket
+ */
+function handleAgentMessage(message: WebSocketMessage) {
+  switch (message.type) {
+    case 'connection':
+      console.log('[AgentBFF WebSocket] Connection confirmed:', message.client_id);
+      break;
+
+    case 'news_processor_result':
+      // News processor classification results for NewsRoom component
+      if (message.symbol) {
+        const result: NewsProcessorResultPayload = {
+          model: message.model || '',
+          symbol: message.symbol || '',
+          is_catalyst: message.is_catalyst || false,
+          classification: message.classification || 'NO',
+          score: message.score || '0/10',
+          title: message.title || '',
+          published_time: message.published_time || '',
+          current_time: message.current_time || '',
+          explanation: message.explanation || {},
+          url: message.url || '',
+          content_preview: message.content_preview || '',
+          sources: message.sources || '[]',
+          source_from: message.source_from || '',
+          timestamp: message.timestamp || '',
+        };
+
+        // Notify all subscribers
+        newsProcessorResultHandlers.forEach((handler) => {
+          handler(result);
+        });
+      }
+      break;
+
+    default:
+      console.debug('[AgentBFF WebSocket] Unknown message type:', message.type);
+  }
+}
+
+/**
  * Utility to disconnect WebSocket (for cleanup)
  */
 export function disconnectSocket() {
@@ -1023,6 +1119,17 @@ export function disconnectSocket() {
     wsInstance.close();
     wsInstance = null;
   }
+
+  // Also disconnect AgentBFF
+  if (agentReconnectTimeout) {
+    clearTimeout(agentReconnectTimeout);
+    agentReconnectTimeout = null;
+  }
+  if (agentWsInstance) {
+    agentWsInstance.close();
+    agentWsInstance = null;
+  }
+
   useMarketDataStore.getState().reset();
   messageQueue = [];
 }

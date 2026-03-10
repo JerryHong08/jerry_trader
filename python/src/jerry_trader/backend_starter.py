@@ -4,8 +4,7 @@ JerryTrader Backend Starter
 Starts selected backend services for JerryTrader based on working machine:
 SnapshotProcessor, StaticDataWorker, JerryTrader BFF.
 StateEngine.
-NewsWorker, NewsProcessor.
-
+NewsWorker, NewsProcessor.AgentBFF (News Processor Results).
 Usage:
     # Start with machine config
     python -m jerry_trader.backend_starter --machine wsl2
@@ -59,7 +58,7 @@ class JerryTraderBackendStarter:
     - StaticDataWorker: Fetches static data (fundamentals, float) for subscribed tickers
     - NewsWorker: Fetches and caches news data for subscribed tickers
     - NewsProcessor: Processes news with LLM
-    - JerryTraderBFF: Backend For Frontend (FastAPI + WebSocket server)
+    - JerryTraderBFF: Backend For Frontend (FastAPI + WebSocket server)    - AgentBFF: News Processor Results BFF (separate machine support)
     """
 
     def __init__(self, config: dict):
@@ -464,6 +463,20 @@ class JerryTraderBackendStarter:
         else:
             self.chart_data_bff = None
 
+        if "AgentBFF" in self.roles:
+            from jerry_trader.BackendForFrontend.openclaw import AgentBFF
+
+            role_cfg = self.roles["AgentBFF"]
+            self.agent_bff = AgentBFF(
+                host=role_cfg.get("host", "0.0.0.0"),
+                port=role_cfg.get("port", 5003),
+                session_id=self.session_id,
+                redis_config=role_cfg.get("redis"),
+            )
+            self._services.append(("AgentBFF", self.agent_bff))
+        else:
+            self.agent_bff = None
+
         logger.info(f"Initialized {len(self._services)} services")
 
     def is_trading_day_today(self) -> bool:
@@ -556,6 +569,9 @@ class JerryTraderBackendStarter:
 
         if self.bff:
             self.bff.cleanup()
+
+        if self.agent_bff:
+            self.agent_bff.cleanup()
 
         logger.info("All services cleaned up")
 
@@ -748,6 +764,19 @@ class JerryTraderBackendStarter:
             chart_bff_thread.start()
             self._threads.append(chart_bff_thread)
             logger.info("ChartDataBFF started")
+
+        # Start AgentBFF in separate thread if enabled
+        if self.agent_bff:
+
+            def run_agent_bff():
+                self.agent_bff.run()
+
+            agent_bff_thread = Thread(
+                target=run_agent_bff, daemon=True, name="AgentBFF"
+            )
+            agent_bff_thread.start()
+            self._threads.append(agent_bff_thread)
+            logger.info("AgentBFF started")
 
         # Run BFF in the main thread (blocking) if enabled
         if self.bff:

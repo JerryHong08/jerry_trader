@@ -43,7 +43,7 @@ jobs:
           python-version: 3.x
       - name: Build wheels
         uses: PyO3/maturin-action@v1
-        # 👇 This environment variable fixes the s390x build
+        # This environment variable fixes the s390x build
         env:
           CFLAGS_s390x_unknown_linux_gnu: -march=z10
         with:
@@ -51,7 +51,6 @@ jobs:
           args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: auto
-          maturin-version: v1.7.4
       - name: Upload wheels
         uses: actions/upload-artifact@v6
         with:
@@ -77,13 +76,12 @@ jobs:
         with:
           python-version: 3.x
       - name: Build wheels
-        uses: PyO3/maturin-action@v1.7
+        uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: musllinux_1_2
-          maturin-version: v1.7.4
       - name: Upload wheels
         uses: actions/upload-artifact@v6
         with:
@@ -111,12 +109,11 @@ jobs:
           python-version: 3.13
           architecture: ${{ matrix.platform.python_arch }}
       - name: Build wheels
-        uses: PyO3/maturin-action@v1.7
+        uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
-          maturin-version: v1.7.4
       - name: Upload wheels
         uses: actions/upload-artifact@v6
         with:
@@ -138,12 +135,11 @@ jobs:
         with:
           python-version: 3.x
       - name: Build wheels
-        uses: PyO3/maturin-action@v1.7
+        uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
-          maturin-version: v1.7.4
       - name: Upload wheels
         uses: actions/upload-artifact@v6
         with:
@@ -155,11 +151,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Build sdist
-        uses: PyO3/maturin-action@v1.7
+        uses: PyO3/maturin-action@v1
         with:
           command: sdist
           args: --out dist
-          maturin-version: v1.7.4
       - name: Upload sdist
         uses: actions/upload-artifact@v6
         with:

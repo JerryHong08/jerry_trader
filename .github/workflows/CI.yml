@@ -42,7 +42,7 @@ jobs:
         with:
           python-version: 3.x
       - name: Build wheels
-        uses: PyO3/maturin-action@v1.7
+        uses: PyO3/maturin-action@v1
         # 👇 This environment variable fixes the s390x build
         env:
           CFLAGS_s390x_unknown_linux_gnu: -march=z10

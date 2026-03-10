@@ -195,6 +195,7 @@ class NewsArticle(BaseModel):
     text: Optional[str] = Field(None, description="News content body")
     url: str = Field(..., description="News article URL")
     sources: str = Field(..., description="News source/publisher")
+    source_from: str = Field(default="unknown", description="Data fetch source (momo/benzinga/fmp/etc)")
 
     model_config = {"json_encoders": {datetime: lambda v: v.isoformat()}}
 
@@ -240,6 +241,7 @@ class NewsArticle(BaseModel):
             text=data.get("text"),
             url=data.get("url", ""),
             sources=data.get("publisher", "FMP"),
+            source_from="fmp",
         )
 
     @classmethod
@@ -260,6 +262,7 @@ class NewsArticle(BaseModel):
             text=data.get("text", ""),
             url=data.get("url", ""),
             sources=data.get("sources", "Moomoo"),
+            source_from="momo",
         )
 
     @classmethod
@@ -284,6 +287,7 @@ class NewsArticle(BaseModel):
             text=body_text,
             url=data.get("url", ""),
             sources=data.get("author", "Benzinga"),
+            source_from="benzinga",
         )
 
 

@@ -42,7 +42,7 @@ jobs:
         with:
           python-version: 3.x
       - name: Build wheels
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@v1.11
         # 👇 This environment variable fixes the s390x build
         env:
           CFLAGS_s390x_unknown_linux_gnu: -march=z10
@@ -76,7 +76,7 @@ jobs:
         with:
           python-version: 3.x
       - name: Build wheels
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@v1.11
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
@@ -109,7 +109,7 @@ jobs:
           python-version: 3.13
           architecture: ${{ matrix.platform.python_arch }}
       - name: Build wheels
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@v1.11
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
@@ -135,7 +135,7 @@ jobs:
         with:
           python-version: 3.x
       - name: Build wheels
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@v1.11
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
@@ -151,7 +151,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Build sdist
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@v1.11
         with:
           command: sdist
           args: --out dist

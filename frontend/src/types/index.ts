@@ -1,4 +1,4 @@
-export type ModuleType = 'order-management' | 'rank-list' | 'chart' | 'overview-chart' | 'stock-detail' | 'portfolio';
+export type ModuleType = 'order-management' | 'rank-list' | 'chart' | 'overview-chart' | 'stock-detail' | 'portfolio' | 'news-room';
 
 export type ChartTimeframe = '10s' | '1m' | '5m' | '15m' | '30m' | '1h' | '4h' | '1D' | '1W' | '1M';
 
@@ -178,4 +178,25 @@ export interface NewsArticle {
   url: string;
   summary: string;
   isNew: boolean;
+}
+
+export interface NewsProcessorResult {
+  id: string; // timestamp or unique id
+  model: string;
+  symbol: string;
+  is_catalyst: boolean;
+  classification: string; // "YES" or "NO"
+  score: string; // e.g., "7/10"
+  title: string;
+  published_time: string;
+  current_time: string;
+  explanation: {
+    raw?: string;
+    [key: string]: any;
+  };
+  url: string;
+  content_preview: string;
+  sources: string; // JSON string
+  source_from: string;
+  timestamp: string;
 }

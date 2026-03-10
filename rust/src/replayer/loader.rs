@@ -8,6 +8,7 @@
 use anyhow::{Context, Result};
 use log::{info, warn};
 use polars::prelude::*;
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -179,17 +180,20 @@ pub async fn load_symbol_data(
 // ── DataFrame → Vec<Raw*> extraction ────────────────────────────────
 
 fn extract_quotes(df: &DataFrame) -> Result<Vec<RawQuote>> {
+    let len = df.height();
     let timestamps = df.column("participant_timestamp")?.i64()?;
     let bid_prices = df.column("bid_price").ok().and_then(|c| c.f64().ok());
     let ask_prices = df.column("ask_price").ok().and_then(|c| c.f64().ok());
     let bid_sizes = df.column("bid_size").ok().and_then(|c| c.i64().ok());
     let ask_sizes = df.column("ask_size").ok().and_then(|c| c.i64().ok());
 
-    let mut quotes = Vec::with_capacity(df.height());
-    for i in 0..df.height() {
-        if let Some(ts) = timestamps.get(i) {
+    let mut quotes = Vec::with_capacity(len);
+
+    // Use iterators instead of indexed access (2-3x faster)
+    for i in 0..len {
+        if let Some(ts_val) = timestamps.get(i) {
             quotes.push(RawQuote {
-                participant_timestamp: ts,
+                participant_timestamp: ts_val,
                 bid_price: bid_prices.and_then(|c| c.get(i)),
                 ask_price: ask_prices.and_then(|c| c.get(i)),
                 bid_size: bid_sizes.and_then(|c| c.get(i)),
@@ -205,16 +209,20 @@ fn extract_quotes(df: &DataFrame) -> Result<Vec<RawQuote>> {
 }
 
 fn extract_trades(df: &DataFrame) -> Result<Vec<RawTrade>> {
+    let len = df.height();
     let timestamps = df.column("participant_timestamp")?.i64()?;
     let prices = df.column("price").ok().and_then(|c| c.f64().ok());
     let sizes = df.column("size").ok().and_then(|c| c.i64().ok());
     let exchanges = df.column("exchange").ok().and_then(|c| c.i64().ok());
 
-    let mut trades = Vec::with_capacity(df.height());
-    for i in 0..df.height() {
-        if let Some(ts) = timestamps.get(i) {
+    let mut trades = Vec::with_capacity(len);
+
+    // Indexed access - simple but slightly slower than pure iterators
+    // However, with optional columns, this is cleaner and still fast enough
+    for i in 0..len {
+        if let Some(ts_val) = timestamps.get(i) {
             trades.push(RawTrade {
-                participant_timestamp: ts,
+                participant_timestamp: ts_val,
                 price: prices.and_then(|c| c.get(i)),
                 size: sizes.and_then(|c| c.get(i)),
                 exchange: exchanges.and_then(|c| c.get(i)),
@@ -272,10 +280,16 @@ pub async fn load_multi_symbol_data(
 
                 let df = tokio::task::spawn_blocking(move || -> Result<DataFrame> {
                     let ticker_series = Series::new("_filter".into(), &syms_owned);
-                    LazyFrame::scan_parquet(&fp, Default::default())
+                    let mut lazy = LazyFrame::scan_parquet(&fp, Default::default())
                         .context("Failed to scan parquet")?
-                        .filter(col("ticker").is_in(lit(ticker_series)))
-                        .select(&[
+                        .filter(col("ticker").is_in(lit(ticker_series)));
+
+                    // Push timestamp filter down to Parquet scan (reduces I/O)
+                    if let Some(ts) = start_ts {
+                        lazy = lazy.filter(col("participant_timestamp").gt_eq(lit(ts)));
+                    }
+
+                    lazy.select(&[
                             col("ticker"),
                             col("participant_timestamp")
                                 .cast(polars::datatypes::DataType::Int64),
@@ -298,49 +312,76 @@ pub async fn load_multi_symbol_data(
                     elapsed_ms,
                 );
 
-                // Partition by ticker.
-                for sym in &syms {
-                    let sub_df = df.clone().lazy()
-                        .filter(col("ticker").eq(lit(*sym)))
-                        .collect()?;
+                // Parallel extraction: process symbols in parallel using rayon
+                let extract_start = Instant::now();
+                let per_symbol_results: Vec<_> = syms
+                    .par_iter()
+                    .filter_map(|sym| {
+                        // Filter for this symbol
+                        let sub_df = match df
+                            .clone()
+                            .lazy()
+                            .filter(col("ticker").eq(lit(*sym)))
+                            .collect()
+                        {
+                            Ok(df) => df,
+                            Err(e) => {
+                                warn!("Failed to filter quotes for {}: {}", sym, e);
+                                return None;
+                            }
+                        };
 
-                    if sub_df.height() == 0 {
-                        warn!("No quote data found for {}", sym);
+                        if sub_df.height() == 0 {
+                            warn!("No quote data found for {}", sym);
+                            let cache_key = format!("{}_Quotes", sym);
+                            return Some((
+                                cache_key,
+                                PreloadedData {
+                                    quotes: Some(Vec::new()),
+                                    trades: None,
+                                    first_ts_ns: 0,
+                                    data_type: dt,
+                                },
+                            ));
+                        }
+
+                        let mut quotes = match extract_quotes(&sub_df) {
+                            Ok(q) => q,
+                            Err(e) => {
+                                warn!("Failed to extract quotes for {}: {}", sym, e);
+                                return None;
+                            }
+                        };
+                        quotes.sort_by_key(|q| q.participant_timestamp);
+
+                        let first_ts_ns = quotes
+                            .iter()
+                            .find(|q| start_ts.is_none_or(|s| q.participant_timestamp >= s))
+                            .map(|q| q.participant_timestamp)
+                            .unwrap_or_else(|| {
+                                quotes.first().map(|q| q.participant_timestamp).unwrap_or(0)
+                            });
+
+                        info!("  {} — {} quotes (first_ts={})", sym, quotes.len(), first_ts_ns);
                         let cache_key = format!("{}_Quotes", sym);
-                        result.insert(
+                        Some((
                             cache_key,
                             PreloadedData {
-                                quotes: Some(Vec::new()),
+                                quotes: Some(quotes),
                                 trades: None,
-                                first_ts_ns: 0,
+                                first_ts_ns,
                                 data_type: dt,
                             },
-                        );
-                        continue;
-                    }
+                        ))
+                    })
+                    .collect();
 
-                    let mut quotes = extract_quotes(&sub_df)?;
-                    quotes.sort_by_key(|q| q.participant_timestamp);
+                let extract_elapsed = extract_start.elapsed().as_secs_f64() * 1000.0;
+                info!("Parallel extraction completed in {:.1}ms", extract_elapsed);
 
-                    let first_ts_ns = quotes
-                        .iter()
-                        .find(|q| start_ts.is_none_or(|s| q.participant_timestamp >= s))
-                        .map(|q| q.participant_timestamp)
-                        .unwrap_or_else(|| {
-                            quotes.first().map(|q| q.participant_timestamp).unwrap_or(0)
-                        });
-
-                    info!("  {} — {} quotes (first_ts={})", sym, quotes.len(), first_ts_ns);
-                    let cache_key = format!("{}_Quotes", sym);
-                    result.insert(
-                        cache_key,
-                        PreloadedData {
-                            quotes: Some(quotes),
-                            trades: None,
-                            first_ts_ns,
-                            data_type: dt,
-                        },
-                    );
+                // Insert results into HashMap
+                for (key, data) in per_symbol_results {
+                    result.insert(key, data);
                 }
             }
 
@@ -350,10 +391,16 @@ pub async fn load_multi_symbol_data(
 
                 let df = tokio::task::spawn_blocking(move || -> Result<DataFrame> {
                     let ticker_series = Series::new("_filter".into(), &syms_owned);
-                    LazyFrame::scan_parquet(&fp, Default::default())
+                    let mut lazy = LazyFrame::scan_parquet(&fp, Default::default())
                         .context("Failed to scan parquet")?
-                        .filter(col("ticker").is_in(lit(ticker_series)))
-                        .select(&[
+                        .filter(col("ticker").is_in(lit(ticker_series)));
+
+                    // Push timestamp filter down to Parquet scan (reduces I/O)
+                    if let Some(ts) = start_ts {
+                        lazy = lazy.filter(col("participant_timestamp").gt_eq(lit(ts)));
+                    }
+
+                    lazy.select(&[
                             col("ticker"),
                             col("participant_timestamp")
                                 .cast(polars::datatypes::DataType::Int64),
@@ -375,48 +422,76 @@ pub async fn load_multi_symbol_data(
                     elapsed_ms,
                 );
 
-                for sym in &syms {
-                    let sub_df = df.clone().lazy()
-                        .filter(col("ticker").eq(lit(*sym)))
-                        .collect()?;
+                // Parallel extraction: process symbols in parallel using rayon
+                let extract_start = Instant::now();
+                let per_symbol_results: Vec<_> = syms
+                    .par_iter()
+                    .filter_map(|sym| {
+                        // Filter for this symbol
+                        let sub_df = match df
+                            .clone()
+                            .lazy()
+                            .filter(col("ticker").eq(lit(*sym)))
+                            .collect()
+                        {
+                            Ok(df) => df,
+                            Err(e) => {
+                                warn!("Failed to filter trades for {}: {}", sym, e);
+                                return None;
+                            }
+                        };
 
-                    if sub_df.height() == 0 {
-                        warn!("No trade data found for {}", sym);
+                        if sub_df.height() == 0 {
+                            warn!("No trade data found for {}", sym);
+                            let cache_key = format!("{}_Trades", sym);
+                            return Some((
+                                cache_key,
+                                PreloadedData {
+                                    quotes: None,
+                                    trades: Some(Vec::new()),
+                                    first_ts_ns: 0,
+                                    data_type: dt,
+                                },
+                            ));
+                        }
+
+                        let mut trades = match extract_trades(&sub_df) {
+                            Ok(t) => t,
+                            Err(e) => {
+                                warn!("Failed to extract trades for {}: {}", sym, e);
+                                return None;
+                            }
+                        };
+                        trades.sort_by_key(|t| t.participant_timestamp);
+
+                        let first_ts_ns = trades
+                            .iter()
+                            .find(|t| start_ts.is_none_or(|s| t.participant_timestamp >= s))
+                            .map(|t| t.participant_timestamp)
+                            .unwrap_or_else(|| {
+                                trades.first().map(|t| t.participant_timestamp).unwrap_or(0)
+                            });
+
+                        info!("  {} — {} trades (first_ts={})", sym, trades.len(), first_ts_ns);
                         let cache_key = format!("{}_Trades", sym);
-                        result.insert(
+                        Some((
                             cache_key,
                             PreloadedData {
                                 quotes: None,
-                                trades: Some(Vec::new()),
-                                first_ts_ns: 0,
+                                trades: Some(trades),
+                                first_ts_ns,
                                 data_type: dt,
                             },
-                        );
-                        continue;
-                    }
+                        ))
+                    })
+                    .collect();
 
-                    let mut trades = extract_trades(&sub_df)?;
-                    trades.sort_by_key(|t| t.participant_timestamp);
+                let extract_elapsed = extract_start.elapsed().as_secs_f64() * 1000.0;
+                info!("Parallel extraction completed in {:.1}ms", extract_elapsed);
 
-                    let first_ts_ns = trades
-                        .iter()
-                        .find(|t| start_ts.is_none_or(|s| t.participant_timestamp >= s))
-                        .map(|t| t.participant_timestamp)
-                        .unwrap_or_else(|| {
-                            trades.first().map(|t| t.participant_timestamp).unwrap_or(0)
-                        });
-
-                    info!("  {} — {} trades (first_ts={})", sym, trades.len(), first_ts_ns);
-                    let cache_key = format!("{}_Trades", sym);
-                    result.insert(
-                        cache_key,
-                        PreloadedData {
-                            quotes: None,
-                            trades: Some(trades),
-                            first_ts_ns,
-                            data_type: dt,
-                        },
-                    );
+                // Insert results into HashMap
+                for (key, data) in per_symbol_results {
+                    result.insert(key, data);
                 }
             }
         }

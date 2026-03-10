@@ -213,158 +213,222 @@ export const MINIMAL_TEMPLATE: LayoutTemplate = {
   name: "Minimal-Layout",
   description: "minimal layout for my laptop.",
   layout: [
-    {
-      "id": "order-1",
-      "moduleType": "order-management",
-      "position": {
-        "x": 900,
-        "y": 650
-      },
-      "size": {
-        "width": 350,
-        "height": 290
-      },
-      "syncGroup": "group-5",
-      "settings": {
-        "orderManagement": {
-          "view": "placement"
-        }
-      }
+  {
+    "id": "rank-1",
+    "moduleType": "rank-list",
+    "position": {
+      "x": 0,
+      "y": 0
     },
-    {
-      "id": "rank-1",
-      "moduleType": "rank-list",
-      "position": {
-        "x": 0,
-        "y": 0
-      },
-      "size": {
-        "width": 890,
-        "height": 410
-      },
-      "syncGroup": "group-1",
-      "settings": {
-        "rankList": {
-          "sortColumn": "state",
-          "sortDirection": "desc",
-          "visibleColumns": [
-            "news",
-            "price",
-            "changePercent",
-            "volume",
-            "float",
-            "relativeVolumeDaily",
-            "relativeVolume5min",
-            "marketCap",
-            "vwap",
-            "state",
-            "symbol"
-          ],
-          "columnWidths": {
-            "#": 50,
-            "symbol": 50,
-            "state": 99,
-            "news": 50,
-            "price": 50,
-            "change": 50,
-            "changePercent": 110,
-            "volume": 50,
-            "float": 50,
-            "relativeVolumeDaily": 108,
-            "relativeVolume5min": 110,
-            "vwap": 50,
-            "marketCap": 110
-          },
-          "columnOrder": [
-            "symbol",
-            "state",
-            "news",
-            "price",
-            "vwap",
-            "changePercent",
-            "float",
-            "change",
-            "volume",
-            "relativeVolumeDaily",
-            "relativeVolume5min",
-            "marketCap"
-          ]
-        }
-      }
+    "size": {
+      "width": 890,
+      "height": 930
     },
-    {
-      "id": "stock-detail-1",
-      "moduleType": "stock-detail",
-      "position": {
-        "x": 0,
-        "y": 420
-      },
-      "size": {
-        "width": 350,
-        "height": 520
-      },
-      "syncGroup": "group-1",
-      "settings": {
-        "stockDetail": {
-          "view": "news"
-        }
+    "syncGroup": "group-1",
+    "settings": {
+      "rankList": {
+        "sortColumn": "state",
+        "sortDirection": "desc",
+        "visibleColumns": [
+          "news",
+          "price",
+          "changePercent",
+          "volume",
+          "float",
+          "relativeVolumeDaily",
+          "relativeVolume5min",
+          "marketCap",
+          "vwap",
+          "state",
+          "symbol"
+        ],
+        "columnWidths": {
+          "#": 50,
+          "symbol": 50,
+          "state": 99,
+          "news": 50,
+          "price": 50,
+          "change": 50,
+          "changePercent": 110,
+          "volume": 50,
+          "float": 50,
+          "relativeVolumeDaily": 108,
+          "relativeVolume5min": 110,
+          "vwap": 50,
+          "marketCap": 110
+        },
+        "columnOrder": [
+          "symbol",
+          "state",
+          "news",
+          "price",
+          "vwap",
+          "changePercent",
+          "float",
+          "change",
+          "volume",
+          "relativeVolumeDaily",
+          "relativeVolume5min",
+          "marketCap"
+        ]
       }
+    }
+  },
+  {
+    "id": "overview-chart-1",
+    "moduleType": "overview-chart",
+    "position": {
+      "x": 900,
+      "y": 0
     },
-    {
-      "id": "overview-chart-1",
-      "moduleType": "overview-chart",
-      "position": {
-        "x": 900,
-        "y": 0
-      },
-      "size": {
-        "width": 760,
-        "height": 640
-      },
-      "syncGroup": "group-1",
-      "settings": {
-        "overviewChart": {
-          "selectedStates": [
-            "Best",
-            "Good",
-            "OnWatch",
-            "NotGood",
-            "Bad"
-          ],
-          "focusMode": false
-        }
+    "size": {
+      "width": 760,
+      "height": 530
+    },
+    "syncGroup": "group-1",
+    "settings": {
+      "overviewChart": {
+        "selectedStates": [
+          "Best",
+          "Good",
+          "OnWatch",
+          "NotGood",
+          "Bad"
+        ],
+        "focusMode": false
       }
+    }
+  },
+  {
+    "id": "chart-2",
+    "moduleType": "chart",
+    "position": {
+      "x": 0,
+      "y": 940
     },
-    {
-      "id": "chart-2",
-      "moduleType": "chart",
-      "position": {
-        "x": 360,
-        "y": 420
-      },
-      "size": {
-        "width": 530,
-        "height": 520
-      },
-      "syncGroup": "group-1",
-      "settings": {
-        "chart": {
-          "timeframe": "1m"
-        }
+    "size": {
+      "width": 680,
+      "height": 670
+    },
+    "syncGroup": "group-1",
+    "settings": {
+      "chart": {
+        "timeframe": "1m"
       }
+    }
+  },
+  {
+    "id": "portfolio-1767537783678",
+    "moduleType": "portfolio",
+    "position": {
+      "x": 1300,
+      "y": 1620
     },
-    {
-      "id": "portfolio-1767537783678",
-      "moduleType": "portfolio",
-      "position": {
-        "x": 1260,
-        "y": 650
-      },
-      "size": {
-        "width": 400,
-        "height": 290
-      },
-      "syncGroup": "group-5"
+    "size": {
+      "width": 360,
+      "height": 260
+    },
+    "syncGroup": "group-5"
+  },
+  {
+    "id": "news-room-1773115113599",
+    "moduleType": "news-room",
+    "position": {
+      "x": 900,
+      "y": 540
+    },
+    "size": {
+      "width": 440,
+      "height": 390
+    },
+    "syncGroup": null
+  },
+  {
+    "id": "stock-detail-1773117146516",
+    "moduleType": "stock-detail",
+    "position": {
+      "x": 1350,
+      "y": 540
+    },
+    "size": {
+      "width": 310,
+      "height": 390
+    },
+    "syncGroup": "group-1"
+  },
+  {
+    "id": "order-management-1773117184168",
+    "moduleType": "order-management",
+    "position": {
+      "x": 1300,
+      "y": 940
+    },
+    "size": {
+      "width": 360,
+      "height": 670
+    },
+    "syncGroup": "group-1"
+  },
+  {
+    "id": "chart-1773117208665",
+    "moduleType": "chart",
+    "position": {
+      "x": 690,
+      "y": 940
+    },
+    "size": {
+      "width": 600,
+      "height": 670
+    },
+    "syncGroup": "group-1",
+    "settings": {
+      "chart": {
+        "timeframe": "1h"
+      }
+    }
+  },
+  {
+    "id": "overview-chart-1773117277779",
+    "moduleType": "overview-chart",
+    "position": {
+      "x": 0,
+      "y": 1620
+    },
+    "size": {
+      "width": 680,
+      "height": 260
+    },
+    "syncGroup": "group-1",
+    "settings": {
+      "overviewChart": {
+        "selectedStates": [
+          "Best",
+          "Good",
+          "OnWatch",
+          "NotGood",
+          "Bad"
+        ],
+        "focusMode": true
+      }
+    }
+  },
+  {
+    "id": "order-management-1773117566809",
+    "moduleType": "order-management",
+    "position": {
+      "x": 690,
+      "y": 1620
+    },
+    "size": {
+      "width": 600,
+      "height": 260
+    },
+    "syncGroup": "group-1",
+    "settings": {
+      "orderManagement": {
+        "view": "orders"
+      }
+    }
     }
   ],
 };

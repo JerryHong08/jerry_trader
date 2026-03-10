@@ -4,6 +4,7 @@ import { ChartModule } from '../components/ChartModule';
 import { OverviewChartModule } from '../components/OverviewChartModule';
 import { StockDetail } from '../components/StockDetail';
 import { PortfolioModule } from '../components/PortfolioModule';
+import NewsRoom from '../components/NewsRoom';
 import type { ModuleConfig, ModuleType } from '../types';
 
 export const moduleRegistry: Record<ModuleType, ModuleConfig> = {
@@ -56,5 +57,13 @@ export const moduleRegistry: Record<ModuleType, ModuleConfig> = {
     component: PortfolioModule,
     defaultSize: { width: 900, height: 550 },
     supportSync: true,
+  },
+  'news-room': {
+    type: 'news-room',
+    name: 'News Room',
+    description: 'Real-time news processing results with filters',
+    component: NewsRoom,
+    defaultSize: { width: 800, height: 600 },
+    supportSync: false,
   },
 };

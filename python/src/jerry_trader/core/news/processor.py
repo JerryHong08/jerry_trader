@@ -27,6 +27,7 @@ from jerry_trader.utils.logger import setup_logger
 from jerry_trader.utils.redis_keys import (
     news_article_stream,
     news_item_prefix,
+    news_processor_results_stream,
     news_ticker_prefix,
     static_ticker_summary_prefix,
 )
@@ -137,6 +138,9 @@ class NewsProcessor:
         self.session_id = session_id or make_session_id()
 
         self.NEWS_ARTICLE_STREAM = news_article_stream(self.session_id)
+        self.NEWS_PROCESSOR_RESULTS_STREAM = news_processor_results_stream(
+            self.session_id
+        )
         self.NEWS_TICKER_PREFIX = news_ticker_prefix(self.session_id)
         self.NEWS_ITEM_PREFIX = news_item_prefix(self.session_id)
         self.STATIC_SUMMARY_PREFIX = static_ticker_summary_prefix(self.session_id)
@@ -186,10 +190,15 @@ class NewsProcessor:
 
         # Initialize JSON output file for structured logging
         from jerry_trader.utils.paths import PROJECT_ROOT
-        log_dir = PROJECT_ROOT / "logs" / "jerry_trader" / datetime.now().strftime("%Y%m%d")
+
+        log_dir = (
+            PROJECT_ROOT / "logs" / "jerry_trader" / datetime.now().strftime("%Y%m%d")
+        )
         os.makedirs(log_dir, exist_ok=True)
         module_name = __name__.split(".")[-1]
-        self._json_log_path = log_dir / f"{module_name}_{datetime.now().strftime('%Y%m%d')}.json"
+        self._json_log_path = (
+            log_dir / f"{module_name}_{datetime.now().strftime('%Y%m%d')}.json"
+        )
         self._json_entries = []
         self._json_lock = asyncio.Lock()  # Protect JSON operations from race conditions
 
@@ -215,7 +224,11 @@ class NewsProcessor:
                 "title": article.title,
                 "published_time": str(article.published_time),
                 "current_time": timestamp,
-                "explanation": json.loads(result.explanation) if result.explanation.startswith('{') else {"raw": result.explanation},
+                "explanation": (
+                    json.loads(result.explanation)
+                    if result.explanation.startswith("{")
+                    else {"raw": result.explanation}
+                ),
                 "url": article.url,
                 "content": article.text[:200] if article.text else "",
                 "sources": article.sources,
@@ -247,14 +260,14 @@ class NewsProcessor:
         try:
             # Read existing data if file exists
             if self._json_log_path.exists():
-                with open(self._json_log_path, 'r', encoding='utf-8') as f:
+                with open(self._json_log_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
             else:
                 data = {
                     "date": datetime.now().strftime("%Y%m%d"),
-                    "log_file": str(self._json_log_path).replace('.json', '.log'),
+                    "log_file": str(self._json_log_path).replace(".json", ".log"),
                     "entry_count": 0,
-                    "entries": []
+                    "entries": [],
                 }
 
             # Append new entries
@@ -262,8 +275,8 @@ class NewsProcessor:
             data["entry_count"] = len(data["entries"])
 
             # Write atomically
-            temp_path = self._json_log_path.with_suffix('.tmp')
-            with open(temp_path, 'w', encoding='utf-8') as f:
+            temp_path = self._json_log_path.with_suffix(".tmp")
+            with open(temp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
             temp_path.replace(self._json_log_path)
 
@@ -272,6 +285,51 @@ class NewsProcessor:
             # Re-add entries on failure
             async with self._json_lock:
                 self._json_entries.extend(entries_to_write)
+
+    async def _publish_result_to_stream(
+        self,
+        symbol: str,
+        result: NewsClassificationResult,
+        article: NewsArticle,
+        timestamp: str,
+    ) -> None:
+        """Publish news classification result to Redis stream for real-time consumption."""
+        try:
+            # Build the detailed explanation object
+            if result.explanation.startswith("{"):
+                try:
+                    explanation = json.loads(result.explanation)
+                except Exception:
+                    explanation = {"raw": result.explanation}
+            else:
+                explanation = {"raw": result.explanation}
+
+            # Prepare stream entry
+            stream_data = {
+                "model": self.active_model,
+                "symbol": symbol,
+                "is_catalyst": "true" if result.is_catalyst else "false",
+                "classification": result.classification,
+                "score": result.score,
+                "title": article.title,
+                "published_time": str(article.published_time),
+                "current_time": timestamp,
+                "explanation": json.dumps(explanation, ensure_ascii=False),
+                "url": article.url or "",
+                "content_preview": (article.text[:300] if article.text else ""),
+                "sources": json.dumps(article.sources) if article.sources else "[]",
+                "source_from": article.source_from or "",
+            }
+
+            # Publish to stream
+            self.r.xadd(self.NEWS_PROCESSOR_RESULTS_STREAM, stream_data)
+            logger.debug(
+                f"Published news processor result to stream: {symbol} - "
+                f"{'✅' if result.is_catalyst else '❌'} {result.score}"
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to publish result to stream: {e}")
 
     async def start(self):
         """Start listener, worker pool, and monitor."""
@@ -581,7 +639,14 @@ class NewsProcessor:
                 logger.info(f"{'=' * 50}\n")
 
                 # Write to JSON log (async)
-                await self._write_json_entry(task.symbol, result, task.article, task.timestamp)
+                await self._write_json_entry(
+                    task.symbol, result, task.article, task.timestamp
+                )
+
+                # Publish to stream for real-time consumption by BFF/Frontend
+                await self._publish_result_to_stream(
+                    task.symbol, result, task.article, task.timestamp
+                )
             else:
                 logger.info(
                     f"Real-time classification failed for {task.symbol}: {task.article.title}"

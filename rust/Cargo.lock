@@ -816,6 +816,7 @@ dependencies = [
  "log",
  "polars",
  "pyo3",
+ "rayon",
  "tokio",
 ]
 

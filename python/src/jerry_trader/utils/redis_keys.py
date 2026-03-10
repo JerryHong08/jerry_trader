@@ -57,6 +57,11 @@ def news_article_stream(session_id: str) -> str:
     return f"news_article_stream:{session_id}"
 
 
+def news_processor_results_stream(session_id: str) -> str:
+    """News processor classification results → BFF → Frontend NewsRoom."""
+    return f"news_processor_results:{session_id}"
+
+
 def factor_tasks_stream(session_id: str) -> str:
     """Factor computation task queue → FactorEngine."""
     return f"factor_tasks:{session_id}"
@@ -213,6 +218,7 @@ ALL_STREAM_BUILDERS = [
     movers_state_stream,
     static_update_stream,
     news_article_stream,
+    news_processor_results_stream,
     factor_tasks_stream,
     signal_events_stream,
 ]

@@ -353,9 +353,33 @@ const stockDetailHandlers = new Map<
 type NewsUpdatePayload = { symbol: string; article: NewsArticle; articles: NewsArticle[] };
 const newsUpdateHandlers = new Set<(payload: NewsUpdatePayload) => void>();
 
+export type NewsProcessorResultPayload = {
+  model: string;
+  symbol: string;
+  is_catalyst: boolean;
+  classification: string;
+  score: string;
+  title: string;
+  published_time: string;
+  current_time: string;
+  explanation: any;
+  url: string;
+  content_preview: string;
+  sources: string;
+  source_from: string;
+  timestamp: string;
+};
+
+const newsProcessorResultHandlers = new Set<(result: NewsProcessorResultPayload) => void>();
+
 export function subscribeNewsUpdates(handler: (payload: NewsUpdatePayload) => void) {
   newsUpdateHandlers.add(handler);
-  return () => newsUpdateHandlers.delete(handler);
+  return () => { newsUpdateHandlers.delete(handler); };
+}
+
+export function subscribeNewsProcessorResults(handler: (result: NewsProcessorResultPayload) => void) {
+  newsProcessorResultHandlers.add(handler);
+  return () => { newsProcessorResultHandlers.delete(handler); };
 }
 
 /**
@@ -586,6 +610,33 @@ function handleMessage(message: WebSocketMessage) {
             handler({ symbol, article, articles: updated });
           });
         }
+      }
+      break;
+
+    case 'news_processor_result':
+      // News processor classification results for NewsRoom component
+      if (message.symbol) {
+        const result: NewsProcessorResultPayload = {
+          model: message.model || '',
+          symbol: message.symbol || '',
+          is_catalyst: message.is_catalyst || false,
+          classification: message.classification || 'NO',
+          score: message.score || '0/10',
+          title: message.title || '',
+          published_time: message.published_time || '',
+          current_time: message.current_time || '',
+          explanation: message.explanation || {},
+          url: message.url || '',
+          content_preview: message.content_preview || '',
+          sources: message.sources || '[]',
+          source_from: message.source_from || '',
+          timestamp: message.timestamp || '',
+        };
+
+        // Notify all subscribers
+        newsProcessorResultHandlers.forEach((handler) => {
+          handler(result);
+        });
       }
       break;
 

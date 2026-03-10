@@ -45,6 +45,7 @@ from jerry_trader.utils.redis_keys import (
     news_article_stream,
     news_item_prefix,
     news_pending,
+    news_processor_results_stream,
     news_ticker_prefix,
     static_pending,
     static_ticker_profile_prefix,
@@ -186,6 +187,9 @@ class JerryTraderBFF:
         self.STATE_STREAM_NAME = movers_state_stream(self.session_id)
         self.STATIC_UPDATE_STREAM = static_update_stream(self.session_id)
         self.NEWS_ARTICLE_STREAM = news_article_stream(self.session_id)
+        self.NEWS_PROCESSOR_RESULTS_STREAM = news_processor_results_stream(
+            self.session_id
+        )
         self.STATIC_SUMMARY_PREFIX = static_ticker_summary_prefix(self.session_id)
         self.STATIC_PROFILE_PREFIX = static_ticker_profile_prefix(self.session_id)
         self.NEWS_TICKER_PREFIX = news_ticker_prefix(self.session_id)
@@ -216,6 +220,7 @@ class JerryTraderBFF:
         self._state_task = None
         self._static_task = None
         self._article_task = None  # New - article stream listener
+        self._news_processor_results_task = None  # News processor results listener
 
         # Create FastAPI app with lifespan
         @asynccontextmanager
@@ -231,6 +236,9 @@ class JerryTraderBFF:
             self._article_task = asyncio.create_task(
                 self._article_stream_listener()
             )  # New
+            self._news_processor_results_task = asyncio.create_task(
+                self._news_processor_results_listener()
+            )
 
             yield
 
@@ -245,6 +253,8 @@ class JerryTraderBFF:
                 self._static_task.cancel()
             if self._article_task:
                 self._article_task.cancel()
+            if self._news_processor_results_task:
+                self._news_processor_results_task.cancel()
             self.cleanup()
 
         self.app = FastAPI(
@@ -1272,6 +1282,114 @@ class JerryTraderBFF:
                 break
             except Exception as e:
                 logger.error(f"Article stream listener error: {e}")
+                await asyncio.sleep(5)
+
+    async def _news_processor_results_listener(self):
+        """
+        Listen to news_processor_results_stream for LLM classification results.
+
+        Each classification result is broadcast to all connected WebSocket clients
+        for the NewsRoom component to display in real-time.
+        """
+        logger.info("Starting news processor results listener...")
+
+        # Create consumer group
+        try:
+            self.r.xgroup_create(
+                self.NEWS_PROCESSOR_RESULTS_STREAM,
+                "JerryTrader_bff_news_processor_consumers",
+                id="0",
+                mkstream=True,
+            )
+        except redis.exceptions.ResponseError as e:
+            if "BUSYGROUP" not in str(e):
+                raise
+
+        consumer_name = f"JerryTrader_news_proc_{datetime.now().timestamp()}"
+
+        while self._running:
+            try:
+                messages = self.r.xreadgroup(
+                    "JerryTrader_bff_news_processor_consumers",
+                    consumer_name,
+                    {self.NEWS_PROCESSOR_RESULTS_STREAM: ">"},
+                    count=10,
+                    block=1000,
+                )
+
+                if messages:
+                    for stream_name, message_list in messages:
+                        for message_id, message_data in message_list:
+                            symbol = message_data.get("symbol")
+                            if not symbol:
+                                self.r.xack(
+                                    self.NEWS_PROCESSOR_RESULTS_STREAM,
+                                    "JerryTrader_bff_news_processor_consumers",
+                                    message_id,
+                                )
+                                continue
+
+                            # Parse explanation JSON if present
+                            explanation = {}
+                            try:
+                                explanation = json.loads(
+                                    message_data.get("explanation", "{}")
+                                )
+                            except Exception:
+                                explanation = {
+                                    "raw": message_data.get("explanation", "")
+                                }
+
+                            # Build news processor result message
+                            news_result = {
+                                "type": "news_processor_result",
+                                "model": message_data.get("model", ""),
+                                "symbol": symbol,
+                                "is_catalyst": message_data.get("is_catalyst")
+                                == "true",
+                                "classification": message_data.get(
+                                    "classification", "NO"
+                                ),
+                                "score": message_data.get("score", "0/10"),
+                                "title": message_data.get("title", ""),
+                                "published_time": message_data.get(
+                                    "published_time", ""
+                                ),
+                                "current_time": message_data.get("current_time", ""),
+                                "explanation": explanation,
+                                "url": message_data.get("url", ""),
+                                "content_preview": message_data.get(
+                                    "content_preview", ""
+                                ),
+                                "sources": message_data.get("sources", "[]"),
+                                "source_from": message_data.get("source_from", ""),
+                                "timestamp": message_id,  # Use stream ID as timestamp
+                            }
+
+                            logger.debug(
+                                f"Broadcasting news processor result: {symbol} - "
+                                f"{'✅' if news_result['is_catalyst'] else '❌'} {news_result['score']}"
+                            )
+
+                            # Broadcast to all connected clients
+                            for client_id in self.manager.active_connections:
+                                await self.manager.send_personal_message(
+                                    news_result, client_id
+                                )
+
+                            # Acknowledge
+                            self.r.xack(
+                                self.NEWS_PROCESSOR_RESULTS_STREAM,
+                                "JerryTrader_bff_news_processor_consumers",
+                                message_id,
+                            )
+
+                await asyncio.sleep(0.01)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"News processor results listener error: {e}")
                 await asyncio.sleep(5)
 
     def run(self, debug: bool = False):

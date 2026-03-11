@@ -42,6 +42,7 @@ from pydantic import BaseModel
 
 from jerry_trader.DataManager.chart_data_service import ChartDataService
 from jerry_trader.utils.logger import setup_logger
+from jerry_trader.utils.redis_keys import factor_tasks_stream
 from jerry_trader.utils.session import make_session_id, parse_session_id
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
@@ -71,18 +72,22 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket, client_id: str):
         await websocket.accept()
         self.active_connections[client_id] = websocket
-        logger.info(f"Chart client connected: {client_id}")
+        logger.info(f"ConnectionManager.connect - {client_id}: chart client connected")
 
     def disconnect(self, client_id: str):
         self.active_connections.pop(client_id, None)
-        logger.info(f"Chart client disconnected: {client_id}")
+        logger.info(
+            f"ConnectionManager.disconnect - {client_id}: chart client disconnected"
+        )
 
     async def send_personal_message(self, message: dict, client_id: str):
         if client_id in self.active_connections:
             try:
                 await self.active_connections[client_id].send_json(message)
             except Exception as e:
-                logger.error(f"Error sending to {client_id}: {e}")
+                logger.error(
+                    f"ConnectionManager.send_personal_message - {client_id}: error - {e}"
+                )
 
 
 # ============ Chart Data BFF Class ============
@@ -131,6 +136,29 @@ class ChartDataBFF:
         "1w": 604800,
         "1M": 2592000,
     }
+
+    @staticmethod
+    def _ms_to_readable(ts_ms: int, tz: str = "UTC") -> str:
+        """Convert epoch ms to readable time string for logging.
+
+        Args:
+            ts_ms: Timestamp in milliseconds since Unix epoch
+            tz: Timezone name (default: "UTC", can be "America/New_York" for ET)
+
+        Returns:
+            Human-readable timestamp string
+        """
+        from datetime import datetime
+        from datetime import timezone as dt_timezone
+        from zoneinfo import ZoneInfo
+
+        if tz == "UTC":
+            dt = datetime.fromtimestamp(ts_ms / 1000, tz=dt_timezone.utc)
+            return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] + " UTC"
+        else:
+            dt = datetime.fromtimestamp(ts_ms / 1000, tz=ZoneInfo(tz))
+            tz_abbr = dt.strftime("%Z")
+            return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] + f" {tz_abbr}"
 
     def __init__(
         self,
@@ -206,6 +234,9 @@ class ChartDataBFF:
         # ── Bar subscriptions (WS clients → ticker:timeframe) ────────
         # key = "TICKER:builder_tf", value = set of client_ids
         self._bar_subscriptions: Dict[str, Set[str]] = {}
+        # Track which tickers are currently subscribed at the BarsBuilder level
+        # to avoid duplicate Redis add/remove messages
+        self._builder_subscribed_tickers: Set[str] = set()
         self._bars_pubsub_task = None
 
         # Background task tracking
@@ -351,6 +382,8 @@ class ChartDataBFF:
 
             # If ClickHouse is missing historical coverage, backfill
             # from Polygon and persist into ClickHouse.
+            # Skip backfill if we have bars from today (BarsBuilder is actively building).
+            # Only backfill on cold start (no bars) or if all bars are from past days.
             if self._needs_historical_backfill(
                 ch_bars,
                 ch_tf,
@@ -460,7 +493,7 @@ class ChartDataBFF:
                 self._remove_bar_subscriptions(client_id)
                 self.manager.disconnect(client_id)
             except Exception as e:
-                logger.error(f"Chart WebSocket error for {client_id}: {e}")
+                logger.error(f"websocket_endpoint - {client_id}: error - {e}")
                 self._remove_bar_subscriptions(client_id)
                 self.manager.disconnect(client_id)
 
@@ -477,7 +510,21 @@ class ChartDataBFF:
             if ticker and builder_tf in self.BARS_BUILDER_TIMEFRAMES:
                 key = f"{ticker}:{builder_tf}"
                 self._bar_subscriptions.setdefault(key, set()).add(client_id)
-                logger.debug(f"Client {client_id} subscribed to bars {key}")
+                logger.debug(
+                    f"_handle_websocket_message - {client_id}: subscribed to {key}"
+                )
+
+                # If this is the first subscription for this ticker across all timeframes,
+                # notify BarsBuilderService via Redis stream to start building bars
+                if ticker not in self._builder_subscribed_tickers:
+                    self._builder_subscribed_tickers.add(ticker)
+                    stream_key = factor_tasks_stream(self.session_id)
+                    msg_id = self.r.xadd(
+                        stream_key, {"action": "add", "ticker": ticker}
+                    )
+                    logger.info(
+                        f"_handle_websocket_message - {ticker}: sent 'add' to BarsBuilder (msg_id={msg_id})"
+                    )
 
         elif msg_type == "unsubscribe_bars":
             ticker = (payload.get("ticker") or "").upper()
@@ -489,7 +536,27 @@ class ChartDataBFF:
                 subs.discard(client_id)
                 if not subs:
                     del self._bar_subscriptions[key]
-                logger.debug(f"Client {client_id} unsubscribed from bars {key}")
+                logger.debug(
+                    f"_handle_websocket_message - {client_id}: unsubscribed from {key}"
+                )
+
+                # If no more subscriptions exist for this ticker across all timeframes,
+                # notify BarsBuilderService to stop building bars
+                if ticker in self._builder_subscribed_tickers:
+                    # Check if any other timeframes for this ticker are still subscribed
+                    ticker_still_active = any(
+                        k.startswith(f"{ticker}:")
+                        for k in self._bar_subscriptions.keys()
+                    )
+                    if not ticker_still_active:
+                        self._builder_subscribed_tickers.discard(ticker)
+                        stream_key = factor_tasks_stream(self.session_id)
+                        msg_id = self.r.xadd(
+                            stream_key, {"action": "remove", "ticker": ticker}
+                        )
+                        logger.info(
+                            f"_handle_websocket_message - {ticker}: sent 'remove' to BarsBuilder (msg_id={msg_id})"
+                        )
 
     # ════════════════════════════════════════════════════════════════════════
     # ClickHouse bar query
@@ -523,6 +590,9 @@ class ChartDataBFF:
             pending = self._bars_builder.get_pending_bars(ticker, builder_tf)
             for pbar in pending:
                 pbar_time = pbar["bar_start"] // 1000  # ms → seconds
+
+                logger.debug(f"pbar_time:{pbar_time}, last_time:{last_time}")
+
                 if pbar_time > last_time:
                     bars.append(
                         {
@@ -550,7 +620,13 @@ class ChartDataBFF:
             partial = self._bars_builder.get_partial_bar(ticker, builder_tf)
             if partial is not None:
                 partial_time = partial["bar_start"] // 1000
-                if partial_time > last_time:
+                partial_trades = partial.get("trade_count", 0)
+                # Check if partial has real OHLC variation (not flat)
+                has_ohlc_range = partial["high"] != partial["low"]
+                is_meaningful = partial_trades >= 2 or has_ohlc_range
+
+                if partial_time > last_time and is_meaningful:
+                    # New bar: only append if it has meaningful OHLC
                     bars.append(
                         {
                             "time": partial_time,
@@ -561,8 +637,8 @@ class ChartDataBFF:
                             "volume": partial["volume"],
                         }
                     )
-                elif partial_time == last_time:
-                    # Update in place — partial bar has the most recent data
+                elif partial_time == last_time and is_meaningful:
+                    # Same bar: replace if it has meaningful OHLC
                     bars[-1] = {
                         "time": partial_time,
                         "open": partial["open"],
@@ -571,19 +647,24 @@ class ChartDataBFF:
                         "close": partial["close"],
                         "volume": partial["volume"],
                     }
+                else:
+                    # Flat partial bar (H=L, trade_count<2) — skip to preserve data quality
+                    logger.debug(
+                        f"_append_partial_bar - {ticker}/{builder_tf}: "
+                        f"skipping flat partial bar (time={'new' if partial_time > last_time else 'same'}, "
+                        f"trades={partial_trades}, O={partial['open']:.2f}, "
+                        f"H={partial['high']:.2f}, L={partial['low']:.2f}, C={partial['close']:.2f})"
+                    )
 
             result["bars"] = bars
             result["barCount"] = len(bars)
 
             logger.debug(
-                f"Appended {len(pending)} pending + "
-                f"{'1 partial' if partial else '0 partial'} bar(s) "
-                f"for {ticker}/{builder_tf}"
+                f"_append_partial_bar - {ticker}/{builder_tf}: "
+                f"appended {len(pending)} pending + {'1 partial' if partial else '0 partial'} bar(s)"
             )
         except Exception as e:
-            logger.debug(
-                f"Could not get pending/partial bars for {ticker}/{builder_tf}: {e}"
-            )
+            logger.debug(f"_append_partial_bar - {ticker}/{builder_tf}: error - {e}")
 
     def _query_bars_clickhouse(
         self,
@@ -635,7 +716,10 @@ class ChartDataBFF:
             * 1000
         )
 
-        logger.debug(f"ClickHouse query start:{start_ms}, end:{end_ms}")
+        logger.debug(
+            f"_query_bars_clickhouse - {ticker}/{builder_tf}: "
+            f"querying from {self._ms_to_readable(start_ms)} to {self._ms_to_readable(end_ms)}"
+        )
 
         try:
             query = """
@@ -687,7 +771,9 @@ class ChartDataBFF:
                 "to": str(end_dt),
             }
         except Exception as e:
-            logger.error(f"ClickHouse bar query failed for {ticker}/{builder_tf}: {e}")
+            logger.error(
+                f"_query_bars_clickhouse - {ticker}/{builder_tf}: query failed - {e}"
+            )
             return None
 
     # ════════════════════════════════════════════════════════════════════════
@@ -703,46 +789,52 @@ class ChartDataBFF:
     ) -> bool:
         """Return True when ClickHouse bars are empty or miss historical coverage.
 
-        Compares the earliest bar timestamp against the requested start date.
-        If the gap exceeds a few bar durations, historical data is missing
-        (e.g. cold-start scenario where BarsBuilder only has recent ticks).
+        Checks if the latest bar is recent enough based on the timeframe.
+        If the gap between the latest bar and now exceeds a threshold
+        (based on bar duration), historical backfill is needed.
+
+        This handles:
+        - Cold start (no bars) → backfill
+        - Recent bars (BarsBuilder active) → skip backfill
+        - Gap after unsubscribe → backfill to fill the gap
+
+        Threshold is 3x bar duration:
+        - 10s: 30s tolerance
+        - 1m: 3 minutes tolerance
+        - 5m: 15 minutes tolerance
+        - 1h: 3 hours tolerance
         """
         if not ch_bars:
-            return True
-
-        dur = self._TF_DURATION_SEC.get(builder_tf, 60)
+            return True  # No bars at all → need backfill
 
         from jerry_trader import clock
 
-        end_dt = (
-            datetime.strptime(to_date, "%Y-%m-%d").date()
-            if to_date
-            else clock.now_datetime().date()
-        )
-        if from_date:
-            start_dt = datetime.strptime(from_date, "%Y-%m-%d").date()
-        else:
-            # Mirror the default lookback in _query_bars_clickhouse
-            if dur <= 60:
-                days_back = 2
-            elif dur <= 900:
-                days_back = 5
-            elif dur <= 14400:
-                days_back = 30
-            elif dur <= 86400:
-                days_back = 365
-            else:
-                days_back = 1825
-            start_dt = end_dt - timedelta(days=days_back)
+        # Get bar duration and compute recency threshold
+        dur_sec = self._TF_DURATION_SEC.get(builder_tf, 60)
 
-        requested_start = int(
-            datetime.combine(start_dt, datetime.min.time()).timestamp()
-        )
-        earliest_bar = ch_bars[0]["time"]  # epoch seconds
+        # Threshold: 3x bar duration allows some tolerance for timing/latency
+        # If gap > 3 bars, there's likely a real gap that needs backfilling
+        gap_threshold = dur_sec * 3
 
-        # Gap > 3 bar-durations (min 5 min) ⇒ need historical backfill
-        gap_threshold = max(dur * 3, 300)
-        return (earliest_bar - requested_start) > gap_threshold
+        # Check if latest bar is recent enough
+        latest_bar_time = ch_bars[-1]["time"]  # epoch seconds
+        now_sec = clock.now_ms() // 1000
+        gap = now_sec - latest_bar_time
+
+        if gap <= gap_threshold:
+            # Latest bar is recent → BarsBuilder is active or just stopped, skip backfill
+            logger.debug(
+                f"_needs_historical_backfill - {builder_tf}: "
+                f"latest bar is recent (gap={gap}s <= threshold={gap_threshold}s), skip backfill"
+            )
+            return False
+
+        # Gap exceeds threshold → need backfill to fill the gap
+        logger.debug(
+            f"_needs_historical_backfill - {builder_tf}: "
+            f"gap detected (gap={gap}s > threshold={gap_threshold}s), backfill needed"
+        )
+        return True
 
     def _backfill_to_clickhouse(
         self,
@@ -814,13 +906,13 @@ class ChartDataBFF:
                 column_names=columns,
             )
             logger.info(
-                f"Backfilled {len(rows)} {builder_tf} bars for {ticker} "
-                f"to ClickHouse (source={result.get('source', '?')})"
+                f"_backfill_to_clickhouse - {ticker}/{builder_tf}: "
+                f"backfilled {len(rows)} bars to ClickHouse (source={result.get('source', '?')})"
             )
             return len(rows)
         except Exception as e:
             logger.error(
-                f"ClickHouse backfill insert failed for {ticker}/{builder_tf}: {e}"
+                f"_backfill_to_clickhouse - {ticker}/{builder_tf}: insert failed - {e}"
             )
             return 0
 
@@ -830,7 +922,7 @@ class ChartDataBFF:
 
     async def _bars_pubsub_listener(self):
         """Subscribe to bars:* Redis pub/sub and relay to interested WS clients."""
-        logger.info("Starting bars pub/sub listener...")
+        logger.info("_bars_pubsub_listener: starting...")
 
         # Create a dedicated Redis connection for pub/sub (blocking subscriber)
         try:
@@ -844,9 +936,9 @@ class ChartDataBFF:
             )
             ps = pubsub_redis.pubsub()
             ps.psubscribe("bars:*")
-            logger.info("Subscribed to Redis bars:* pattern")
+            logger.info("_bars_pubsub_listener: subscribed to Redis bars:* pattern")
         except Exception as e:
-            logger.error(f"Failed to subscribe to bars pub/sub: {e}")
+            logger.error(f"_bars_pubsub_listener: failed to subscribe - {e}")
             return
 
         try:
@@ -887,7 +979,7 @@ class ChartDataBFF:
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
-                    logger.error(f"Bars pub/sub error: {e}")
+                    logger.error(f"_bars_pubsub_listener: error - {e}")
                     await asyncio.sleep(1)
         finally:
             try:
@@ -900,12 +992,35 @@ class ChartDataBFF:
     def _remove_bar_subscriptions(self, client_id: str):
         """Remove a client from all bar subscriptions (called on disconnect)."""
         empty_keys = []
+        affected_tickers = set()
+
         for key, clients in self._bar_subscriptions.items():
             clients.discard(client_id)
             if not clients:
                 empty_keys.append(key)
+                # Extract ticker from key (format: "TICKER:timeframe")
+                ticker = key.split(":")[0]
+                affected_tickers.add(ticker)
+
         for key in empty_keys:
             del self._bar_subscriptions[key]
+
+        # Check if any affected tickers should be unsubscribed from BarsBuilder
+        for ticker in affected_tickers:
+            if ticker in self._builder_subscribed_tickers:
+                # Check if any subscriptions still exist for this ticker
+                ticker_still_active = any(
+                    k.startswith(f"{ticker}:") for k in self._bar_subscriptions.keys()
+                )
+                if not ticker_still_active:
+                    self._builder_subscribed_tickers.discard(ticker)
+                    stream_key = factor_tasks_stream(self.session_id)
+                    msg_id = self.r.xadd(
+                        stream_key, {"action": "remove", "ticker": ticker}
+                    )
+                    logger.info(
+                        f"_remove_bar_subscriptions - {ticker}: sent 'remove' to BarsBuilder (msg_id={msg_id})"
+                    )
 
     def run(self, debug: bool = False):
         """Run the Chart Data BFF server."""

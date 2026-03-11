@@ -115,27 +115,33 @@ impl Session {
 
 /// Session boundary calculator.
 ///
-/// All timestamps are in **milliseconds since Unix epoch** and assumed to be
-/// in US/Eastern (the caller is responsible for conversion — in practice
-/// Polygon timestamps are already Eastern-aligned for equity markets).
+/// **IMPORTANT CONTRACT**: All timestamps passed to this calculator MUST be
+/// **milliseconds since Unix epoch in US/Eastern time** (not UTC).
 ///
-/// For simplicity we store boundaries as ms-offsets from midnight.
-/// We deliberately do NOT handle DST or holidays here — the Python service
-/// can pass an ET-aligned epoch and skip feeding ticks on market holidays.
+/// The Python layer is responsible for converting UTC → ET using proper
+/// timezone-aware libraries (pytz/zoneinfo) that handle DST correctly before
+/// passing timestamps to Rust.
+///
+/// Session boundaries (premarket 04:00, regular 09:30, afterhours 16:00-20:00)
+/// are defined as simple time-of-day offsets from midnight. No timezone
+/// conversion or DST handling is performed in Rust.
+///
+/// Market holidays should be handled by the Python layer (simply don't feed
+/// ticks on those days).
 pub struct SessionCalendar;
 
 impl SessionCalendar {
     // Session boundaries as ms from midnight ET.
-    const PREMARKET_START: i64 = 4 * 3_600_000;           // 04:00
-    const REGULAR_START: i64 = 9 * 3_600_000 + 30 * 60_000; // 09:30
-    const AFTERHOURS_START: i64 = 16 * 3_600_000;          // 16:00
-    const AFTERHOURS_END: i64 = 20 * 3_600_000;            // 20:00
+    const PREMARKET_START: i64 = 4 * 3_600_000;           // 04:00 ET
+    const REGULAR_START: i64 = 9 * 3_600_000 + 30 * 60_000; // 09:30 ET
+    const AFTERHOURS_START: i64 = 16 * 3_600_000;          // 16:00 ET
+    const AFTERHOURS_END: i64 = 20 * 3_600_000;            // 20:00 ET
     const DAY_MS: i64 = 86_400_000;
 
     /// Classify which session a timestamp falls into.
-    /// `ts_ms` is ms since Unix epoch (assumed ET-aligned).
-    pub fn classify(ts_ms: i64) -> Session {
-        let ms_of_day = ts_ms.rem_euclid(Self::DAY_MS);
+    /// `et_ms` is ms since Unix epoch in US/Eastern time.
+    pub fn classify(et_ms: i64) -> Session {
+        let ms_of_day = et_ms.rem_euclid(Self::DAY_MS);
         if ms_of_day >= Self::PREMARKET_START && ms_of_day < Self::REGULAR_START {
             Session::Premarket
         } else if ms_of_day >= Self::REGULAR_START && ms_of_day < Self::AFTERHOURS_START {
@@ -147,11 +153,11 @@ impl SessionCalendar {
         }
     }
 
-    /// Returns the ms-epoch of the next session boundary AFTER `ts_ms`.
+    /// Returns the ms-epoch (ET) of the next session boundary AFTER `et_ms`.
     /// This is where a bar must be truncated if it would otherwise cross.
-    pub fn next_session_boundary(ts_ms: i64) -> i64 {
-        let day_start = ts_ms - ts_ms.rem_euclid(Self::DAY_MS);
-        let ms_of_day = ts_ms.rem_euclid(Self::DAY_MS);
+    pub fn next_session_boundary(et_ms: i64) -> i64 {
+        let day_start = et_ms - et_ms.rem_euclid(Self::DAY_MS);
+        let ms_of_day = et_ms.rem_euclid(Self::DAY_MS);
 
         if ms_of_day < Self::PREMARKET_START {
             day_start + Self::PREMARKET_START
@@ -167,41 +173,41 @@ impl SessionCalendar {
         }
     }
 
-    /// Compute the bar-start timestamp for a given timestamp and timeframe.
+    /// Compute the bar-start timestamp (ET) for a given timestamp and timeframe.
     ///
     /// For intraday timeframes (≤ 4h): aligns to the start of the current
     /// session, then snaps to the nearest timeframe boundary within that session.
     ///
-    /// For daily: aligns to midnight of the day.
-    /// For weekly: aligns to Monday midnight.
-    pub fn bar_start(ts_ms: i64, tf: Timeframe) -> i64 {
+    /// For daily: aligns to midnight ET of the day.
+    /// For weekly: aligns to Monday midnight ET.
+    pub fn bar_start(et_ms: i64, tf: Timeframe) -> i64 {
         match tf {
             Timeframe::Week1 => {
-                // Align to Monday 00:00 UTC.
+                // Align to Monday 00:00 ET.
                 // 1970-01-01 (epoch day 0) was a Thursday → weekday 3 (0=Mon).
                 // day_of_week = (days_since_epoch + 3) % 7, where 0 = Monday.
                 let day_ms = Self::DAY_MS;
-                let days = ts_ms.div_euclid(day_ms);
+                let days = et_ms.div_euclid(day_ms);
                 let dow = (days + 3).rem_euclid(7); // 0=Mon … 6=Sun
                 (days - dow) * day_ms
             }
             Timeframe::Day1 => {
-                ts_ms - ts_ms.rem_euclid(Self::DAY_MS)
+                et_ms - et_ms.rem_euclid(Self::DAY_MS)
             }
             _ => {
                 // Intraday: align within session.
-                let session_start_ms = Self::session_start_of(ts_ms);
-                let elapsed = ts_ms - session_start_ms;
+                let session_start_ms = Self::session_start_of(et_ms);
+                let elapsed = et_ms - session_start_ms;
                 let dur = tf.duration_ms();
                 session_start_ms + (elapsed / dur) * dur
             }
         }
     }
 
-    /// Returns the ms-epoch of the start of the session that `ts_ms` falls in.
-    fn session_start_of(ts_ms: i64) -> i64 {
-        let day_start = ts_ms - ts_ms.rem_euclid(Self::DAY_MS);
-        let ms_of_day = ts_ms.rem_euclid(Self::DAY_MS);
+    /// Returns the ms-epoch (ET) of the start of the session that `et_ms` falls in.
+    fn session_start_of(et_ms: i64) -> i64 {
+        let day_start = et_ms - et_ms.rem_euclid(Self::DAY_MS);
+        let ms_of_day = et_ms.rem_euclid(Self::DAY_MS);
 
         if ms_of_day >= Self::AFTERHOURS_START {
             day_start + Self::AFTERHOURS_START
@@ -210,7 +216,7 @@ impl SessionCalendar {
         } else if ms_of_day >= Self::PREMARKET_START {
             day_start + Self::PREMARKET_START
         } else {
-            // Before 04:00 — belongs to previous day's afterhours (or closed).
+            // Before 04:00 ET — belongs to previous day's afterhours (or closed).
             // Snap to previous day afterhours end → treat as "closed" start.
             day_start
         }
@@ -218,15 +224,16 @@ impl SessionCalendar {
 
     /// Effective bar end: min(bar_start + duration, next_session_boundary).
     /// Bars never cross session boundaries.
-    pub fn bar_end(bar_start_ms: i64, tf: Timeframe) -> i64 {
+    /// All timestamps in ET.
+    pub fn bar_end(bar_start_et: i64, tf: Timeframe) -> i64 {
         match tf {
             Timeframe::Day1 | Timeframe::Week1 => {
                 // Daily/weekly bars are not session-clipped.
-                bar_start_ms + tf.duration_ms()
+                bar_start_et + tf.duration_ms()
             }
             _ => {
-                let natural_end = bar_start_ms + tf.duration_ms();
-                let boundary = Self::next_session_boundary(bar_start_ms);
+                let natural_end = bar_start_et + tf.duration_ms();
+                let boundary = Self::next_session_boundary(bar_start_et);
                 natural_end.min(boundary)
             }
         }
@@ -432,11 +439,14 @@ impl BarBuilder {
 
     /// Ingest a single trade and return any completed bars.
     ///
+    /// **IMPORTANT**: `timestamp_ms` MUST be in US/Eastern time, not UTC.
+    /// Python must convert UTC → ET before calling this method.
+    ///
     /// Arguments:
     ///   ticker:       Ticker symbol (e.g. "AAPL")
     ///   price:        Trade price
     ///   size:         Trade size (shares/volume)
-    ///   timestamp_ms: Trade timestamp in ms since Unix epoch (ET-aligned)
+    ///   timestamp_ms: Trade timestamp in ms since Unix epoch **in US/Eastern time**
     ///
     /// Returns:
     ///   List of completed bar dicts (may be empty).
@@ -499,10 +509,14 @@ impl BarBuilder {
     /// Rust with no per-trade GIL interaction — Python dicts are built only
     /// for the completed bars at the end.
     ///
+    /// **IMPORTANT**: All `timestamp_ms` values MUST be in US/Eastern time, not UTC.
+    /// Python must convert UTC → ET before calling this method.
+    ///
     /// Arguments:
     ///   ticker:  Ticker symbol (e.g. "AAPL")
-    ///   trades:  List of `(timestamp_ms, price, size)` tuples, should be
-    ///            sorted ascending by timestamp for correct bar alignment.
+    ///   trades:  List of `(timestamp_ms, price, size)` tuples where timestamp_ms
+    ///            is in **US/Eastern time**. Should be sorted ascending by timestamp
+    ///            for correct bar alignment.
     ///
     /// Returns:
     ///   List of completed bar dicts (may be empty).

@@ -91,19 +91,19 @@ interface MockTicker {
 const MOCK_TICKERS: MockTicker[] = [
   { symbol: 'NVDA', price: 142.50, changePercent: 18.5, volume: 85_200_000, float: 2_440_000_000, marketCap: 3_500_000_000_000, sector: 'Technology', state: 'Best', stateReason: 'Breakout +18% on earnings beat' },
   { symbol: 'TSLA', price: 278.30, changePercent: 12.3, volume: 67_400_000, float: 2_800_000_000, marketCap: 890_000_000_000, sector: 'Consumer Cyclical', state: 'Best', stateReason: 'Gapping up on delivery numbers' },
-  { symbol: 'PLTR', price: 45.80, changePercent: 9.7, volume: 42_100_000, float: 1_900_000_000, marketCap: 101_000_000_000, sector: 'Technology', state: 'Good', stateReason: 'New gov contract announced' },
-  { symbol: 'SMCI', price: 38.20, changePercent: 8.2, volume: 35_600_000, float: 480_000_000, marketCap: 22_000_000_000, sector: 'Technology', state: 'Good', stateReason: 'AI infrastructure demand' },
-  { symbol: 'AMD', price: 168.90, changePercent: 6.1, volume: 28_900_000, float: 1_600_000_000, marketCap: 273_000_000_000, sector: 'Technology', state: 'Good', stateReason: 'Upgraded by analyst' },
-  { symbol: 'AAPL', price: 232.10, changePercent: 3.4, volume: 51_200_000, float: 15_200_000_000, marketCap: 3_580_000_000_000, sector: 'Technology', state: 'OnWatch', stateReason: 'Steady uptrend' },
-  { symbol: 'MARA', price: 22.40, changePercent: 2.8, volume: 18_700_000, float: 280_000_000, marketCap: 7_400_000_000, sector: 'Financial Services', state: 'OnWatch', stateReason: 'BTC correlation' },
-  { symbol: 'SOFI', price: 14.60, changePercent: 1.5, volume: 22_300_000, float: 900_000_000, marketCap: 15_600_000_000, sector: 'Financial Services', state: 'OnWatch', stateReason: 'Holding support' },
-  { symbol: 'RIVN', price: 13.80, changePercent: -0.8, volume: 12_400_000, float: 770_000_000, marketCap: 14_200_000_000, sector: 'Consumer Cyclical', state: 'OnWatch', stateReason: 'Range-bound' },
-  { symbol: 'META', price: 585.40, changePercent: -1.2, volume: 15_800_000, float: 2_150_000_000, marketCap: 1_480_000_000_000, sector: 'Communication Services', state: 'NotGood', stateReason: 'Fading from highs' },
-  { symbol: 'COIN', price: 205.60, changePercent: -2.5, volume: 9_800_000, float: 180_000_000, marketCap: 52_000_000_000, sector: 'Financial Services', state: 'NotGood', stateReason: 'Regulatory concerns' },
-  { symbol: 'BABA', price: 88.90, changePercent: -3.8, volume: 14_200_000, float: 2_600_000_000, marketCap: 222_000_000_000, sector: 'Consumer Cyclical', state: 'NotGood', stateReason: 'China macro weakness' },
-  { symbol: 'GME', price: 24.10, changePercent: -5.2, volume: 31_500_000, float: 260_000_000, marketCap: 10_200_000_000, sector: 'Consumer Cyclical', state: 'Bad', stateReason: 'Dilution announced' },
-  { symbol: 'LCID', price: 2.85, changePercent: -7.1, volume: 28_900_000, float: 1_800_000_000, marketCap: 8_400_000_000, sector: 'Consumer Cyclical', state: 'Bad', stateReason: 'Cash burn concerns' },
-  { symbol: 'SNAP', price: 11.20, changePercent: -8.4, volume: 19_600_000, float: 1_200_000_000, marketCap: 18_500_000_000, sector: 'Communication Services', state: 'Bad', stateReason: 'Ad revenue miss' },
+  { symbol: 'PLTR', price: 45.80, changePercent: 19.7, volume: 42_100_000, float: 1_900_000_000, marketCap: 101_000_000_000, sector: 'Technology', state: 'Good', stateReason: 'New gov contract announced' },
+  { symbol: 'SMCI', price: 38.20, changePercent: 11.2, volume: 35_600_000, float: 480_000_000, marketCap: 22_000_000_000, sector: 'Technology', state: 'Good', stateReason: 'AI infrastructure demand' },
+  { symbol: 'AMD', price: 168.90, changePercent: 20.1, volume: 28_900_000, float: 1_600_000_000, marketCap: 273_000_000_000, sector: 'Technology', state: 'Good', stateReason: 'Upgraded by analyst' },
+  { symbol: 'AAPL', price: 232.10, changePercent: 10.4, volume: 51_200_000, float: 15_200_000_000, marketCap: 3_580_000_000_000, sector: 'Technology', state: 'OnWatch', stateReason: 'Steady uptrend' },
+  { symbol: 'MARA', price: 22.40, changePercent: 22.8, volume: 18_700_000, float: 280_000_000, marketCap: 7_400_000_000, sector: 'Financial Services', state: 'OnWatch', stateReason: 'BTC correlation' },
+  { symbol: 'SOFI', price: 14.60, changePercent: 20.5, volume: 22_300_000, float: 900_000_000, marketCap: 15_600_000_000, sector: 'Financial Services', state: 'OnWatch', stateReason: 'Holding support' },
+  { symbol: 'RIVN', price: 13.80, changePercent: 16.1, volume: 12_400_000, float: 770_000_000, marketCap: 14_200_000_000, sector: 'Consumer Cyclical', state: 'OnWatch', stateReason: 'Range-bound' },
+  { symbol: 'META', price: 585.40, changePercent: 16.2, volume: 15_800_000, float: 2_150_000_000, marketCap: 1_480_000_000_000, sector: 'Communication Services', state: 'NotGood', stateReason: 'Fading from highs' },
+  { symbol: 'COIN', price: 205.60, changePercent: 8.5, volume: 9_800_000, float: 180_000_000, marketCap: 52_000_000_000, sector: 'Financial Services', state: 'NotGood', stateReason: 'Regulatory concerns' },
+  { symbol: 'BABA', price: 88.90, changePercent: 19.8, volume: 14_200_000, float: 2_600_000_000, marketCap: 222_000_000_000, sector: 'Consumer Cyclical', state: 'NotGood', stateReason: 'China macro weakness' },
+  { symbol: 'GME', price: 24.10, changePercent: 33.2, volume: 31_500_000, float: 260_000_000, marketCap: 10_200_000_000, sector: 'Consumer Cyclical', state: 'Bad', stateReason: 'Dilution announced' },
+  { symbol: 'LCID', price: 2.85, changePercent: 16.1, volume: 28_900_000, float: 1_800_000_000, marketCap: 8_400_000_000, sector: 'Consumer Cyclical', state: 'Bad', stateReason: 'Cash burn concerns' },
+  { symbol: 'SNAP', price: 11.20, changePercent: 31.4, volume: 19_600_000, float: 1_200_000_000, marketCap: 18_500_000_000, sector: 'Communication Services', state: 'Bad', stateReason: 'Ad revenue miss' },
 ];
 
 export function getMockRankEntities(): Map<string, RankEntity> {
@@ -138,7 +138,7 @@ export function getMockRankEntities(): Map<string, RankEntity> {
 export function getMockSeriesData(): Record<string, LWSeriesData> {
   const result: Record<string, LWSeriesData> = {};
   for (const t of MOCK_TICKERS) {
-    result[t.symbol] = generateSeries(t.changePercent, Math.abs(t.changePercent) * 0.15 + 0.3);
+    result[t.symbol] = generateSeries(t.changePercent, Math.abs(t.changePercent) * 0.05 + 0.03);
   }
   return result;
 }

@@ -23,14 +23,16 @@ def load_trades_from_parquet(
     symbol: str,
     date_yyyymmdd: str,
     end_ts_ms: int = 0,
+    start_ts_ms: int = 0,
 ) -> list[tuple[int, float, int]]:
     """Load trades from parquet for a single symbol/date.
 
     Tries partitioned file first, falls back to monolithic.
     Returns List[(ts_ms, price, size)] sorted ascending.
 
-    If end_ts_ms > 0, only trades with timestamp < end_ts_ms are returned
-    (predicate pushdown at scan time).
+    If start_ts_ms > 0, only trades with timestamp >= start_ts_ms are returned.
+    If end_ts_ms > 0, only trades with timestamp < end_ts_ms are returned.
+    Both filters use predicate pushdown at scan time.
     Raises RuntimeError if no parquet file is found.
     """
     ...

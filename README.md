@@ -171,6 +171,7 @@ mainly focus on basic modules development and strcuture buidling.
 - ✅ add frontend request_id to prevent race conditions.
 - ✅ frontend charts seperated.
 - ✅ deep review how current bar_buidler builds the bars in different senarios. 10s bootstrap done.
+- [ ] _needs_historical_backfill logic refine.
 - [ ] Downstream consumers + InfluxDB→ClickHouse migration
 - [ ] FactorEngine consumes batched bars/data (not raw ticks)
 - [ ] Snapshot data: InfluxDB → ClickHouse
@@ -223,11 +224,12 @@ some other features to make it better.
 - [ ] historical orders analysis modules.
 - [ ] Add more modules, like Agent module to monitor the global staus also focus on one ticker at the same time.
   - [ ] News engine output from log to json log. route to openclaw/heartbeat llm in the future.
-    - [ ] news room
+    - ✅ news room
+      - [ ] focus mode
 
 ### open issues
 
-- ✅ frontend chart newest bar render will cover up the the last bar timespan duration time open,high,low price. always start a new bar based on incoming websocket since connected.
+- [ ] frontend chart newest bar render will cover up the the last bar timespan duration time open,high,low price. always start a new bar based on incoming websocket since connected.
 - ✅ 4h local data in replay fetch has a problem overlapping the bar though we have cut_off before resample in local_data_loader.
 
 ### Current frontend preview

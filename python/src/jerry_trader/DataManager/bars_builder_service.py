@@ -59,6 +59,11 @@ logger = setup_logger("bars_builder", log_to_file=True, level=logging.DEBUG)
 CLIENT_ID = "bars_builder"  # queue fan-out identity in UnifiedTickManager
 BATCH_SIZE = 500  # ClickHouse insert batch size
 
+# Intraday timeframes eligible for trade bootstrap.
+# Excludes 1d/1w which span session boundaries — those are
+# aggregated purely from WS ticks (no historical back-fill).
+BOOTSTRAP_TIMEFRAMES = {"10s", "1m", "5m", "15m", "30m", "1h", "4h"}
+
 
 class BarsBuilderService:
     """
@@ -174,15 +179,19 @@ class BarsBuilderService:
         self._shutdown = False
         self._stats = {"ticks_ingested": 0, "bars_completed": 0, "bars_written": 0}
 
-        # ── 10s bootstrap / WS merge state ───────────────────────────
-        # first_ws_tick_ts:   epoch ms of the very first WS tick per ticker
-        # meeting_bar_start:  bar_start of the 10s bar that straddles the
-        #                     REST→WS boundary (REST has prefix, WS has suffix)
-        # ws_meeting_bars:    completed WS meeting bar, held for later merge
+        # ── Bootstrap / WS merge state ────────────────────────────
+        # Computed once: intersection of configured TFs with bootstrappable TFs
+        self._bootstrap_tfs_set = set(self.timeframes) & BOOTSTRAP_TIMEFRAMES
+
+        # first_ws_tick_ts:  epoch ms of the first WS tick per ticker
+        # meeting_bar_start: ticker → {tf → bar_start} — the bar straddling
+        #                    the REST→WS boundary per timeframe
+        # ws_meeting_bars:   ticker → {tf → bar dict} — WS half of meeting bar
+        # bootstrap_done:    ticker → set of TFs that completed bootstrap
         self._first_ws_tick_ts: Dict[str, int] = {}
-        self._meeting_bar_start: Dict[str, int] = {}
-        self._ws_meeting_bars: Dict[str, dict] = {}
-        self._bootstrap_done: set = set()  # tickers that finished bootstrap
+        self._meeting_bar_start: Dict[str, Dict[str, int]] = {}
+        self._ws_meeting_bars: Dict[str, Dict[str, dict]] = {}
+        self._bootstrap_done: Dict[str, set] = {}
 
     # ════════════════════════════════════════════════════════════════════
     # Lifecycle
@@ -220,6 +229,8 @@ class BarsBuilderService:
         # Flush remaining bars from BarBuilder
         remaining = self.bar_builder.flush()
         if remaining:
+            # Convert ET → UTC before storing
+            remaining = [self._convert_bar_et_to_utc(bar) for bar in remaining]
             self._pending_bars.extend(remaining)
             self._stats["bars_completed"] += len(remaining)
         self._flush_to_clickhouse()
@@ -320,19 +331,28 @@ class BarsBuilderService:
     def _add_ticker(self, symbol: str) -> None:
         if symbol in self.active_tickers:
             return
-        logger.info(f"Adding ticker: {symbol}")
+        logger.info(f"_add_ticker - {symbol}: subscribing to tick stream")
         self.active_tickers.add(symbol)
 
         # Subscribe to trade events via shared UnifiedTickManager
         # NOTE: subscribe() is an async coroutine — must schedule on ws_loop
-        asyncio.run_coroutine_threadsafe(
-            self.ws_manager.subscribe(
-                websocket_client=CLIENT_ID,
-                symbols=[symbol],
-                events=["T"],
-            ),
-            self.ws_loop,
-        )
+        logger.debug(f"_add_ticker - {symbol}: calling ws_manager.subscribe()")
+        try:
+            sub_future = asyncio.run_coroutine_threadsafe(
+                self.ws_manager.subscribe(
+                    websocket_client=CLIENT_ID,
+                    symbols=[symbol],
+                    events=["T"],
+                ),
+                self.ws_loop,
+            )
+            # Wait for subscribe to complete (with timeout) before creating consumer
+            sub_future.result(timeout=2.0)
+            logger.debug(f"_add_ticker - {symbol}: ws_manager.subscribe() completed")
+        except Exception as e:
+            logger.error(f"_add_ticker - {symbol}: ws_manager.subscribe() failed - {e}")
+            self.active_tickers.discard(symbol)
+            return
 
         # Create async consumer for each trade stream key
         stream_key = f"T.{symbol}"
@@ -340,24 +360,54 @@ class BarsBuilderService:
             self._consume_stream_key(stream_key, symbol), self.ws_loop
         )
         self.stream_consumers[stream_key] = future
-        logger.debug(f"Created consumer for {stream_key}")
+        logger.debug(f"_add_ticker - {symbol}: created consumer for {stream_key}")
 
-        # Check if 10s bars need bootstrap (single-date only)
-        # Live mode: fetch from Polygon REST API
-        # Replay mode: TODO - fetch from local parquet files
-        if "10s" in self.timeframes:
-            if not self._has_10s_bars_today(symbol):
-                Thread(
-                    target=self._bootstrap_10s_bars,
-                    args=(symbol,),
-                    daemon=True,
-                    name=f"bootstrap-10s-{symbol}",
-                ).start()
+        # Bootstrap intraday bars from historical trades.
+        # Determines start point from last bar_start in ClickHouse today.
+        # Using bar_start (not bar_end) ensures that partial bars written
+        # during unsubscribe are rebuilt from the beginning of that bar
+        # with complete trade data, rather than overwritten by a gap.
+        # None → first subscription → 4 AM ET session start.
+        bootstrap_tfs = list(self._bootstrap_tfs_set)
+        if bootstrap_tfs:
+            from_ms = None
+            for tf in bootstrap_tfs:
+                last_start = self._get_last_bar_start_today(symbol, tf)
+                if last_start is not None:
+                    if from_ms is None or last_start < from_ms:
+                        from_ms = last_start
+            Thread(
+                target=self._bootstrap_bars,
+                args=(symbol, bootstrap_tfs, from_ms),
+                daemon=True,
+                name=f"bootstrap-{symbol}",
+            ).start()
 
     def _remove_ticker(self, symbol: str) -> None:
         if symbol not in self.active_tickers:
             return
-        logger.info(f"Removing ticker: {symbol}")
+        logger.info(f"_remove_ticker - {symbol}: unsubscribing from tick stream")
+
+        # Unsubscribe from WebSocket stream via UnifiedTickManager
+        logger.debug(f"_remove_ticker - {symbol}: calling ws_manager.unsubscribe()")
+        try:
+            unsub_future = asyncio.run_coroutine_threadsafe(
+                self.ws_manager.unsubscribe(
+                    websocket_client=CLIENT_ID,
+                    symbol=symbol,  # Note: singular 'symbol', not 'symbols'
+                    events=["T"],
+                ),
+                self.ws_loop,
+            )
+            # Wait for unsubscribe to complete (with timeout)
+            unsub_future.result(timeout=2.0)
+            logger.debug(
+                f"_remove_ticker - {symbol}: ws_manager.unsubscribe() completed"
+            )
+        except Exception as e:
+            logger.error(
+                f"_remove_ticker - {symbol}: ws_manager.unsubscribe() failed - {e}"
+            )
 
         # Cancel stream consumer
         stream_key = f"T.{symbol}"
@@ -368,8 +418,16 @@ class BarsBuilderService:
         # Flush bars for this ticker to ClickHouse
         completed = self.bar_builder.remove_ticker(symbol)
         if completed:
+            # Convert ET → UTC before storing
+            completed = [self._convert_bar_et_to_utc(bar) for bar in completed]
             self._pending_bars.extend(completed)
             self._stats["bars_completed"] += len(completed)
+
+        # Clear bootstrap/merge state so re-subscribe triggers fresh bootstrap
+        self._first_ws_tick_ts.pop(symbol, None)
+        self._meeting_bar_start.pop(symbol, None)
+        self._ws_meeting_bars.pop(symbol, None)
+        self._bootstrap_done.pop(symbol, None)
 
         self.active_tickers.discard(symbol)
 
@@ -377,15 +435,17 @@ class BarsBuilderService:
     # 10s Bootstrap (Polygon REST → BarBuilder → ClickHouse)
     # ════════════════════════════════════════════════════════════════════
 
-    def _has_10s_bars_today(self, symbol: str) -> bool:
-        """Check if any 10s bars exist in ClickHouse for this ticker on this replay date.
+    def _get_last_bar_start_today(self, symbol: str, tf: str) -> Optional[int]:
+        """Return the last bar_start (ms) for this ticker+timeframe today.
 
-        Returns True if bars exist (skip bootstrap), False if empty (need bootstrap).
-        Only checks current replay date — no cross-date bootstrap for 10s.
+        Returns None if no bars exist (first subscription → bootstrap from
+        4 AM ET session start).  On re-subscribe, returns the START of the
+        last bar so the bootstrap re-fetches trades from that point — this
+        ensures the partial bar written during unsubscribe is rebuilt with
+        complete trade data rather than overwritten with a gap.
         """
         from datetime import datetime, timedelta
 
-        # Get date boundaries for current replay date
         start_dt = datetime.strptime(self.db_date, "%Y%m%d")
         end_dt = start_dt + timedelta(days=1)
         start_ms = int(start_dt.timestamp() * 1000)
@@ -393,10 +453,10 @@ class BarsBuilderService:
 
         try:
             query = """
-                SELECT COUNT(*) as cnt
-                FROM ohlcv_bars
+                SELECT MAX(bar_start) as last_start
+                FROM ohlcv_bars FINAL
                 WHERE ticker = {ticker:String}
-                  AND timeframe = '10s'
+                  AND timeframe = {timeframe:String}
                   AND bar_start >= {start_ms:Int64}
                   AND bar_start < {end_ms:Int64}
             """
@@ -404,85 +464,106 @@ class BarsBuilderService:
                 query,
                 parameters={
                     "ticker": symbol,
+                    "timeframe": tf,
                     "start_ms": start_ms,
                     "end_ms": end_ms,
                 },
             )
-            count = result.result_rows[0][0] if result.result_rows else 0
+            last_start = result.result_rows[0][0] if result.result_rows else None
+            if last_start and last_start > 0:
+                logger.info(
+                    f"_get_last_bar_start_today - {symbol}/{tf}: "
+                    f"last_start={self._ms_to_et(last_start)}"
+                )
+                return last_start
             logger.info(
-                f"_has_10s_bars_today - {symbol}: {count} bars on {self.db_date}"
+                f"_get_last_bar_start_today - {symbol}/{tf}: "
+                f"no bars on {self.db_date}"
             )
-            return count > 0
+            return None
         except Exception as e:
-            logger.error(f"_has_10s_bars_today - {symbol}: {e}")
-            return False  # On error, assume no bars → trigger bootstrap
+            logger.error(f"_get_last_bar_start_today - {symbol}/{tf}: {e}")
+            return None
 
-    def _load_trades_from_parquet(self, symbol: str) -> List[tuple]:
+    def _load_trades_from_parquet(
+        self, symbol: str, start_ts_ms: int = 0
+    ) -> List[tuple]:
         """Load trades from local parquet via Rust.
 
         Delegates to jerry_trader._rust.load_trades_from_parquet which
         handles partitioned/monolithic fallback, ticker filtering, ns→ms
         conversion, and sorting — all in Rust/Polars.
 
-        Uses the replay clock's current time as the upper bound so only
-        trades up to "now" are loaded (predicate pushdown at scan time).
+        Both start_ts_ms and end_ts_ms are applied as predicate-pushdown
+        filters at scan time so only the needed trade window is loaded.
 
         Returns List[(ts_ms, price, size)] sorted ascending by timestamp.
         """
         end_ts_ms = clock_mod.now_ms()
         trades = load_trades_from_parquet(
-            lake_data_dir, symbol, self.db_date, end_ts_ms
+            lake_data_dir, symbol, self.db_date, end_ts_ms, start_ts_ms
         )
         logger.info(
             f"_load_trades_from_parquet - {symbol}: "
             f"loaded {len(trades)} trades from parquet (via Rust), "
-            f"end_ts={self._ms_to_et(end_ts_ms)}"
+            f"range=[{self._ms_to_et(start_ts_ms) if start_ts_ms else 'start'} → "
+            f"{self._ms_to_et(end_ts_ms)}]"
         )
         return trades
 
-    def _bootstrap_10s_bars(self, symbol: str) -> None:
-        """Fetch historical trades and merge with WS at the meeting bar.
+    def _bootstrap_bars(
+        self,
+        symbol: str,
+        bootstrap_tfs: List[str],
+        from_ms: Optional[int],
+    ) -> None:
+        """Fetch historical trades and build bars for all bootstrap timeframes.
 
-        Uses a dedicated BarBuilder(["10s"]) to avoid thread-race with the
-        real-time WebSocket path.
+        Uses a dedicated BarBuilder(bootstrap_tfs) to avoid thread-race with
+        the real-time WebSocket path.
 
-        Only feeds trades where ts < first_ws_tick_ts to avoid
-        double-counting.  The "meeting bar" (the 10s window straddling
-        the boundary) is merged from both sources:
+        Trade window: [from_ms, first_ws_ts)
+          - from_ms comes from _get_last_bar_end_today() — None means first
+            subscription (defaults to 4 AM ET session start).
+          - first_ws_ts is the timestamp of the first WS tick (upper bound).
+
+        For each timeframe, the "meeting bar" (the bar straddling the
+        REST→WS boundary) is merged from both sources:
           historical prefix  [bar_start … first_ws_ts)
           WS         suffix  [first_ws_ts … bar_end)
-        producing a single complete bar written to ClickHouse.
 
         Live mode:   Polygon REST API (fetch_polygon_trades)
         Replay mode: local parquet files (partitioned or monolithic)
         """
-        logger.info(f"_bootstrap_10s_bars - {symbol}: starting ({self.run_mode} mode)")
+        logger.info(
+            f"_bootstrap_bars - {symbol}: starting ({self.run_mode} mode), "
+            f"tfs={bootstrap_tfs}, "
+            f"from_ms={self._ms_to_et(from_ms) if from_ms else 'session_start'}"
+        )
 
         try:
-            # Dispatch trade loading based on mode
+            # ── Fetch trades ──────────────────────────────────────────
             if self.run_mode == "live":
-                raw_trades = fetch_polygon_trades(symbol)
+                raw_trades = fetch_polygon_trades(symbol, from_ms=from_ms)
             else:
-                raw_trades = self._load_trades_from_parquet(symbol)
+                raw_trades = self._load_trades_from_parquet(
+                    symbol, start_ts_ms=from_ms or 0
+                )
 
             if not raw_trades:
-                logger.info(
-                    f"_bootstrap_10s_bars - {symbol}: no historical trades found"
-                )
+                logger.info(f"_bootstrap_bars - {symbol}: no historical trades found")
                 return
 
-            # Normalise to List[(ts_ms, price, size)]
             trades: List[tuple] = raw_trades
-
             first_trade = trades[0]
             last_trade = trades[-1]
             logger.info(
-                f"_bootstrap_10s_bars - {symbol}: fetched {len(trades)} trades, "
-                f"range [{self._ms_to_et(first_trade[0])} → {self._ms_to_et(last_trade[0])}]"
+                f"_bootstrap_bars - {symbol}: fetched {len(trades)} trades, "
+                f"range [{self._ms_to_et(first_trade[0])} → "
+                f"{self._ms_to_et(last_trade[0])}]"
             )
 
-            # Filter: only keep REST trades BEFORE first WS tick
-            # to avoid double-counting in the overlap zone.
+            # ── Filter: only trades BEFORE first WS tick ─────────────
             first_ws_ts = self._first_ws_tick_ts.get(symbol)
             if first_ws_ts:
                 original_len = len(trades)
@@ -490,108 +571,123 @@ class BarsBuilderService:
                 dropped = original_len - len(trades)
                 if dropped:
                     logger.info(
-                        f"_bootstrap_10s_bars - {symbol}: filtered {dropped} trades "
+                        f"_bootstrap_bars - {symbol}: filtered {dropped} trades "
                         f"after first_ws_ts={self._ms_to_et(first_ws_ts)}"
                     )
 
             if not trades:
-                logger.info(
-                    f"_bootstrap_10s_bars - {symbol}: no trades before WS start"
-                )
+                logger.info(f"_bootstrap_bars - {symbol}: no trades before WS start")
                 return
 
-            # Build 10s bars with separate BarBuilder using bulk batch API
-            # (single FFI call instead of 441K individual calls — ~10-20x faster)
-            bootstrap_builder = BarBuilder(["10s"])
-            bootstrap_bars = bootstrap_builder.ingest_trades_batch(symbol, trades)
+            # ── Convert UTC → ET for Rust BarBuilder ─────────────────
+            # Rust expects timestamps in US/Eastern time (handles session boundaries correctly)
+            trades_et = [(self._utc_ms_to_et_ms(t), p, s) for t, p, s in trades]
 
-            # Flush the last open bar (partial meeting bar from REST prefix)
+            # ── Build bars for all bootstrap TFs at once ──────────────
+            bootstrap_builder = BarBuilder(bootstrap_tfs)
+            bootstrap_bars = bootstrap_builder.ingest_trades_batch(symbol, trades_et)
+
+            # Flush last open bar per TF (partial meeting bar from REST prefix)
             remaining = bootstrap_builder.flush()
             if remaining:
                 bootstrap_bars.extend(remaining)
 
-            # Separate meeting bar from clean bars
-            meeting_start = self._meeting_bar_start.get(symbol)
+            # Convert all bootstrap bar timestamps from ET to UTC
+            bootstrap_bars = [
+                self._convert_bar_et_to_utc(bar) for bar in bootstrap_bars
+            ]
+
+            # ── Separate meeting bars from clean bars per TF ──────────
+            meeting_starts = self._meeting_bar_start.get(symbol, {})
             clean_bars: List[Dict] = []
-            rest_meeting_bar: Optional[Dict] = None
+            rest_meeting_bars: Dict[str, Dict] = {}  # tf → bar
 
             for bar in bootstrap_bars:
-                if meeting_start is not None and bar["bar_start"] == meeting_start:
-                    rest_meeting_bar = bar
+                tf = bar["timeframe"]
+                expected_start = meeting_starts.get(tf)
+                if expected_start is not None and bar["bar_start"] == expected_start:
+                    rest_meeting_bars[tf] = bar
                 else:
                     clean_bars.append(bar)
 
-            # Write clean bars (no overlap with WS)
+            # Write all clean bars (no overlap with WS)
             self._pending_bars.extend(clean_bars)
 
-            # Merge meeting bar: REST prefix + WS suffix
-            if rest_meeting_bar:
-                ws_bar = self._ws_meeting_bars.get(symbol)
+            # ── Merge meeting bars per TF ─────────────────────────────
+            ws_meeting = self._ws_meeting_bars.get(symbol, {})
+            merged_count = 0
+            for tf, rest_bar in rest_meeting_bars.items():
+                ws_bar = ws_meeting.get(tf)
                 if ws_bar:
-                    merged = self._merge_10s_bars(rest_meeting_bar, ws_bar)
+                    merged = self._merge_bars(rest_bar, ws_bar)
                     self._pending_bars.append(merged)
+                    merged_count += 1
                     logger.info(
-                        f"_bootstrap_10s_bars - {symbol}: merged meeting bar "
+                        f"_bootstrap_bars - {symbol}/{tf}: merged meeting bar "
                         f"bar_start={self._ms_to_et(merged['bar_start'])}, "
-                        f"REST trades={rest_meeting_bar['trade_count']}, "
+                        f"REST trades={rest_bar['trade_count']}, "
                         f"WS trades={ws_bar['trade_count']}, "
                         f"merged trades={merged['trade_count']}"
                     )
                 else:
-                    # WS meeting bar not available yet — write REST partial
-                    # (ClickHouse ReplacingMergeTree will keep whichever has
-                    #  later inserted_at; if WS bar was already flushed,
-                    #  REST partial overwrites it — acceptable since REST
-                    #  has the prefix WS was missing)
-                    self._pending_bars.append(rest_meeting_bar)
+                    # WS meeting bar not available yet — write REST partial.
+                    # ClickHouse ReplacingMergeTree will keep whichever has
+                    # later inserted_at.
+                    self._pending_bars.append(rest_bar)
                     logger.warning(
-                        f"_bootstrap_10s_bars - {symbol}: WS meeting bar not captured, "
-                        f"writing REST partial only"
+                        f"_bootstrap_bars - {symbol}/{tf}: WS meeting bar "
+                        f"not captured, writing REST partial only"
                     )
 
-            total = len(clean_bars) + (1 if rest_meeting_bar else 0)
+            total_bars = len(clean_bars) + len(rest_meeting_bars)
             logger.info(
-                f"_bootstrap_10s_bars - {symbol}: completed, "
-                f"generated {total} 10s bars (clean={len(clean_bars)}, "
-                f"meeting={'merged' if rest_meeting_bar and self._ws_meeting_bars.get(symbol) else 'partial' if rest_meeting_bar else 'none'}), "
+                f"_bootstrap_bars - {symbol}: completed, "
+                f"generated {total_bars} bars across {len(bootstrap_tfs)} TFs "
+                f"(clean={len(clean_bars)}, meeting={len(rest_meeting_bars)}, "
+                f"merged={merged_count}), "
                 f"last_trade={self._ms_to_et(trades[-1][0])}"
             )
 
-            # Clean up merge state — no longer needed
+            # Clean up merge state
             self._meeting_bar_start.pop(symbol, None)
             self._ws_meeting_bars.pop(symbol, None)
-            self._bootstrap_done.add(symbol)
+            self._bootstrap_done[symbol] = set(bootstrap_tfs)
 
         except Exception as e:
-            logger.error(f"_bootstrap_10s_bars - {symbol}: {e}", exc_info=True)
+            logger.error(f"_bootstrap_bars - {symbol}: {e}", exc_info=True)
 
     def _capture_meeting_bar(self, bar: dict) -> None:
         """Hold a copy of the WS meeting bar for later merge with bootstrap.
 
         Called for every completed bar (from ingest_trade or check_expired).
-        Only captures the first 10s bar matching the meeting bar start.
+        For each bootstrap timeframe, captures the first bar matching the
+        expected meeting bar start.
         """
         ticker = bar.get("ticker", "")
-        if (
-            bar.get("timeframe") == "10s"
-            and ticker in self._meeting_bar_start
-            and bar["bar_start"] == self._meeting_bar_start[ticker]
-            and ticker not in self._ws_meeting_bars
-        ):
-            self._ws_meeting_bars[ticker] = dict(bar)  # defensive copy
+        tf = bar.get("timeframe", "")
+        tf_starts = self._meeting_bar_start.get(ticker, {})
+        expected_start = tf_starts.get(tf)
+        if expected_start is None or bar["bar_start"] != expected_start:
+            return
+
+        ws_bars = self._ws_meeting_bars.setdefault(ticker, {})
+        if tf not in ws_bars:
+            ws_bars[tf] = dict(bar)  # defensive copy
             logger.info(
-                f"MEETING_BAR_WS - {ticker}: captured WS meeting bar "
+                f"MEETING_BAR_WS - {ticker}/{tf}: captured WS meeting bar "
                 f"bar_start={self._ms_to_et(bar['bar_start'])}, "
                 f"trades={bar['trade_count']}"
             )
 
     @staticmethod
-    def _merge_10s_bars(rest_bar: dict, ws_bar: dict) -> dict:
+    def _merge_bars(rest_bar: dict, ws_bar: dict) -> dict:
         """Merge REST-prefix and WS-suffix partial bars into one complete bar.
 
         REST bar has trades [bar_start … first_ws_ts).
         WS  bar has trades [first_ws_ts … bar_end).
         No double-counting because trades were filtered at first_ws_ts.
+
+        Works for any timeframe (10s, 1m, 5m, …).
 
         Merge rules:
           open  = REST (has earlier trades)
@@ -617,7 +713,7 @@ class BarsBuilderService:
 
         return {
             "ticker": rest_bar["ticker"],
-            "timeframe": "10s",
+            "timeframe": rest_bar["timeframe"],
             "bar_start": rest_bar["bar_start"],
             "bar_end": rest_bar["bar_end"],
             "open": rest_bar["open"],
@@ -632,12 +728,85 @@ class BarsBuilderService:
 
     @staticmethod
     def _ms_to_et(ts_ms: int) -> str:
-        """Convert epoch ms to ET time string for logging."""
+        """Convert epoch ms (UTC) to ET time string for logging."""
         from datetime import datetime
         from zoneinfo import ZoneInfo
 
         dt = datetime.fromtimestamp(ts_ms / 1000, tz=ZoneInfo("America/New_York"))
         return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] + " ET"
+
+    @staticmethod
+    def _utc_ms_to_et_ms(utc_ms: int) -> int:
+        """
+        Convert UTC milliseconds to ET milliseconds.
+
+        This is required because the Rust BarBuilder expects timestamps in
+        US/Eastern time, not UTC. zoneinfo handles DST transitions correctly.
+
+        Example:
+            UTC: 2024-03-15 14:00:00 (Winter/EST, UTC-5)
+            →  ET: 2024-03-15 09:00:00 (same absolute moment, different wall-clock time)
+
+            UTC timestamp: 1710511200000
+            ET  timestamp: 1710511200000 - (5 * 3600 * 1000) = 1710493200000
+
+        Note: The "ET milliseconds" is conceptually "what millisecond value would
+        represent this wall-clock time if we interpret the epoch as ET midnight".
+        It's NOT a different epoch—just a shifted representation of the same moment.
+        """
+        from datetime import datetime, timezone
+        from zoneinfo import ZoneInfo
+
+        # Convert UTC ms → datetime in ET
+        utc_dt = datetime.fromtimestamp(utc_ms / 1000, tz=timezone.utc)
+        et_dt = utc_dt.astimezone(ZoneInfo("America/New_York"))
+
+        # Get the ET offset for this specific timestamp (handles DST)
+        offset_seconds = et_dt.utcoffset().total_seconds()
+
+        # Apply offset: ET_ms = UTC_ms + offset_seconds * 1000
+        # (offset is negative for zones west of UTC, e.g. -5h or -4h)
+        return utc_ms + int(offset_seconds * 1000)
+
+    @staticmethod
+    def _et_ms_to_utc_ms(et_ms: int) -> int:
+        """
+        Convert ET milliseconds back to UTC milliseconds.
+
+        This reverses the transformation done by _utc_ms_to_et_ms.
+        We need to determine what UTC timestamp corresponds to a given
+        ET wall-clock time, accounting for DST.
+        """
+        from datetime import datetime, timezone
+        from zoneinfo import ZoneInfo
+
+        # Interpret et_ms as if it were a UTC timestamp, get the wall-clock time
+        pseudo_utc_dt = datetime.fromtimestamp(et_ms / 1000, tz=timezone.utc)
+
+        # Create an ET-naive datetime with that wall-clock time
+        et_naive = pseudo_utc_dt.replace(tzinfo=None)
+
+        # Localize it as an ET datetime (this handles DST ambiguity)
+        et_tz = ZoneInfo("America/New_York")
+        try:
+            et_dt = et_naive.replace(tzinfo=et_tz)
+        except:
+            # Fallback for edge cases
+            et_dt = pseudo_utc_dt.astimezone(et_tz)
+
+        # Convert to UTC
+        utc_dt = et_dt.astimezone(timezone.utc)
+        return int(utc_dt.timestamp() * 1000)
+
+    def _convert_bar_et_to_utc(self, bar: dict) -> dict:
+        """
+        Convert bar timestamps from ET (as returned by Rust) to UTC (for storage).
+
+        Modifies bar in-place and returns it for convenience.
+        """
+        bar["bar_start"] = self._et_ms_to_utc_ms(bar["bar_start"])
+        bar["bar_end"] = self._et_ms_to_utc_ms(bar["bar_end"])
+        return bar
 
     # ════════════════════════════════════════════════════════════════════
     # Tick consumption (async, runs on ws_loop)
@@ -645,7 +814,7 @@ class BarsBuilderService:
 
     async def _consume_stream_key(self, stream_key: str, symbol: str) -> None:
         """Read from the per-client asyncio.Queue and feed to BarBuilder."""
-        logger.debug(f"Starting consumer for {stream_key}")
+        logger.debug(f"_consume_stream_key - {stream_key}: starting")
 
         # Retry: subscribe() is async and may not have completed yet
         q = None
@@ -654,12 +823,15 @@ class BarsBuilderService:
             if q is not None:
                 break
             logger.debug(
-                f"Queue not ready for {stream_key}, retrying ({attempt + 1}/10)..."
+                f"_consume_stream_key - {stream_key}: queue not ready, "
+                f"retrying ({attempt + 1}/10)..."
             )
             await asyncio.sleep(0.3)
 
         if q is None:
-            logger.warning(f"No queue found for {stream_key} after retries")
+            logger.warning(
+                f"_consume_stream_key - {stream_key}: no queue found after retries"
+            )
             return
 
         while True:
@@ -668,10 +840,10 @@ class BarsBuilderService:
                 normalized = self.ws_manager.normalize_data(data)
                 self._on_trade(normalized)
             except asyncio.CancelledError:
-                logger.info(f"Consumer cancelled for {stream_key}")
+                logger.info(f"_consume_stream_key - {stream_key}: cancelled")
                 break
             except Exception as e:
-                logger.error(f"Consumer error {stream_key}: {e}")
+                logger.error(f"_consume_stream_key - {stream_key}: error - {e}")
 
     def _on_trade(self, data: dict) -> None:
         """Feed a single trade into the Rust BarBuilder."""
@@ -695,29 +867,44 @@ class BarsBuilderService:
         if symbol not in self._first_ws_tick_ts:
             self._first_ws_tick_ts[symbol] = ts_ms
             logger.info(
-                f"FIRST_WS_TICK - {symbol}: ts={self._ms_to_et(ts_ms)}, "
-                f"price={price}, size={size}"
+                f"_on_trade - FIRST_WS_TICK - {symbol}: "
+                f"ts={self._ms_to_et(ts_ms)}, price={price}, size={size}"
             )
 
-        # Feed to Rust BarBuilder (uses UTC epoch ms — same as clock_mod.now_ms())
+        # Convert UTC → ET for Rust BarBuilder
+        # Rust expects timestamps in US/Eastern time for correct session boundary calculations
+        ts_et_ms = self._utc_ms_to_et_ms(ts_ms)
+
+        # Feed to Rust BarBuilder
         completed = self.bar_builder.ingest_trade(
-            symbol, float(price), float(size), ts_ms
+            symbol, float(price), float(size), ts_et_ms
         )
         self._stats["ticks_ingested"] += 1
 
-        # Identify meeting bar start from the first WS tick for this ticker
-        # Skip if bootstrap already completed (avoid spurious re-detection)
+        # Convert bar timestamps from ET back to UTC for storage/publishing
+        if completed:
+            completed = [self._convert_bar_et_to_utc(bar) for bar in completed]
+
+        # Detect meeting bars for all bootstrap TFs on first WS tick.
+        # Skip if bootstrap already completed (avoid spurious re-detection).
         if (
             symbol not in self._meeting_bar_start
             and symbol not in self._bootstrap_done
-            and "10s" in self.timeframes
+            and self._bootstrap_tfs_set
         ):
-            partial = self.bar_builder.get_current_bar(symbol, "10s")
-            if partial:
-                self._meeting_bar_start[symbol] = partial["bar_start"]
-                logger.info(
-                    f"MEETING_BAR - {symbol}: bar_start={self._ms_to_et(partial['bar_start'])}"
-                )
+            meeting_starts: Dict[str, int] = {}
+            for tf in self._bootstrap_tfs_set:
+                partial = self.bar_builder.get_current_bar(symbol, tf)
+                if partial:
+                    # Convert ET → UTC before storing meeting bar start
+                    partial = self._convert_bar_et_to_utc(partial)
+                    meeting_starts[tf] = partial["bar_start"]
+                    logger.info(
+                        f"_on_trade - MEETING_BAR - {symbol}/{tf}: "
+                        f"bar_start={self._ms_to_et(partial['bar_start'])}"
+                    )
+            if meeting_starts:
+                self._meeting_bar_start[symbol] = meeting_starts
 
         if completed:
             self._stats["bars_completed"] += len(completed)
@@ -771,7 +958,14 @@ class BarsBuilderService:
 
             # Wall-time bar completion: close any bars whose boundary
             # has passed, even if no new trade arrived.
-            expired = self.bar_builder.check_expired(now_ms)
+            # Convert UTC → ET for Rust BarBuilder
+            now_et_ms = self._utc_ms_to_et_ms(now_ms)
+            expired = self.bar_builder.check_expired(now_et_ms)
+
+            # Convert expired bar timestamps from ET to UTC
+            if expired:
+                expired = [self._convert_bar_et_to_utc(bar) for bar in expired]
+
             if expired:
                 self._stats["bars_completed"] += len(expired)
                 for bar in expired:
@@ -840,11 +1034,13 @@ class BarsBuilderService:
             )
             self._stats["bars_written"] += len(rows)
             logger.debug(
-                f"Flushed {len(rows)} bars to ClickHouse "
-                f"(total written: {self._stats['bars_written']})"
+                f"_flush_to_clickhouse: flushed {len(rows)} bars to ClickHouse "
+                f"(total: {self._stats['bars_written']})"
             )
         except Exception as e:
-            logger.error(f"ClickHouse insert failed ({len(rows)} bars): {e}")
+            logger.error(
+                f"_flush_to_clickhouse: failed to insert {len(rows)} bars - {e}"
+            )
             # Re-queue failed bars for retry
             self._pending_bars = bars + self._pending_bars
 

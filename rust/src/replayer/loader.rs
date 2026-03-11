@@ -574,6 +574,7 @@ pub fn load_trades_from_parquet_sync(
     symbol: &str,
     date_yyyymmdd: &str,
     end_ts_ms: i64,
+    start_ts_ms: i64,
 ) -> Result<Vec<(i64, f64, i64)>> {
     let year = &date_yyyymmdd[0..4];
     let month = &date_yyyymmdd[4..6];
@@ -626,6 +627,16 @@ pub fn load_trades_from_parquet_sync(
 
     if needs_ticker_filter {
         lazy = lazy.filter(col("ticker").eq(lit(symbol)));
+    }
+
+    // Apply lower-bound time filter (predicate pushdown)
+    if start_ts_ms > 0 {
+        let start_ts_ns = start_ts_ms * 1_000_000i64;
+        lazy = lazy.filter(
+            col("participant_timestamp")
+                .cast(polars::datatypes::DataType::Int64)
+                .gt_eq(lit(start_ts_ns)),
+        );
     }
 
     // Apply upper-bound time filter (predicate pushdown)

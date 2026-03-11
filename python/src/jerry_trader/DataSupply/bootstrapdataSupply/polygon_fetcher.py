@@ -332,18 +332,29 @@ class CustomBarsFetcher:
         return data
 
 
-def fetch_polygon_trades(symbol: str) -> List[Tuple[int, float, int]]:
-    """Paginate Polygon /v3/trades/{symbol} from now back to 4 AM ET.
+def fetch_polygon_trades(
+    symbol: str,
+    from_ms: Optional[int] = None,
+) -> List[Tuple[int, float, int]]:
+    """Paginate Polygon /v3/trades/{symbol} from a start point to now.
+
+    Args:
+        symbol: Ticker symbol.
+        from_ms: Start of fetch window (epoch ms, inclusive).
+                 If None, defaults to 4:00 AM ET today (session start).
 
     Returns list of (ts_ms, price, size) tuples, sorted ascending by ts.
-    Timestamps are  from Polygon (UTC epoch ms).
+    Timestamps are from Polygon (UTC epoch ms).
     """
-    # Compute cutoff: today 4:00 AM ET
-    now_et = datetime.now(ZoneInfo("America/New_York"))
-    cutoff_et = now_et.replace(
-        hour=BOOTSTRAP_MARKET_OPEN_ET, minute=0, second=0, microsecond=0
-    )
-    cutoff_ns = int(cutoff_et.timestamp() * 1e9)  # API uses nanoseconds
+    if from_ms is not None:
+        cutoff_ns = int(from_ms * 1_000_000)
+    else:
+        # Default: today 4:00 AM ET
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        cutoff_et = now_et.replace(
+            hour=BOOTSTRAP_MARKET_OPEN_ET, minute=0, second=0, microsecond=0
+        )
+        cutoff_ns = int(cutoff_et.timestamp() * 1e9)  # API uses nanoseconds
 
     all_trades: List[Tuple[int, float]] = []
     url = (

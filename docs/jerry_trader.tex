@@ -354,6 +354,312 @@ to WebSocket subscribers.
     as parallel consumers off a shared tick bus.
 \end{enumerate}
 
+\subsubsection{10s Bootstrap --- Historical Back-fill at Subscription Time}
+\label{sec:10s-bootstrap}
+
+When a ticker is subscribed mid-session, the BarBuilder starts receiving WebSocket
+ticks from ``now'' forward, but has no historical bars for the earlier part of the day.
+The 10s bootstrap fills that gap by fetching trades from 04:00\,ET to the current
+time and building bars retroactively.
+
+\paragraph{Problem.}
+A ticker added at, say, 11:04:13\,ET via \texttt{\_add\_ticker()} immediately begins
+receiving WS ticks.  But all 10\,s bars from 04:00\,ET through 11:04:10\,ET are missing.
+These bars are needed by the Chart module and downstream consumers.
+
+\paragraph{Trigger condition.}
+On \texttt{\_add\_ticker()}, if \texttt{"10s"} is in the configured timeframes, the service
+queries ClickHouse for existing 10\,s bars on the current date (\texttt{\_has\_10s\_bars\_today}).
+If the count is zero, a daemon thread is spawned for \texttt{\_bootstrap\_10s\_bars(symbol)}.
+
+\paragraph{Trade source dispatch (live vs.\ replay).}
+\begin{itemize}[nosep]
+    \item \textbf{Live mode:} Polygon REST API via \texttt{fetch\_polygon\_trades(symbol)}.
+          Returns trades from 04:00\,ET to the current wall-clock time.
+    \item \textbf{Replay mode:} Local Parquet files via the Rust function
+          \texttt{load\_trades\_from\_parquet(lake\_data\_dir, symbol, date, end\_ts\_ms)}.
+          Tries the per-ticker partitioned file first
+          (\texttt{trades\_v1\_partitioned/\{ticker\}/\{date\}.parquet}),
+          falls back to the monolithic file
+          (\texttt{trades\_v1/\{YYYY\}/\{MM\}/\{date\}.parquet}) with a ticker filter.
+          The replay clock's \texttt{clock\_mod.now\_ms()} is passed as \texttt{end\_ts\_ms}
+          for predicate pushdown so only trades up to ``now'' are materialised.
+\end{itemize}
+
+\paragraph{Thread-safety: separate BarBuilder.}
+The bootstrap runs on a daemon thread, while the WS consumer runs on the asyncio
+event loop.  They must not share the same \texttt{BarBuilder} instance --- if they did,
+a WS tick at 11:04 would jump the BarBuilder's internal state forward, causing all
+historical trades (04:00--11:04) to collapse into a single bar via \texttt{bar.update()}.
+
+\noindent\textbf{Fix:} The bootstrap creates a short-lived \texttt{BarBuilder(["10s"])} and feeds
+all historical trades through it using \texttt{ingest\_trades\_batch()}, producing
+an independent set of completed bars.  The main BarBuilder continues to receive WS
+ticks unaffected.
+
+\paragraph{Trade filtering at the WS boundary.}
+The first WS tick timestamp for each ticker is recorded in
+\texttt{\_first\_ws\_tick\_ts[symbol]}.  Historical trades are filtered:
+only those with \texttt{ts < first\_ws\_ts} are fed to the bootstrap BarBuilder.
+This prevents double-counting in the overlap zone where both REST/Parquet and
+WS have data.
+
+\paragraph{Meeting bar merge.}
+The 10\,s bar window that straddles the REST$\to$WS boundary is the
+\emph{meeting bar}.  It is split between two sources:
+
+\begin{center}
+\begin{tabular}{lll}
+    \textbf{Source} & \textbf{Trades in} & \textbf{Origin} \\
+    \hline
+    REST prefix  & [\texttt{bar\_start} \ldots\ \texttt{first\_ws\_ts}) & bootstrap BarBuilder \\
+    WS suffix    & [\texttt{first\_ws\_ts} \ldots\ \texttt{bar\_end}) & main BarBuilder \\
+\end{tabular}
+\end{center}
+
+\noindent The merge rules (\texttt{\_merge\_10s\_bars}):
+\begin{itemize}[nosep]
+    \item \texttt{open} = REST (has earlier trades)
+    \item \texttt{close} = WS (has later trades)
+    \item \texttt{high} = max(REST, WS)
+    \item \texttt{low} = min(REST, WS)
+    \item \texttt{volume}, \texttt{trade\_count} = sum
+    \item \texttt{vwap} = volume-weighted average
+\end{itemize}
+
+\noindent ClickHouse uses \texttt{ReplacingMergeTree} with an \texttt{inserted\_at} version
+column\,---\,if the WS meeting bar was flushed before the merge completes, the merged
+bar (inserted later) will survive deduplication.
+
+\paragraph{State machine.}
+Per-ticker state variables track the merge lifecycle:
+
+\begin{enumerate}[nosep]
+    \item \texttt{\_first\_ws\_tick\_ts[sym]} --- set once on the very first WS tick.
+    \item \texttt{\_meeting\_bar\_start[sym]} --- the \texttt{bar\_start} of the 10\,s
+          window containing the first WS tick.  Detected via
+          \texttt{get\_current\_bar(sym, "10s")} right after the first tick.
+    \item \texttt{\_ws\_meeting\_bars[sym]} --- the completed WS meeting bar, captured
+          by \texttt{\_capture\_meeting\_bar()} when the main BarBuilder emits it.
+    \item \texttt{\_bootstrap\_done} --- set of tickers whose bootstrap has finished.
+          Prevents spurious meeting-bar re-detection if WS ticks arrive after
+          bootstrap completes (i.e.\ the first WS tick \emph{is} in the same
+          bar window that just got merged).
+\end{enumerate}
+
+After the merge, items 2--3 are cleaned up (\texttt{.pop()}).
+
+\paragraph{Performance.}
+The Rust \texttt{ingest\_trades\_batch()} processes all trades in a single FFI call
+(pure Rust loop, no per-trade GIL interaction).  Python dicts are built only for
+completed bars at the end.  Benchmark: \textbf{4.2$\times$ faster} than per-trade
+\texttt{ingest\_trade()} calls (39\,ms vs.\ 164\,ms for 441\,K trades).
+
+\paragraph{End-to-end flow.}
+
+\begin{verbatim}
+  _add_ticker("AAPL")
+       |
+       +-- subscribe WS ticks (async)
+       |       |
+       |       v  _on_trade(): record first_ws_tick_ts,
+       |       |               detect meeting_bar_start
+       |
+       +-- _has_10s_bars_today("AAPL") -> False
+               |
+               v  Thread: _bootstrap_10s_bars("AAPL")
+                    1. load trades (REST or Parquet)
+                    2. filter ts < first_ws_ts
+                    3. BarBuilder(["10s"]).ingest_trades_batch()
+                    4. flush() -> get REST meeting bar
+                    5. separate clean bars vs meeting bar
+                    6. merge REST meeting bar + WS meeting bar
+                    7. append all to _pending_bars
+                    8. flush loop writes to ClickHouse
+\end{verbatim}
+
+
+\subsubsection{Multi-Timeframe Bootstrap --- Extension Design Notes}
+\label{sec:multi-tf-bootstrap}
+
+The 10\,s bootstrap currently only builds \texttt{"10s"} bars.  Extending it to
+\texttt{1m, 5m, 15m, 30m, 1h, 4h} would provide the same mid-session back-fill
+for every intraday timeframe.  This section analyses what changes and what stays
+the same.
+
+\paragraph{What stays the same.}
+\begin{itemize}[nosep]
+    \item Trade source: exactly the same REST / Parquet fetch.  Trades are
+          timeframe-agnostic --- one fetch feeds all timeframes.
+    \item Thread-safety model: a separate \texttt{BarBuilder(timeframes)} instance.
+    \item Trade filtering at \texttt{first\_ws\_ts}.
+    \item The \texttt{\_bootstrap\_done} guard.
+    \item ClickHouse persistence via \texttt{\_pending\_bars}.
+\end{itemize}
+
+\paragraph{What changes.}
+\begin{enumerate}
+    \item \textbf{Bootstrap BarBuilder timeframes.} \\
+    Currently \texttt{BarBuilder(["10s"])}.  Must become
+    \texttt{BarBuilder(self.timeframes)} (or a filtered subset excluding
+    \texttt{"1d"} and \texttt{"1w"} which have different bootstrap strategies).
+
+    \item \textbf{Meeting bar: per-timeframe, not per-ticker.} \\
+    Currently there is one meeting bar per ticker (for 10\,s).  With $N$ timeframes,
+    each timeframe has its own meeting bar at the REST$\to$WS boundary:
+    \begin{itemize}[nosep]
+        \item A 10\,s meeting bar at, say, \texttt{11:04:10}
+        \item A 1\,m meeting bar at \texttt{11:04:00}
+        \item A 5\,m meeting bar at \texttt{11:00:00}
+        \item A 15\,m meeting bar at \texttt{11:00:00}
+        \item \ldots
+    \end{itemize}
+    The state variables must change from \texttt{Dict[str, int]} (ticker $\to$ bar\_start)
+    to \texttt{Dict[str, Dict[str, int]]} (ticker $\to$ timeframe $\to$ bar\_start),
+    and \texttt{\_ws\_meeting\_bars} similarly.
+
+    \item \textbf{Meeting bar detection in \texttt{\_on\_trade()}.} \\
+    Currently calls \texttt{get\_current\_bar(sym, "10s")} once.  Must iterate over
+    all bootstrap timeframes and record each meeting bar start.
+
+    \item \textbf{Meeting bar capture in \texttt{\_capture\_meeting\_bar()}.} \\
+    Currently hardcodes \texttt{timeframe == "10s"}.  Must match any bootstrap
+    timeframe and look up the correct entry in the per-timeframe dict.
+
+    \item \textbf{Merge function generalisation.} \\
+    \texttt{\_merge\_10s\_bars()} is already timeframe-agnostic in logic (OHLCV merge
+    rules don't depend on bar duration).  Only the hardcoded \texttt{"timeframe": "10s"}
+    needs to become \texttt{rest\_bar["timeframe"]}.
+
+    \item \textbf{ClickHouse existence check.} \\
+    \texttt{\_has\_10s\_bars\_today()} is hardcoded for \texttt{timeframe = '10s'}.
+    For multi-timeframe bootstrap it should check the \emph{smallest} timeframe
+    (10\,s) --- if 10\,s bars exist, larger timeframes can be assumed present.
+    Alternatively, check each timeframe independently, but this adds queries.
+
+    \item \textbf{Daily/weekly exclusion.} \\
+    \texttt{1d} and \texttt{1w} bars should \textbf{not} be bootstrapped from intraday
+    trades.  The Chart module already loads these from Parquet history
+    (local data loader).  The bootstrap should filter to intraday timeframes only:
+    \texttt{["10s","1m","5m","15m","30m","1h","4h"]}.
+\end{enumerate}
+
+\paragraph{Estimated scope.}
+The core fetch + filter + batch-ingest path is unchanged.  The main work is
+refactoring the meeting-bar state machine from single-timeframe to per-timeframe
+dicts.  The merge logic itself is already correct for any timeframe.
+Data volume is identical (same trades, different bar windows), so performance
+impact is negligible --- \texttt{ingest\_trades\_batch} already processes all
+configured timeframes in the inner loop.
+
+
+\subsubsection{UTC/ET Timezone Conversion --- DST-Aware Session Boundaries}
+\label{sec:utc-et-timezone}
+
+\paragraph{Problem.}
+Bar timestamps were displaying incorrectly --- off by approximately 5 hours.
+For example, a bar starting at 04:00 AM ET (09:00 UTC) was being stored and
+displayed as 04:00 UTC instead of 09:00 UTC.
+
+The root cause was that the Rust \texttt{SessionCalendar} used a fixed UTC-5
+offset (EST) to convert between UTC and Eastern Time.  This fails during
+Daylight Saving Time when the offset should be UTC-4 (EDT).  Since US markets
+observe DST from approximately March to November, bars were wrong for $\sim$8
+months of the year.
+
+\paragraph{Initial approach (rejected).}
+Implementing DST calculation logic in Rust --- computing the second Sunday in
+March and first Sunday in November, handling leap years, etc.  This is complex,
+error-prone, and duplicates functionality already available in Python's
+\texttt{zoneinfo} module.
+
+\paragraph{Adopted solution: Python handles timezone conversion.}
+The architecture was simplified so that \textbf{Python converts all timestamps
+from UTC to ET before passing to Rust}, and Rust works \emph{purely in ET time}.
+
+\begin{enumerate}[nosep]
+    \item \textbf{Data sources (Polygon/IB)} provide timestamps in UTC milliseconds.
+    \item \textbf{Python (\texttt{BarsBuilderService})} converts UTC $\to$ ET using
+          \texttt{zoneinfo.ZoneInfo("America/New\_York")}, which correctly handles
+          DST transitions.
+    \item \textbf{Rust (\texttt{BarBuilder})} receives ET milliseconds and performs
+          session-boundary calculations (04:00, 09:30, 16:00, 20:00 ET) using simple
+          time-of-day arithmetic.  No timezone conversion or DST logic in Rust.
+    \item \textbf{Python} converts bar timestamps from ET back to UTC before storing
+          in ClickHouse and publishing to frontend.
+\end{enumerate}
+
+\paragraph{Implementation details.}
+
+\textbf{Python helpers (bars\_builder\_service.py):}
+\begin{itemize}[nosep]
+    \item \texttt{\_utc\_ms\_to\_et\_ms(utc\_ms: int) -> int} \\
+          Converts UTC milliseconds to ET milliseconds.  Accounts for DST by
+          computing the timezone offset at the specific timestamp using
+          \texttt{datetime.utcoffset()}.
+          \begin{verbatim}
+          utc_dt = datetime.fromtimestamp(utc_ms / 1000, tz=timezone.utc)
+          et_dt = utc_dt.astimezone(ZoneInfo("America/New_York"))
+          offset_seconds = et_dt.utcoffset().total_seconds()
+          return utc_ms + int(offset_seconds * 1000)
+          \end{verbatim}
+
+    \item \texttt{\_et\_ms\_to\_utc\_ms(et\_ms: int) -> int} \\
+          Reverses the transformation.  Interprets the ET millisecond value as a
+          wall-clock time, localizes it to US/Eastern, then converts to UTC.
+
+    \item \texttt{\_convert\_bar\_et\_to\_utc(bar: dict) -> dict} \\
+          Convenience wrapper that converts \texttt{bar["bar\_start"]} and
+          \texttt{bar["bar\_end"]} from ET to UTC in-place.
+\end{itemize}
+
+\textbf{Python call sites --- all Rust interactions:}
+\begin{itemize}[nosep]
+    \item \texttt{\_on\_trade()} --- live WebSocket ticks: convert \texttt{ts\_ms}
+          (UTC) to ET before calling \texttt{bar\_builder.ingest\_trade()}.
+    \item \texttt{\_bootstrap\_bars()} --- historical trades: convert entire trade
+          list from UTC to ET before calling \texttt{ingest\_trades\_batch()}.
+    \item \texttt{\_check\_expired\_loop()} --- wall-time bar completion: convert
+          \texttt{now\_ms} (UTC) to ET before calling \texttt{check\_expired()}.
+    \item \textbf{After receiving bars from Rust:} all completed bars (from
+          \texttt{ingest\_trade}, \texttt{check\_expired}, \texttt{flush}, etc.)
+          are converted from ET back to UTC via \texttt{\_convert\_bar\_et\_to\_utc}
+          \emph{before} storing in ClickHouse or publishing to Redis.
+\end{itemize}
+
+\textbf{Rust changes (bars.rs):}
+\begin{itemize}[nosep]
+    \item \textbf{Removed:} all DST calculation logic (EST/EDT offset constants,
+          \texttt{is\_dst()}, \texttt{nth\_sunday\_of\_month()}, etc.).
+    \item \textbf{Simplified:} \texttt{SessionCalendar} now assumes all input
+          timestamps are in ET.  Session boundaries (04:00, 09:30, 16:00, 20:00)
+          are simple offsets from midnight.
+    \item \textbf{Renamed parameters:} \texttt{ts\_ms} $\to$ \texttt{et\_ms} in
+          function signatures for clarity.
+    \item \textbf{Documentation:} added explicit contract stating that all
+          timestamps must be in US/Eastern time, and that Python is responsible
+          for timezone conversion.
+\end{itemize}
+
+\paragraph{Data flow summary.}
+\begin{verbatim}
+Polygon/IB (UTC)
+  -> Python: UTC -> ET conversion (DST-aware via zoneinfo)
+  -> Rust BarBuilder (works purely in ET)
+  -> Python: ET -> UTC conversion
+  -> ClickHouse / Frontend (UTC for storage/display)
+\end{verbatim}
+
+\paragraph{Benefits.}
+\begin{itemize}[nosep]
+    \item \textbf{DST handled correctly} by Python's battle-tested \texttt{zoneinfo}.
+    \item \textbf{Rust code simplified} --- no calendar arithmetic or DST edge cases.
+    \item \textbf{Clear separation of concerns:} Python handles I/O and timezone
+          complexity; Rust focuses on high-performance bar aggregation.
+    \item \textbf{Standard practice:} storing data in UTC, converting to local time
+          only for display or business-logic calculations.
+\end{itemize}
+
 
 \section{Roadmap}
 

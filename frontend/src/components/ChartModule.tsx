@@ -39,6 +39,7 @@ import { Wifi, WifiOff, BarChart3, TrendingUp, Loader2 } from 'lucide-react';
 import type { ModuleProps, ChartTimeframe } from '../types';
 import { useTickDataStore, type Trade, type Quote } from '../stores/tickDataStore';
 import { useChartDataStore, chartStoreKey } from '../stores/chartDataStore';
+import { subscribeBarUpdates, unsubscribeBarUpdates } from '../hooks/useWebSocket';
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -228,6 +229,10 @@ export function ChartModule({
     [],
   );
 
+  // Track previous bar subscription so we can subscribe-first-then-unsubscribe,
+  // preventing chart_bff from momentarily seeing zero subs during timeframe switches.
+  const prevBarSubRef = useRef<{ ticker: string; timeframe: string } | null>(null);
+
   // ── Bootstrap: fetch bars on symbol/timeframe change ───────────────────
   // Only triggers the API fetch. The chart keeps showing current data and
   // trade ticks keep flowing until the response arrives and the render
@@ -238,8 +243,27 @@ export function ChartModule({
     const tickerUpper = symbol.toUpperCase();
     fetchBars(moduleId, tickerUpper, timeframe);
 
+    // Subscribe NEW first — chart_bff sees the new sub before the old one
+    // is removed, so it never drops to zero subs for this ticker.
+    subscribeBarUpdates(tickerUpper, timeframe);
+
+    // Then unsubscribe the previous (if it changed)
+    const prev = prevBarSubRef.current;
+    if (prev && (prev.ticker !== tickerUpper || prev.timeframe !== timeframe)) {
+      unsubscribeBarUpdates(prev.ticker, prev.timeframe);
+    }
+
+    prevBarSubRef.current = { ticker: tickerUpper, timeframe };
     currentSymbolRef.current = tickerUpper;
     currentTimeframeRef.current = timeframe;
+
+    return () => {
+      // Component unmount — unsubscribe whatever is active
+      if (prevBarSubRef.current) {
+        unsubscribeBarUpdates(prevBarSubRef.current.ticker, prevBarSubRef.current.timeframe);
+        prevBarSubRef.current = null;
+      }
+    };
   }, [symbol, timeframe, fetchBars]);
 
   // Reset refs AND clear chart series when the symbol changes — prevents stale

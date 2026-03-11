@@ -226,6 +226,7 @@ some other features to make it better.
   - [ ] News engine output from log to json log. route to openclaw/heartbeat llm in the future.
     - ✅ news room
       - [ ] focus mode
+    - [ ] chatbox
 
 ### open issues
 

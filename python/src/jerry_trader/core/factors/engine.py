@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from threading import Lock, Thread
 from typing import Any, Dict, List, Optional, Tuple
-from zoneinfo import ZoneInfo
 
 import influxdb_client
 import redis
@@ -33,6 +32,7 @@ from jerry_trader.utils.session import (
     parse_session_id,
     session_to_influx_tags,
 )
+from jerry_trader.utils.timezone import ms_to_et_short
 
 logger = setup_logger("factor_engine", log_to_file=True, level=logging.DEBUG)
 
@@ -46,12 +46,8 @@ COMPUTE_INTERVAL_SEC = 1.0  # factor compute every 1 s
 MIN_TRADES_FOR_RATE = 5  # need at least 5 trades to compute rate
 
 # ── Helpers ──────────────────────────────────────────────────────────────
-_ET = ZoneInfo("America/New_York")
 
-
-def _ms_to_et(ms: int) -> str:
-    """Convert epoch-ms to 'HH:MM:SS.mmm ET' for debug logs."""
-    return datetime.fromtimestamp(ms / 1000.0, tz=_ET).strftime("%H:%M:%S.%f")[:-3]
+_ms_to_et = ms_to_et_short  # compact 'HH:MM:SS.mmm' for debug logs
 
 
 def _snap_sec(ms: int) -> int:

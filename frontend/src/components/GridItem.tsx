@@ -1,7 +1,8 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { Resizable } from 're-resizable';
 import { GripVertical, X, Link, Unlink } from 'lucide-react';
 import { moduleRegistry } from '../config/moduleRegistry';
+import { SpatialHashGrid, hasCollisions as checkHasCollisions } from '../utils/layoutUtils';
 import type { GridItemConfig } from '../types';
 
 interface GridItemProps {
@@ -13,6 +14,9 @@ interface GridItemProps {
   onSymbolSelect?: (symbol: string) => void;
   onSyncGroupChange?: (group: string | null) => void;
   gridGap: number;
+  zoom: number;
+  panOffset: { x: number; y: number };
+  viewportRef: React.RefObject<HTMLDivElement | null>;
 }
 
 const GRID_SIZE = 10;
@@ -135,13 +139,34 @@ export function GridItem({
   onSymbolSelect,
   onSyncGroupChange,
   gridGap,
+  zoom,
+  panOffset,
+  viewportRef,
 }: GridItemProps) {
   const [isDragging, setIsDragging] = useState(false);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const [showSyncMenu, setShowSyncMenu] = useState(false);
   const [tempPosition, setTempPosition] = useState(item.position);
+  const [snapGuides, setSnapGuides] = useState<{ x?: number; y?: number }>({});
+  const [hasCollision, setHasCollision] = useState(false);
   const itemRef = useRef<HTMLDivElement>(null);
   const moduleConfig = moduleRegistry[item.moduleType];
+
+  // Store zoom/panOffset in refs so mousemove handler always has latest values
+  const zoomRef = useRef(zoom);
+  const panOffsetRef = useRef(panOffset);
+  useEffect(() => { zoomRef.current = zoom; }, [zoom]);
+  useEffect(() => { panOffsetRef.current = panOffset; }, [panOffset]);
+
+  // Create spatial hash grid for optimized collision detection
+  const spatialGrid = useMemo(() => {
+    if (allItems.length > 10) {
+      const grid = new SpatialHashGrid(200);
+      grid.build(allItems);
+      return grid;
+    }
+    return undefined;
+  }, [allItems]);
 
   // Sync tempPosition with item.position when not dragging
   useEffect(() => {
@@ -177,20 +202,23 @@ export function GridItem({
   }
 
   const handleMouseDown = (e: React.MouseEvent) => {
-    if ((e.target as HTMLElement).closest('.no-drag')) {
-      return;
-    }
+    if ((e.target as HTMLElement).closest('.no-drag')) return;
 
-    // Get the scroll container
-    const scrollContainer = (e.target as HTMLElement).closest('.overflow-y-scroll');
-    const scrollTop = scrollContainer ? scrollContainer.scrollTop : 0;
-    const scrollLeft = scrollContainer ? scrollContainer.scrollLeft : 0;
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+
+    const rect = viewport.getBoundingClientRect();
+    // Convert screen coordinates to canvas coordinates
+    const canvasX = (e.clientX - rect.left - panOffsetRef.current.x) / zoomRef.current;
+    const canvasY = (e.clientY - rect.top - panOffsetRef.current.y) / zoomRef.current;
+
+    // Offset = distance from canvas mouse point to item's top-left position
+    setDragOffset({
+      x: canvasX - item.position.x,
+      y: canvasY - item.position.y,
+    });
 
     setIsDragging(true);
-    setDragOffset({
-      x: e.clientX - item.position.x + scrollLeft,
-      y: e.clientY - item.position.y + scrollTop,
-    });
     e.preventDefault();
   };
 
@@ -198,33 +226,64 @@ export function GridItem({
     const handleMouseMove = (e: MouseEvent) => {
       if (!isDragging) return;
 
-      // Get the scroll container and current scroll position
-      const scrollContainer = document.querySelector('.overflow-y-scroll');
-      const scrollTop = scrollContainer ? scrollContainer.scrollTop : 0;
-      const scrollLeft = scrollContainer ? scrollContainer.scrollLeft : 0;
+      const viewport = viewportRef.current;
+      if (!viewport) return;
 
-      let newX = e.clientX - dragOffset.x + scrollLeft;
-      let newY = e.clientY - dragOffset.y + scrollTop;
+      const rect = viewport.getBoundingClientRect();
+      const currentZoom = zoomRef.current;
+      const currentPan = panOffsetRef.current;
 
-      // Keep within bounds
-      newX = Math.max(0, newX);
-      newY = Math.max(0, newY);
+      // Convert screen coordinates to canvas coordinates
+      const canvasX = (e.clientX - rect.left - currentPan.x) / currentZoom;
+      const canvasY = (e.clientY - rect.top - currentPan.y) / currentZoom;
+
+      let newX = canvasX - dragOffset.x;
+      let newY = canvasY - dragOffset.y;
 
       // Apply grid snap
       newX = snapToGrid(newX);
       newY = snapToGrid(newY);
 
-      // Apply magnetic snap
+      // Apply magnetic snap and capture snap guide positions
       const snapped = findMagneticSnap(item, newX, newY, allItems, gridGap);
 
-      // Allow dragging anywhere during move (remove collision check)
-      // Collision will be checked only on mouseUp
+      // Detect snap guides for visual feedback
+      const guides: { x?: number; y?: number } = {};
+      for (const other of allItems) {
+        if (other.id === item.id) continue;
+
+        if (Math.abs(snapped.x - (other.position.x + other.size.width + gridGap)) < 2) {
+          guides.x = other.position.x + other.size.width + gridGap;
+        } else if (Math.abs(snapped.x + item.size.width - (other.position.x - gridGap)) < 2) {
+          guides.x = other.position.x - gridGap;
+        }
+
+        if (Math.abs(snapped.y - (other.position.y + other.size.height + gridGap)) < 2) {
+          guides.y = other.position.y + other.size.height + gridGap;
+        } else if (Math.abs(snapped.y + item.size.height - (other.position.y - gridGap)) < 2) {
+          guides.y = other.position.y - gridGap;
+        }
+      }
+
+      setSnapGuides(guides);
+
+      // Check for collision in real-time for visual feedback (optimized)
+      const testRect = {
+        x: snapped.x,
+        y: snapped.y,
+        width: item.size.width,
+        height: item.size.height,
+      };
+
+      const collision = checkHasCollisions(testRect, allItems, item.id, spatialGrid);
+      setHasCollision(collision);
+
       setTempPosition(snapped);
     };
 
     const handleMouseUp = () => {
       if (isDragging) {
-        // Check for collision only when dropping
+        // Check for collision only when dropping (optimized)
         const testRect = {
           x: tempPosition.x,
           y: tempPosition.y,
@@ -232,28 +291,17 @@ export function GridItem({
           height: item.size.height,
         };
 
-        let hasCollision = false;
-        for (const other of allItems) {
-          if (other.id === item.id) continue;
-          const otherRect = {
-            x: other.position.x,
-            y: other.position.y,
-            width: other.size.width,
-            height: other.size.height,
-          };
-          if (checkCollision(testRect, otherRect)) {
-            hasCollision = true;
-            break;
-          }
-        }
-
-        // Only update position if there's no collision
-        if (!hasCollision) {
+        const collision = checkHasCollisions(testRect, allItems, item.id, spatialGrid);
+        if (!collision) {
           onUpdate({ position: tempPosition });
         } else {
           // Reset to original position if collision detected
           setTempPosition(item.position);
         }
+
+        // Clear visual feedback
+        setSnapGuides({});
+        setHasCollision(false);
       }
       setIsDragging(false);
     };
@@ -329,12 +377,16 @@ export function GridItem({
       onUpdate({ settings: { ...item.settings, orderManagement: { view: nextValue as any } } });
     } else if (item.moduleType === 'overview-chart') {
       const focusMode = nextValue === 'focus';
+      const currentSettings = item.settings?.overviewChart;
       onUpdate({
         settings: {
           ...item.settings,
           overviewChart: {
-            ...item.settings?.overviewChart,
-            focusMode
+            selectedStates: currentSettings?.selectedStates || [],
+            focusMode,
+            ...(currentSettings?.timelineRange && { timelineRange: currentSettings.timelineRange }),
+            ...(currentSettings?.timeRange && { timeRange: currentSettings.timeRange }),
+            ...(currentSettings?.topN && { topN: currentSettings.topN }),
           }
         }
       });
@@ -345,7 +397,32 @@ export function GridItem({
   const AVAILABLE_SYMBOLS = ['AAPL', 'TSLA', 'NVDA', 'MSFT', 'GOOGL', 'AMZN', 'META', 'AMD', 'NFLX', 'COIN', 'PLTR', 'RIVN', 'LCID', 'SOFI', 'BABA', 'NIO'];
 
   return (
-    <Resizable
+    <>
+      {/* Snap Guide Lines - positioned in canvas coordinates */}
+      {isDragging && snapGuides.x !== undefined && (
+        <div
+          className="absolute w-0.5 bg-blue-400 pointer-events-none z-[999]"
+          style={{
+            left: snapGuides.x,
+            top: -50000,
+            height: 100000,
+            opacity: 0.6,
+          }}
+        />
+      )}
+      {isDragging && snapGuides.y !== undefined && (
+        <div
+          className="absolute h-0.5 bg-blue-400 pointer-events-none z-[999]"
+          style={{
+            top: snapGuides.y,
+            left: -50000,
+            width: 100000,
+            opacity: 0.6,
+          }}
+        />
+      )}
+
+      <Resizable
       size={item.size}
       onResizeStop={(e, direction, ref, delta) => {
         const newWidth = item.size.width + delta.width;
@@ -355,7 +432,7 @@ export function GridItem({
           height: Math.max(200, snapToGrid(newHeight)),
         };
 
-        // Check for collision before resizing
+        // Check for collision before resizing (optimized)
         const testRect = {
           x: item.position.x,
           y: item.position.y,
@@ -363,22 +440,9 @@ export function GridItem({
           height: newSize.height,
         };
 
-        let hasCollision = false;
-        for (const other of allItems) {
-          if (other.id === item.id) continue;
-          const otherRect = {
-            x: other.position.x,
-            y: other.position.y,
-            width: other.size.width,
-            height: other.size.height,
-          };
-          if (checkCollision(testRect, otherRect)) {
-            hasCollision = true;
-            break;
-          }
-        }
+        const collision = checkHasCollisions(testRect, allItems, item.id, spatialGrid);
 
-        if (!hasCollision) {
+        if (!collision) {
           onUpdate({ size: newSize });
         }
       }}
@@ -404,8 +468,15 @@ export function GridItem({
     >
       <div
         ref={itemRef}
-        className="h-full bg-zinc-900 border-2 border-zinc-700 flex flex-col shadow-xl"
-        style={{ opacity: isDragging ? 0.7 : 1 }}
+        className={`h-full bg-zinc-900 border-2 flex flex-col shadow-xl transition-colors ${
+          hasCollision && isDragging
+            ? 'border-red-500'
+            : 'border-zinc-700'
+        }`}
+        style={{
+          opacity: isDragging ? 0.7 : 1,
+          transition: isDragging ? 'none' : 'all 0.2s ease',
+        }}
       >
         {/* Header with drag handle */}
         <div
@@ -502,5 +573,6 @@ export function GridItem({
         </div>
       </div>
     </Resizable>
+    </>
   );
 }

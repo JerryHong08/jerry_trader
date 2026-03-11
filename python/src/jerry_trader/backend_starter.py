@@ -306,7 +306,7 @@ class JerryTraderBackendStarter:
         self._shared_ws_loop = None
 
         if "TickDataServer" in self.roles:
-            from jerry_trader.DataManager.tickdata_server import TickDataServer
+            from jerry_trader.BackendForFrontend.tickdata_server import TickDataServer
             from jerry_trader.DataSupply.tickDataSupply.unified_tick_manager import (
                 UnifiedTickManager,
             )
@@ -447,21 +447,24 @@ class JerryTraderBackendStarter:
         else:
             self.bars_builder = None
 
-        if "ChartDataBFF" in self.roles:
-            from jerry_trader.BackendForFrontend.chart_bff import ChartDataBFF
-
-            role_cfg = self.roles["ChartDataBFF"]
-            self.chart_data_bff = ChartDataBFF(
-                host=role_cfg.get("host", "0.0.0.0"),
-                port=role_cfg.get("port", 5002),
-                session_id=self.session_id,
-                redis_config=role_cfg.get("redis"),
-                clickhouse_config=role_cfg.get("clickhouse"),
-                bars_builder=self.bars_builder,
-            )
-            self._services.append(("ChartDataBFF", self.chart_data_bff))
-        else:
-            self.chart_data_bff = None
+        # ChartDataBFF role is deprecated - tickdata_server now handles all chart BFF functionality
+        # (tick data WebSocket + chart bars REST API on port 8000)
+        # if "ChartDataBFF" in self.roles:
+        #     from jerry_trader.BackendForFrontend.chart_bff import ChartDataBFF
+        #
+        #     role_cfg = self.roles["ChartDataBFF"]
+        #     self.chart_data_bff = ChartDataBFF(
+        #         host=role_cfg.get("host", "0.0.0.0"),
+        #         port=role_cfg.get("port", 5002),
+        #         session_id=self.session_id,
+        #         redis_config=role_cfg.get("redis"),
+        #         clickhouse_config=role_cfg.get("clickhouse"),
+        #         bars_builder=self.bars_builder,
+        #     )
+        #     self._services.append(("ChartDataBFF", self.chart_data_bff))
+        # else:
+        #     self.chart_data_bff = None
+        self.chart_data_bff = None
 
         if "AgentBFF" in self.roles:
             from jerry_trader.BackendForFrontend.openclaw import AgentBFF
@@ -747,23 +750,24 @@ class JerryTraderBackendStarter:
             self._threads.append(tick_thread)
             logger.info("TickDataServer started")
 
-        # Start ChartDataBFF if enabled
-        # Runs in a separate thread since it's a blocking uvicorn server
-        if self.chart_data_bff:
-            chart_bff_cfg = self.roles.get("ChartDataBFF", {})
-            host = chart_bff_cfg.get("host", "0.0.0.0")
-            port = chart_bff_cfg.get("port", 5002)
-            logger.info(f"Starting Chart Data BFF on {host}:{port}")
-
-            def run_chart_bff():
-                self.chart_data_bff.run()
-
-            chart_bff_thread = Thread(
-                target=run_chart_bff, daemon=True, name="ChartDataBFF"
-            )
-            chart_bff_thread.start()
-            self._threads.append(chart_bff_thread)
-            logger.info("ChartDataBFF started")
+        # ChartDataBFF is deprecated - tickdata_server now handles all chart BFF functionality
+        # # Start ChartDataBFF if enabled
+        # # Runs in a separate thread since it's a blocking uvicorn server
+        # if self.chart_data_bff:
+        #     chart_bff_cfg = self.roles.get("ChartDataBFF", {})
+        #     host = chart_bff_cfg.get("host", "0.0.0.0")
+        #     port = chart_bff_cfg.get("port", 5002)
+        #     logger.info(f"Starting Chart Data BFF on {host}:{port}")
+        #
+        #     def run_chart_bff():
+        #         self.chart_data_bff.run()
+        #
+        #     chart_bff_thread = Thread(
+        #         target=run_chart_bff, daemon=True, name="ChartDataBFF"
+        #     )
+        #     chart_bff_thread.start()
+        #     self._threads.append(chart_bff_thread)
+        #     logger.info("ChartDataBFF started")
 
         # Start AgentBFF in separate thread if enabled
         if self.agent_bff:

@@ -227,7 +227,7 @@ export const MINIMAL_TEMPLATE: LayoutTemplate = {
     "syncGroup": "group-1",
     "settings": {
       "rankList": {
-        "sortColumn": "state",
+        "sortColumn": "changePercent",
         "sortDirection": "desc",
         "visibleColumns": [
           "news",
@@ -283,7 +283,7 @@ export const MINIMAL_TEMPLATE: LayoutTemplate = {
     },
     "size": {
       "width": 760,
-      "height": 530
+      "height": 440
     },
     "syncGroup": "group-1",
     "settings": {
@@ -295,25 +295,8 @@ export const MINIMAL_TEMPLATE: LayoutTemplate = {
           "NotGood",
           "Bad"
         ],
-        "focusMode": false
-      }
-    }
-  },
-  {
-    "id": "chart-2",
-    "moduleType": "chart",
-    "position": {
-      "x": 0,
-      "y": 940
-    },
-    "size": {
-      "width": 680,
-      "height": 670
-    },
-    "syncGroup": "group-1",
-    "settings": {
-      "chart": {
-        "timeframe": "1m"
+        "focusMode": false,
+        "timeRange": "1h"
       }
     }
   },
@@ -335,11 +318,11 @@ export const MINIMAL_TEMPLATE: LayoutTemplate = {
     "moduleType": "news-room",
     "position": {
       "x": 900,
-      "y": 540
+      "y": 450
     },
     "size": {
       "width": 440,
-      "height": 390
+      "height": 480
     },
     "syncGroup": null
   },
@@ -348,13 +331,18 @@ export const MINIMAL_TEMPLATE: LayoutTemplate = {
     "moduleType": "stock-detail",
     "position": {
       "x": 1350,
-      "y": 540
+      "y": 450
     },
     "size": {
       "width": 310,
-      "height": 390
+      "height": 480
     },
-    "syncGroup": "group-1"
+    "syncGroup": "group-1",
+    "settings": {
+      "stockDetail": {
+        "view": "news"
+      }
+    }
   },
   {
     "id": "order-management-1773117184168",
@@ -373,17 +361,17 @@ export const MINIMAL_TEMPLATE: LayoutTemplate = {
     "id": "chart-1773117208665",
     "moduleType": "chart",
     "position": {
-      "x": 690,
+      "x": 0,
       "y": 940
     },
     "size": {
-      "width": 600,
+      "width": 680,
       "height": 670
     },
     "syncGroup": "group-1",
     "settings": {
       "chart": {
-        "timeframe": "1h"
+        "timeframe": "1m"
       }
     }
   },
@@ -429,8 +417,26 @@ export const MINIMAL_TEMPLATE: LayoutTemplate = {
         "view": "orders"
       }
     }
+  },
+  {
+    "id": "chart-1773212923947",
+    "moduleType": "chart",
+    "position": {
+      "x": 690,
+      "y": 940
+    },
+    "size": {
+      "width": 600,
+      "height": 670
+    },
+    "syncGroup": "group-1",
+    "settings": {
+      "chart": {
+        "timeframe": "1m"
+      }
     }
-  ],
+    }
+  ]
 };
 
 // Template 3: Trade-Layout

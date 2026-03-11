@@ -15,10 +15,10 @@ export default function NewsRoom({ moduleId }: ModuleProps) {
   const [filters, setFilters] = useState<NewsRoomFilters>({
     model: 'all',
     symbol: '',
-    is_catalyst: 'all',
+    is_catalyst: 'true',
     searchText: '',
   });
-  const [showFilters, setShowFilters] = useState(true);
+  const [showFilters, setShowFilters] = useState(false);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
 
   // Subscribe to news processor results via websocket

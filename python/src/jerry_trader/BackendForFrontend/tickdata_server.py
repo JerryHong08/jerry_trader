@@ -23,18 +23,21 @@ import json
 import os
 from typing import Any, Dict, Optional, Set
 
+import clickhouse_connect
 import redis
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from jerry_trader.DataManager.clickhouse_client import ClickHouseClient
 from jerry_trader.DataSupply.tickDataSupply.unified_tick_manager import (
     UnifiedTickManager,
 )
 from jerry_trader.utils.logger import setup_logger
 from jerry_trader.utils.redis_keys import factor_tasks_stream
 from jerry_trader.utils.session import make_session_id
+from jerry_trader.utils.timezone import ms_to_readable
 
 logger = setup_logger(__name__, log_to_file=True)
 
@@ -57,6 +60,42 @@ class TickDataServer:
         manager_type: Data provider type (only used if ws_manager is None)
     """
 
+    # Timeframes with live partial-bar updates from Rust BarBuilder.
+    # Only these have pending/partial bar state at runtime.
+    BARS_BUILDER_TIMEFRAMES = {"10s", "1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"}
+
+    # Map frontend timeframe names → canonical ClickHouse timeframe keys.
+    # All timeframes go through ClickHouse (with Polygon backfill).
+    _TF_TO_CH: Dict[str, str] = {
+        "10s": "10s",
+        "1m": "1m",
+        "5m": "5m",
+        "15m": "15m",
+        "30m": "30m",
+        "1h": "1h",
+        "4h": "4h",
+        "1D": "1d",
+        "1W": "1w",
+        "1M": "1M",
+        "1d": "1d",
+        "1w": "1w",
+    }
+
+    _TF_DURATION_SEC: Dict[str, int] = {
+        "10s": 10,
+        "1m": 60,
+        "5m": 300,
+        "15m": 900,
+        "30m": 1800,
+        "1h": 3600,
+        "4h": 14400,
+        "1d": 86400,
+        "1w": 604800,
+        "1M": 2592000,
+    }
+
+    _ms_to_readable = staticmethod(ms_to_readable)
+
     def __init__(
         self,
         host: str = "0.0.0.0",
@@ -64,6 +103,7 @@ class TickDataServer:
         session_id: Optional[str] = None,
         ws_manager: Optional[UnifiedTickManager] = None,
         redis_config: Optional[Dict[str, Any]] = None,
+        clickhouse_config: Optional[Dict[str, Any]] = None,
         manager_type: Optional[str] = None,
     ):
         self.host = host
@@ -91,6 +131,16 @@ class TickDataServer:
         redis_db = redis_cfg.get("db", 0)
         self.r = redis.Redis(host=redis_host, port=redis_port, db=redis_db)
         self.FACTOR_TASKS_STREAM = factor_tasks_stream(self.session_id)
+
+        # Track subscribed tickers for backfill decisions
+        self.subscribed_tickers: Set[str] = set()
+
+        # ── ClickHouse (bar queries) ─────────────────────────────────
+        self.ch_client = ClickHouseClient(
+            session_id=self.session_id,
+            redis_config=redis_config,
+            clickhouse_config=clickhouse_config,
+        )
 
         # Build FastAPI app
         self.app = FastAPI(title="TickDataServer", version="1.0.0")
@@ -126,57 +176,147 @@ class TickDataServer:
             async def startup_event():
                 asyncio.create_task(manager.stream_forever())
 
-        # --- Debug endpoints ---
+        # ============ Clock API (for TimelineClock sync) ============
 
-        @self.app.get("/debug/status")
-        async def debug_status():
-            """Check all connected clients status."""
-            all_client_symbols = {}
-            for client, stream_keys in manager.connections.items():
-                client_id = (
-                    f"client_{id(client)}"
-                    if hasattr(client, "__hash__")
-                    else str(client)
+        @self.app.get("/api/clock")
+        async def get_clock():
+            """Return the current clock state for frontend TimelineClock sync.
+
+            Response:
+                mode: "replay" | "live"
+                now_ms: current epoch ms (replay-aware)
+                speed: replay speed multiplier (1.0 in live)
+                paused: whether replay clock is paused
+                data_start_ts_ns: replay start epoch ns (null in live)
+                session_id: current session ID
+            """
+            from jerry_trader import clock
+
+            if clock.is_replay():
+                rc = clock.get_clock()
+                return {
+                    "mode": "replay",
+                    "now_ms": clock.now_ms(),
+                    "speed": rc.speed if rc else 1.0,
+                    "paused": rc.is_paused if rc else False,
+                    "data_start_ts_ns": rc.data_start_ts_ns if rc else None,
+                    "session_id": self.session_id,
+                }
+            else:
+                return {
+                    "mode": "live",
+                    "now_ms": clock.now_ms(),
+                    "speed": 1.0,
+                    "paused": False,
+                    "data_start_ts_ns": None,
+                    "session_id": self.session_id,
+                }
+
+        # ============ Chart Bars API (for ChartModule) ============
+
+        @self.app.get("/api/chart/bars/{ticker}")
+        async def get_chart_bars(
+            ticker: str,
+            timeframe: str = "1D",
+            from_date: Optional[str] = None,
+            to_date: Optional[str] = None,
+            limit: int = 5000,
+            request_id: Optional[str] = None,
+        ):
+            """Fetch OHLCV bars for the ChartModule.
+
+            All timeframes go through ClickHouse as the single source
+            of truth. Missing historical data is backfilled from Polygon
+            on first request.
+
+            Args:
+                ticker: Stock ticker symbol
+                timeframe: Bar timeframe (10s, 1m, 5m, 15m, 30m, 1h, 4h, 1D, 1W, 1M)
+                from_date: Start date YYYY-MM-DD (default: auto from timeframe)
+                to_date: End date YYYY-MM-DD (default: today)
+                limit: Maximum bars to return
+                request_id: Opaque ID echoed back so the frontend can discard
+                            stale responses from superseded requests.
+
+            Returns:
+                JSON with bars array formatted for lightweight-charts CandlestickSeries
+            """
+            ch_tf = self._TF_TO_CH.get(timeframe)
+            ticker_upper = ticker.upper()
+
+            if not ch_tf:
+                return {
+                    "ticker": ticker_upper,
+                    "timeframe": timeframe,
+                    "bars": [],
+                    "barCount": 0,
+                    "error": f"Unknown timeframe: {timeframe}",
+                    **({"requestId": request_id} if request_id else {}),
+                }
+
+            if not self.ch_client:
+                return {
+                    "ticker": ticker_upper,
+                    "timeframe": timeframe,
+                    "bars": [],
+                    "barCount": 0,
+                    "error": "ClickHouse unavailable",
+                    **({"requestId": request_id} if request_id else {}),
+                }
+
+            # ── Query ClickHouse ──────────────────────────────────────
+            ch_result = self.ch_client._query_bars_clickhouse(
+                ticker_upper,
+                ch_tf,
+                from_date,
+                to_date,
+                limit,
+            )
+            ch_bars = ch_result["bars"] if ch_result else []
+
+            # If ClickHouse is missing historical coverage, backfill
+            # from Polygon and persist into ClickHouse.
+            # Skip backfill if BarsBuilder is actively building (ticker is subscribed).
+            # Only backfill when bars_builder is NOT ingesting tick data.
+            if self._needs_historical_backfill(
+                ticker_upper,
+                ch_bars,
+                ch_tf,
+            ):
+                n = self.ch_client.custom_bar_backfill(
+                    ticker_upper,
+                    timeframe,
+                    ch_tf,
+                    from_date,
+                    to_date,
+                    limit,
                 )
-                all_client_symbols[client_id] = list(stream_keys)
+                if n > 0:
+                    ch_result = self.ch_client._query_bars_clickhouse(
+                        ticker_upper,
+                        ch_tf,
+                        from_date,
+                        to_date,
+                        limit,
+                    )
+
+            if ch_result and ch_result["barCount"] > 0:
+                # Append pending + partial bar for BarBuilder timeframes
+                if ch_tf in self.BARS_BUILDER_TIMEFRAMES:
+                    self.ch_client._append_partial_bar(ch_result, ticker_upper, ch_tf)
+                ch_result["timeframe"] = timeframe
+                if request_id:
+                    ch_result["requestId"] = request_id
+                return ch_result
 
             return {
-                "connected": manager.connected,
-                "subscribed_streams": list(manager.subscribed_streams),
-                "active_connections": len(manager.connections),
-                "client_subscriptions": all_client_symbols,
-                "queue_lengths": {
-                    stream: queue.qsize() for stream, queue in manager.queues.items()
-                },
-                "session_id": self.session_id,
-                "shared_manager": not self._owns_manager,
+                "ticker": ticker_upper,
+                "timeframe": timeframe,
+                "bars": [],
+                "barCount": 0,
+                "error": "No data available",
+                **({"requestId": request_id} if request_id else {}),
             }
-
-        @self.app.get("/debug/latest/{symbol}")
-        async def get_latest_quote(symbol: str, event: str = "Q"):
-            """Get symbol latest event data (default Q=quote). Use ?event=T for trades."""
-            symbol = symbol.upper()
-            stream_key = f"{event}.{symbol}"
-            queue = manager.queues.get(stream_key)
-
-            if not queue:
-                return {"error": f"Stream {stream_key} not subscribed"}
-
-            if queue.empty():
-                return {"message": f"No data available for {stream_key}"}
-
-            try:
-                latest_data = None
-                while not queue.empty():
-                    latest_data = await asyncio.wait_for(queue.get(), timeout=0.1)
-                return latest_data or {"message": "No data"}
-            except asyncio.TimeoutError:
-                return {"message": "No recent data"}
-
-        @self.app.get("/debug", response_class=HTMLResponse)
-        async def debug_page():
-            """Debug Page."""
-            return _DEBUG_HTML
 
         # --- Main WebSocket endpoint ---
 
@@ -226,10 +366,12 @@ class TickDataServer:
                                     del consumer_tasks[stream_key]
                                     current_streams.discard(stream_key)
 
-                            # Notify FactorEngine via Redis stream
+                            # Notify FactorEngine via Redis stream and update subscribed_tickers
                             for sub in subscriptions:
                                 sym = sub.get("symbol", "").upper()
                                 if sym:
+                                    # Remove from subscribed tickers set
+                                    self.subscribed_tickers.discard(sym)
                                     try:
                                         r.xadd(
                                             FACTOR_TASKS_STREAM,
@@ -287,10 +429,12 @@ class TickDataServer:
 
                         current_streams.update(to_add)
 
-                        # Notify FactorEngine via Redis stream
+                        # Notify FactorEngine via Redis stream and update subscribed_tickers
                         for sub in subscriptions:
                             sym = sub.get("symbol", "").upper()
                             if sym:
+                                # Add to subscribed tickers set
+                                self.subscribed_tickers.add(sym)
                                 try:
                                     r.xadd(
                                         FACTOR_TASKS_STREAM,
@@ -308,6 +452,56 @@ class TickDataServer:
                 await manager.disconnect(websocket)
                 for task in consumer_tasks.values():
                     task.cancel()
+
+    # ════════════════════════════════════════════════════════════════════════
+    # Historical backfill: Polygon → ClickHouse
+    # ════════════════════════════════════════════════════════════════════════
+
+    def _needs_historical_backfill(
+        self,
+        ticker: str,
+        ch_bars: list,
+        builder_tf: str,
+    ) -> bool:
+        """Return True when ClickHouse needs historical bar data from Polygon.
+
+        Since custom_bar_backfill now handles ONLY historical data (yesterday and
+        before for intraday TFs), and trades_backfill handles today's data, we need
+        to orchestrate them properly:
+
+        Scenarios:
+        1. No bars + not subscribed → custom_bar_backfill (historical)
+        2. No bars + subscribed → custom_bar_backfill (historical) + trades_backfill (today)
+        3. Has bars + not subscribed → custom_bar_backfill (fill gaps)
+        4. Has bars + subscribed → skip (trades_backfill handles today, historical already exists)
+
+        The key insight: Always run custom_bar_backfill on FIRST request (empty ClickHouse)
+        because it only fetches historical data now. Subsequent requests can skip if
+        ticker is subscribed (meaning trades_backfill is handling today).
+        """
+        # ALWAYS backfill if ClickHouse is empty (first request)
+        # custom_bar_backfill will fetch historical, trades_backfill handles today
+        if not ch_bars:
+            logger.debug(
+                f"_needs_historical_backfill - {ticker}/{builder_tf}: "
+                f"ClickHouse empty, need custom_bar_backfill for historical data"
+            )
+            return True
+
+        # Has bars + subscribed → skip (historical exists, today handled by trades_backfill)
+        if ticker in self.subscribed_tickers:
+            logger.debug(
+                f"_needs_historical_backfill - {ticker}/{builder_tf}: "
+                f"has bars + ticker subscribed, skip backfill (trades_backfill handles today)"
+            )
+            return False
+
+        # Has bars + NOT subscribed → backfill to fill any gaps
+        logger.debug(
+            f"_needs_historical_backfill - {ticker}/{builder_tf}: "
+            f"has bars but ticker not subscribed, need backfill to fill gaps"
+        )
+        return True
 
     def run(self, debug: bool = False):
         """Run the TickDataServer (blocking). Used by backend_starter."""
@@ -352,61 +546,6 @@ async def _consume_stream(
         logger.debug(f"🛑 Consumer cancelled for {stream_key}")
     except Exception as e:
         logger.error(f"❌ Error in consumer for {stream_key}: {e}")
-
-
-# =============================================================================
-# Debug HTML page
-# =============================================================================
-_DEBUG_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>TickData WebSocket Debug</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 20px; }
-        .container { max-width: 800px; }
-        .section { margin: 20px 0; padding: 15px; border: 1px solid #ddd; }
-        button { margin: 5px; padding: 8px 16px; cursor: pointer; }
-        #output { background: #f5f5f5; padding: 10px; height: 200px; overflow-y: auto; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🔍 TickData WebSocket Debug</h1>
-        <div class="section">
-            <h3>📊 Status</h3>
-            <button onclick="checkStatus()">Check Status</button>
-            <div id="status"></div>
-        </div>
-        <div class="section">
-            <h3>📋 Output</h3>
-            <div id="output"></div>
-            <button onclick="clearOutput()">Clear</button>
-        </div>
-    </div>
-    <script>
-        function log(message) {
-            const output = document.getElementById('output');
-            output.innerHTML += '<div>' + new Date().toLocaleTimeString() + ': ' + message + '</div>';
-            output.scrollTop = output.scrollHeight;
-        }
-        async function checkStatus() {
-            try {
-                const response = await fetch('/debug/status');
-                const data = await response.json();
-                document.getElementById('status').innerHTML = '<pre>' + JSON.stringify(data, null, 2) + '</pre>';
-                log('✅ Status checked');
-            } catch (error) {
-                log('❌ Error checking status: ' + error);
-            }
-        }
-        function clearOutput() {
-            document.getElementById('output').innerHTML = '';
-        }
-    </script>
-</body>
-</html>
-"""
 
 
 # =============================================================================

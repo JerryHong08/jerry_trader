@@ -149,6 +149,7 @@ class ChartDataService:
         from_date: Optional[str] = None,
         to_date: Optional[str] = None,
         limit: int = 5000,
+        use_cache: bool = True,
     ) -> Optional[Dict]:
         """
         Get OHLCV bars for the frontend ChartModule.
@@ -159,6 +160,9 @@ class ChartDataService:
             from_date: Start date 'YYYY-MM-DD' (default: auto from timeframe)
             to_date: End date 'YYYY-MM-DD' (default: today)
             limit: Max bars to return
+            use_cache: Whether to use Redis cache for Polygon data (default True).
+                       Set to False for backfill-to-ClickHouse paths to avoid
+                       serving stale cached bars.
 
         Returns:
             Dict with bars data formatted for lightweight-charts, or None on failure.
@@ -242,6 +246,7 @@ class ChartDataService:
             timeframe,
             bar_duration_sec,
             limit,
+            use_cache=use_cache,
         )
         if result:
             self._log_result(ticker, timeframe, "POLYGON", result)
@@ -288,6 +293,7 @@ class ChartDataService:
         timeframe: str,
         bar_duration_sec: int,
         limit: int,
+        use_cache: bool = True,
     ) -> Optional[Dict]:
         """Fetch bars via Polygon.io API (CustomBarsFetcher)."""
         try:
@@ -301,7 +307,7 @@ class ChartDataService:
                 to_=to_dt,
                 limit=limit,
                 timeout=20,
-                use_cache=True,
+                use_cache=use_cache,
                 return_dataframe=True,
                 cache_ttl=polygon_cache_ttl,
             )

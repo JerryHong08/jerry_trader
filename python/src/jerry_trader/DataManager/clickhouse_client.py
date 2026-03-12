@@ -10,7 +10,7 @@ Used by tickdata_server to provide historical bar data with Polygon fallback.
 import logging
 import os
 from datetime import datetime, timedelta
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 
 import clickhouse_connect
 from dotenv import load_dotenv
@@ -364,6 +364,7 @@ class ClickHouseClient:
             from_date=from_date,
             to_date=to_date,
             limit=limit,
+            use_cache=False,  # always fetch fresh — data goes to ClickHouse
         )
         if not result or not result.get("bars"):
             return 0
@@ -436,6 +437,46 @@ class ClickHouseClient:
             f"{len(self._CUSTOM_BAR_BACKFILL_TFS)} timeframes"
         )
         return total
+
+    def tickers_with_bars_today(self) -> Set[str]:
+        """Return all tickers that have bars in ClickHouse for today (ET).
+
+        Called once at startup to bootstrap _backfill_done, so that
+        re-subscribing after a service restart skips redundant
+        custom_bar_backfill_all for tickers already warmed up.
+        """
+        if not self.ch_client:
+            return set()
+        try:
+            from zoneinfo import ZoneInfo
+
+            from jerry_trader import clock as _clock
+
+            now_et = _clock.now_datetime().astimezone(ZoneInfo("America/New_York"))
+            today_start = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
+            tomorrow_start = today_start + timedelta(days=1)
+            start_ms = int(today_start.timestamp() * 1000)
+            end_ms = int(tomorrow_start.timestamp() * 1000)
+
+            result = self.ch_client.query(
+                "SELECT DISTINCT ticker FROM ohlcv_bars "
+                "WHERE bar_start >= {start_ms:Int64} "
+                "  AND bar_start < {end_ms:Int64}",
+                parameters={
+                    "start_ms": start_ms,
+                    "end_ms": end_ms,
+                },
+            )
+            tickers = {row[0] for row in result.result_rows}
+            if tickers:
+                logger.info(
+                    f"tickers_with_bars_today: found {len(tickers)} tickers "
+                    f"with bars today: {sorted(tickers)}"
+                )
+            return tickers
+        except Exception as e:
+            logger.warning(f"tickers_with_bars_today: query failed - {e}")
+            return set()
 
     def get_last_bar_start(
         self, ticker: str, timeframe: str, date: str

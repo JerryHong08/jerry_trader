@@ -154,6 +154,10 @@ class TickDataServer:
             clickhouse_config=clickhouse_config,
         )
 
+        # Bootstrap _backfill_done from ClickHouse: tickers already backfilled
+        # today skip redundant custom_bar_backfill_all on re-subscribe after restart
+        self._backfill_done.update(self.ch_client.tickers_with_bars_today())
+
         # Optional reference to BarsBuilderService (same process).
         # Used to wait for trades_backfill completion before serving
         # bar REST responses, avoiding stale gap data on re-subscribe.
@@ -283,13 +287,12 @@ class TickDataServer:
 
             # ── Query ClickHouse ──────────────────────────────────────
             # If trades_backfill is running for this ticker (e.g., after
-            # re-subscribe), wait briefly so the gap-fill bars land in
-            # ClickHouse before we serve the REST response.
-            if (
-                self._bars_builder is not None
-                and ticker_upper in self.subscribed_tickers
-                and ch_tf in self.BARS_BUILDER_TIMEFRAMES
-            ):
+            # subscribe/re-subscribe), wait briefly so the gap-fill bars
+            # land in ClickHouse before we serve the REST response.
+            # We check _bootstrap_events directly (not subscribed_tickers)
+            # because the REST request can arrive before subscribed_tickers
+            # is updated in the WS handler.
+            if self._bars_builder is not None and ch_tf in self.BARS_BUILDER_TIMEFRAMES:
                 ready = self._bars_builder.wait_for_bootstrap(ticker_upper, timeout=3.0)
                 if not ready:
                     logger.warning(
@@ -472,6 +475,14 @@ class TickDataServer:
                             if sym:
                                 # Add to subscribed tickers set
                                 self.subscribed_tickers.add(sym)
+
+                                # Pre-register bootstrap Event so that REST
+                                # requests arriving before bars_builder picks
+                                # up the Redis message will block on
+                                # wait_for_bootstrap instead of serving stale data.
+                                if self._bars_builder is not None:
+                                    self._bars_builder.pre_register_bootstrap(sym)
+
                                 try:
                                     r.xadd(
                                         FACTOR_TASKS_STREAM,
@@ -504,6 +515,10 @@ class TickDataServer:
 
         Called on ticker subscription. Deduped per ticker — if backfill is
         already in progress or completed, this is a no-op.
+
+        On service restart, in-memory _backfill_done is empty.  We check
+        ClickHouse to see whether a previous session already backfilled
+        this ticker — if so, treat it as a re-subscribe (skip backfill).
 
         Runs in a thread pool so the WebSocket handler is not blocked.
         """

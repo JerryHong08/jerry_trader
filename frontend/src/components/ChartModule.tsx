@@ -266,6 +266,20 @@ export function ChartModule({
     };
   }, [symbol, timeframe, fetchBars]);
 
+  // ── Retry fetch when initial response had an error ─────────────────────
+  // When the backend returns "No data available" (e.g., trades_backfill
+  // hasn't finished yet), schedule a retry so the chart fills in once
+  // ClickHouse has data, without the user having to interact.
+  useEffect(() => {
+    if (!symbol || !chartState?.error || chartState.loading) return;
+
+    const timer = setTimeout(() => {
+      fetchBars(moduleId, symbol.toUpperCase(), timeframe);
+    }, 3000);
+
+    return () => clearTimeout(timer);
+  }, [chartState?.error, chartState?.lastFetchTime, symbol, timeframe, moduleId, fetchBars]);
+
   // Reset refs AND clear chart series when the symbol changes — prevents stale
   // bars from the previous ticker lingering when the new ticker has no data
   // (e.g. 10s timeframe with no API/ClickHouse data yet).

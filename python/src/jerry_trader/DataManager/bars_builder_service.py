@@ -399,6 +399,14 @@ class BarsBuilderService:
         # correctly in ClickHouse (bar_start < per_tf_starts[tf]).
         bootstrap_tfs = list(self._bootstrap_tfs_set)
         if bootstrap_tfs:
+            # Reuse a pre-registered Event (from tickdata_server) if it
+            # exists, otherwise create a new one.  This avoids orphaning
+            # an Event that a REST handler might already be wait()-ing on.
+            evt = self._bootstrap_events.get(symbol)
+            if evt is None or evt.is_set():
+                evt = Event()
+            self._bootstrap_events[symbol] = evt
+
             from_ms = None
             all_tfs_have_bars = True
             per_tf_starts: Dict[str, int] = {}
@@ -420,11 +428,6 @@ class BarsBuilderService:
             if not all_tfs_have_bars:
                 from_ms = None
                 per_tf_starts = {}  # no per-TF filtering for first subscribe
-
-            # Create a threading.Event so tickdata_server can wait for
-            # trades_backfill to complete before serving bar REST responses.
-            evt = Event()
-            self._bootstrap_events[symbol] = evt
 
             Thread(
                 target=self.trades_backfill,
@@ -725,6 +728,13 @@ class BarsBuilderService:
 
             self._bootstrap_done[symbol] = set(bootstrap_tfs)
 
+            # Flush pending bars to ClickHouse NOW, before signaling the
+            # bootstrap Event.  Without this, the REST handler unblocks
+            # (via evt.set()) and queries ClickHouse before the 50 ms
+            # _flush_loop has a chance to drain _pending_bars, resulting
+            # in stale / missing data served to the frontend.
+            self._flush_to_clickhouse()
+
         except Exception as e:
             logger.error(f"trades_backfill - {symbol}: {e}", exc_info=True)
         finally:
@@ -733,6 +743,28 @@ class BarsBuilderService:
             evt = self._bootstrap_events.pop(symbol, None)
             if evt:
                 evt.set()
+
+    def pre_register_bootstrap(self, symbol: str) -> None:
+        """Pre-create a bootstrap Event for this ticker.
+
+        Called by tickdata_server BEFORE the Redis XADD so that any
+        concurrent REST request will block on wait_for_bootstrap
+        even if bars_builder hasn't picked up the subscription yet.
+
+        If _add_ticker later creates its own Event, it will overwrite
+        this one — which is fine because _add_ticker's Event is the
+        one that trades_backfill will set().
+
+        If the ticker is already active (re-subscribe), _add_ticker
+        will create a fresh Event anyway, so this pre-registered one
+        will be replaced.
+        """
+        if symbol not in self._bootstrap_events:
+            self._bootstrap_events[symbol] = Event()
+            logger.debug(
+                f"pre_register_bootstrap - {symbol}: "
+                f"Event pre-created for wait_for_bootstrap"
+            )
 
     def wait_for_bootstrap(self, symbol: str, timeout: float = 3.0) -> bool:
         """Wait until trades_backfill completes for this ticker.

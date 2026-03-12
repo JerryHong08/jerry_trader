@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Plus, Undo2, Redo2, ZoomIn, ZoomOut, HelpCircle } from 'lucide-react';
+import { Plus, Undo2, Redo2, ZoomIn, ZoomOut, HelpCircle, Lock, Unlock } from 'lucide-react';
 import { GridContainer } from './components/GridContainer';
 import { ModuleSidebar } from './components/ModuleSidebar';
 import { SettingsMenu } from './components/SettingsMenu';
@@ -165,6 +165,7 @@ export default function App() {
   });
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [isLocked, setIsLocked] = useState(false);
   const [currentTemplateId, setCurrentTemplateId] = useState<string>(() => {
     return localStorage.getItem('trading-system-template') || '';
   });
@@ -377,6 +378,15 @@ export default function App() {
             {/* Zoom Controls */}
             <div className="flex items-center gap-2 px-3 py-1 bg-zinc-800 rounded">
               <button
+                onClick={() => setIsLocked(v => !v)}
+                className={`p-1 transition-colors rounded ${
+                  isLocked ? 'text-amber-400 hover:bg-zinc-700' : 'text-zinc-500 hover:bg-zinc-700 hover:text-zinc-300'
+                }`}
+                title={isLocked ? 'Zoom Locked (L to toggle)' : 'Zoom Unlocked (L to toggle)'}
+              >
+                {isLocked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
+              </button>
+              <button
                 onClick={() => setZoom(Math.max(0.25, +(zoom - 0.1).toFixed(2)))}
                 disabled={zoom <= 0.25}
                 className={`p-1 transition-colors ${
@@ -439,6 +449,8 @@ export default function App() {
           gridGap={gridGap}
           zoom={zoom}
           onZoomChange={setZoom}
+          isLocked={isLocked}
+          onLockChange={setIsLocked}
         />
       </div>
     </div>

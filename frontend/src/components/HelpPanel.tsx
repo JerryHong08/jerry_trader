@@ -13,8 +13,8 @@ const shortcuts: { category: string; items: { keys: string[]; description: strin
       { keys: ['Scroll'], description: 'Pan the canvas' },
       { keys: ['Ctrl', 'Scroll'], description: 'Zoom in / out toward cursor' },
       { keys: ['Middle-click', 'Drag'], description: 'Pan the canvas' },
-      { keys: ['L'], description: 'Lock canvas (disable pan scroll)' },
-      { keys: ['Alt', 'L'], description: 'Unlock canvas' },
+      { keys: ['L'], description: 'Lock zoom' },
+      { keys: ['Alt', 'L'], description: 'Unlock zoom' },
     ],
   },
   {

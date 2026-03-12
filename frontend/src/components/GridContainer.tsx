@@ -12,6 +12,8 @@ interface GridContainerProps {
   gridGap: number;
   zoom: number;
   onZoomChange: (zoom: number) => void;
+  isLocked: boolean;
+  onLockChange: (locked: boolean) => void;
 }
 
 const MIN_ZOOM = 0.25;
@@ -29,6 +31,8 @@ export function GridContainer({
   gridGap,
   zoom,
   onZoomChange,
+  isLocked,
+  onLockChange,
 }: GridContainerProps) {
   const [panOffset, setPanOffset] = useState(() => {
     try {
@@ -53,8 +57,7 @@ export function GridContainer({
   // Focused grid: clicking a grid sets it focused so scroll goes to its content
   const [focusedGridId, setFocusedGridId] = useState<string | null>(null);
 
-  // Lock: disables pan scroll when locked
-  const [isLocked, setIsLocked] = useState(false);
+  // Lock ref for stable closures
 
   // === All refs for stable closures (no listener churn) ===
   const zoomRef = useRef(zoom);
@@ -81,15 +84,13 @@ export function GridContainer({
     if (!container) return;
 
     const onWheel = (e: WheelEvent) => {
-      // Lock disables all canvas interaction (pan + zoom)
-      if (isLockedRef.current) return;
-
       const curZoom = zoomRef.current;
       const curPan = panOffsetRef.current;
 
       if (e.ctrlKey || e.metaKey) {
-        // Zoom toward cursor
+        // Zoom toward cursor (blocked when locked)
         e.preventDefault();
+        if (isLockedRef.current) return;
         const rect = container.getBoundingClientRect();
         const mx = e.clientX - rect.left;
         const my = e.clientY - rect.top;
@@ -141,6 +142,7 @@ export function GridContainer({
         setFocusedGridId(gridEl.getAttribute('data-grid-id'));
       } else {
         // Clicked empty canvas → start selection rectangle + clear focus
+        e.preventDefault(); // prevent native text selection during drag
         setFocusedGridId(null);
         const rect = containerRef.current!.getBoundingClientRect();
         const sx = e.clientX - rect.left;
@@ -290,7 +292,7 @@ export function GridContainer({
 
       if (e.code === 'KeyF' && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
         e.preventDefault();
-        setIsLocked(false); // F cancels lock
+        onLockChange(false); // F cancels lock
         if (items.length === 0) return;
         const minX = Math.min(...items.map(i => i.position.x));
         const minY = Math.min(...items.map(i => i.position.y));
@@ -302,16 +304,16 @@ export function GridContainer({
       if (e.code === 'KeyL' && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
         e.preventDefault();
         if (e.altKey) {
-          setIsLocked(false); // Alt+L unlocks
+          onLockChange(false); // Alt+L unlocks
         } else {
-          setIsLocked(true); // L locks
+          onLockChange(true); // L locks
         }
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [items, focusOnBounds]);
+  }, [items, focusOnBounds, onLockChange]);
 
   // Compute selection rect in screen pixels for the overlay
   const selRect = isSelecting ? {
@@ -382,12 +384,7 @@ export function GridContainer({
         />
       )}
 
-      {/* Lock indicator */}
-      {isLocked && (
-        <div className="absolute top-3 left-1/2 -translate-x-1/2 px-3 py-1 bg-zinc-800/80 rounded text-xs text-zinc-400 pointer-events-none select-none z-[2000]">
-          🔒 Locked — press <kbd className="px-1 py-0.5 bg-zinc-700 rounded text-zinc-300 font-mono">Alt+L</kbd> or <kbd className="px-1 py-0.5 bg-zinc-700 rounded text-zinc-300 font-mono">F</kbd> to unlock
-        </div>
-      )}
+
     </div>
   );
 }

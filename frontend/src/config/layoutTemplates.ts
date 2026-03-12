@@ -321,7 +321,7 @@ export const MINIMAL_TEMPLATE: LayoutTemplate = {
       "y": 450
     },
     "size": {
-      "width": 440,
+      "width": 390,
       "height": 480
     },
     "syncGroup": null
@@ -330,11 +330,11 @@ export const MINIMAL_TEMPLATE: LayoutTemplate = {
     "id": "stock-detail-1773117146516",
     "moduleType": "stock-detail",
     "position": {
-      "x": 1350,
+      "x": 1300,
       "y": 450
     },
     "size": {
-      "width": 310,
+      "width": 360,
       "height": 480
     },
     "syncGroup": "group-1",
@@ -368,10 +368,10 @@ export const MINIMAL_TEMPLATE: LayoutTemplate = {
       "width": 680,
       "height": 670
     },
-    "syncGroup": "group-1",
+    "syncGroup": "group-2",
     "settings": {
       "chart": {
-        "timeframe": "1m"
+        "timeframe": "10s"
       }
     }
   },
@@ -429,7 +429,7 @@ export const MINIMAL_TEMPLATE: LayoutTemplate = {
       "width": 600,
       "height": 670
     },
-    "syncGroup": "group-1",
+    "syncGroup": "group-2",
     "settings": {
       "chart": {
         "timeframe": "1m"

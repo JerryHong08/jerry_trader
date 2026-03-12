@@ -345,44 +345,24 @@ class ClickHouseClient:
         ticker: str,
         frontend_tf: str,
         builder_tf: str,
-        from_date: Optional[str],
-        to_date: Optional[str],
-        limit: int,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        limit: int = 5000,
     ) -> int:
         """Fetch pre-aggregated bars from Polygon via ChartDataService and
         persist them into ClickHouse.
 
-        For intraday timeframes (1m-4h), only backfills historical data
-        (excludes today). Today's intraday bars are built by trades_backfill
-        from raw trade data to avoid double-counting and gaps.
-
-        Daily and above timeframes include today without restriction.
+        Fetches data as recent as Polygon has available (including today).
+        For intraday TFs, trades_backfill will later overwrite today's bars
+        with higher-accuracy trade-built data via ReplacingMergeTree.
 
         Returns the number of bars written.
         """
-        # For intraday timeframes, cut off backfill before today's 4:00 AM ET
-        # (pre-market open). Today's bars are built by trades_backfill from raw trades.
-        adjusted_to_date = to_date
-        if builder_tf in ["1m", "5m", "15m", "30m", "1h", "4h"]:
-            from jerry_trader import clock
-
-            today_str = clock.now_datetime().strftime("%Y-%m-%d")
-
-            # If to_date is None or >= today, cut off at yesterday
-            if to_date is None or to_date >= today_str:
-                yesterday = clock.now_datetime().date() - timedelta(days=1)
-                adjusted_to_date = yesterday.strftime("%Y-%m-%d")
-                logger.debug(
-                    f"custom_bar_backfill - {ticker}/{builder_tf}: "
-                    f"intraday timeframe, cutting off at {adjusted_to_date} "
-                    f"(today's bars handled by trades_backfill)"
-                )
-
         result = self.chart_data_service.get_bars(
             ticker=ticker,
             timeframe=frontend_tf,
             from_date=from_date,
-            to_date=adjusted_to_date,
+            to_date=to_date,
             limit=limit,
         )
         if not result or not result.get("bars"):
@@ -391,12 +371,17 @@ class ClickHouseClient:
         dur_sec = self._TF_DURATION_SEC.get(builder_tf, 60)
         bar_dicts = polygon_bars_to_dicts(ticker, builder_tf, result["bars"], dur_sec)
 
+        # Daily+ bars have bar_start at midnight ET which falls in the
+        # "closed session" window (20:00–04:00 ET).  Skip session filtering
+        # for those timeframes so they don't get silently dropped.
+        is_daily_or_above = dur_sec >= 86400
+
         try:
             n = write_bars(
                 self.ch_client,
                 bar_dicts,
                 source="polygon_backfill",
-                filter_closed=True,
+                filter_closed=not is_daily_or_above,
             )
             logger.info(
                 f"custom_bar_backfill - {ticker}/{builder_tf}: "
@@ -409,6 +394,48 @@ class ClickHouseClient:
                 f"custom_bar_backfill - {ticker}/{builder_tf}: insert failed - {e}"
             )
             return 0
+
+    # Timeframes to backfill from Polygon on subscription.
+    # Excludes 10s (no Polygon support — trades_backfill handles it).
+    _CUSTOM_BAR_BACKFILL_TFS: list = [
+        # (frontend_tf, builder_tf)
+        ("1m", "1m"),
+        ("5m", "5m"),
+        ("15m", "15m"),
+        ("30m", "30m"),
+        ("1h", "1h"),
+        ("4h", "4h"),
+        ("1D", "1d"),
+        ("1W", "1w"),
+        ("1M", "1M"),
+    ]
+
+    def custom_bar_backfill_all(
+        self,
+        ticker: str,
+    ) -> int:
+        """Backfill ALL timeframes (except 10s) from Polygon at once.
+
+        Called on ticker subscription to warm up ClickHouse for fast
+        frontend chart rendering. Fetches as recent as Polygon has
+        available. trades_backfill will later overwrite today's intraday
+        bars with trade-built data via ReplacingMergeTree(inserted_at).
+
+        Returns total number of bars written across all timeframes.
+        """
+        total = 0
+        for frontend_tf, builder_tf in self._CUSTOM_BAR_BACKFILL_TFS:
+            try:
+                n = self.custom_bar_backfill(ticker, frontend_tf, builder_tf)
+                total += n
+            except Exception as e:
+                logger.error(f"custom_bar_backfill_all - {ticker}/{builder_tf}: {e}")
+        logger.info(
+            f"custom_bar_backfill_all - {ticker}: "
+            f"backfilled {total} total bars across "
+            f"{len(self._CUSTOM_BAR_BACKFILL_TFS)} timeframes"
+        )
+        return total
 
     def get_last_bar_start(
         self, ticker: str, timeframe: str, date: str

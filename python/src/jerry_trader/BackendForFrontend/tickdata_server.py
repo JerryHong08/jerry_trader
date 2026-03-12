@@ -21,6 +21,7 @@ Usage:
 import asyncio
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Optional, Set
 
 import clickhouse_connect
@@ -105,6 +106,7 @@ class TickDataServer:
         redis_config: Optional[Dict[str, Any]] = None,
         clickhouse_config: Optional[Dict[str, Any]] = None,
         manager_type: Optional[str] = None,
+        bars_builder: Optional[Any] = None,
     ):
         self.host = host
         self.port = port
@@ -134,6 +136,16 @@ class TickDataServer:
 
         # Track subscribed tickers for backfill decisions
         self.subscribed_tickers: Set[str] = set()
+        # Per-ticker backfill tracking: prevents duplicate custom_bar_backfill
+        self._backfill_in_progress: Set[str] = set()
+        self._backfill_done: Set[str] = set()
+        # Per-ticker-per-TF tracking: avoid repeated futile on-demand backfill
+        # attempts when data genuinely doesn't exist (e.g., no day_aggs in replay)
+        self._backfill_attempted: Dict[str, Set[str]] = {}  # ticker → {tf1, tf2, ...}
+        # Thread pool for background backfill (non-blocking)
+        self._backfill_executor = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="custom_bar_backfill"
+        )
 
         # ── ClickHouse (bar queries) ─────────────────────────────────
         self.ch_client = ClickHouseClient(
@@ -141,6 +153,11 @@ class TickDataServer:
             redis_config=redis_config,
             clickhouse_config=clickhouse_config,
         )
+
+        # Optional reference to BarsBuilderService (same process).
+        # Used to wait for trades_backfill completion before serving
+        # bar REST responses, avoiding stale gap data on re-subscribe.
+        self._bars_builder = bars_builder
 
         # Build FastAPI app
         self.app = FastAPI(title="TickDataServer", version="1.0.0")
@@ -265,6 +282,21 @@ class TickDataServer:
                 }
 
             # ── Query ClickHouse ──────────────────────────────────────
+            # If trades_backfill is running for this ticker (e.g., after
+            # re-subscribe), wait briefly so the gap-fill bars land in
+            # ClickHouse before we serve the REST response.
+            if (
+                self._bars_builder is not None
+                and ticker_upper in self.subscribed_tickers
+                and ch_tf in self.BARS_BUILDER_TIMEFRAMES
+            ):
+                ready = self._bars_builder.wait_for_bootstrap(ticker_upper, timeout=3.0)
+                if not ready:
+                    logger.warning(
+                        f"get_chart_bars - {ticker_upper}/{ch_tf}: "
+                        f"trades_backfill not done after 3s, serving available data"
+                    )
+
             ch_result = self.ch_client._query_bars_clickhouse(
                 ticker_upper,
                 ch_tf,
@@ -275,9 +307,8 @@ class TickDataServer:
             ch_bars = ch_result["bars"] if ch_result else []
 
             # If ClickHouse is missing historical coverage, backfill
-            # from Polygon and persist into ClickHouse.
-            # Skip backfill if BarsBuilder is actively building (ticker is subscribed).
-            # Only backfill when bars_builder is NOT ingesting tick data.
+            # from Polygon/local data and persist into ClickHouse.
+            # Applies to both subscribed and unsubscribed tickers.
             if self._needs_historical_backfill(
                 ticker_upper,
                 ch_bars,
@@ -291,6 +322,8 @@ class TickDataServer:
                     to_date,
                     limit,
                 )
+                # Track attempt so we don't retry this TF on every request
+                self._backfill_attempted.setdefault(ticker_upper, set()).add(ch_tf)
                 if n > 0:
                     ch_result = self.ch_client._query_bars_clickhouse(
                         ticker_upper,
@@ -370,7 +403,10 @@ class TickDataServer:
                             for sub in subscriptions:
                                 sym = sub.get("symbol", "").upper()
                                 if sym:
-                                    # Remove from subscribed tickers set
+                                    # Remove from subscribed tickers set.
+                                    # Keep _backfill_done and _backfill_attempted
+                                    # so re-subscribe skips redundant Polygon/local
+                                    # data fetch (data hasn't changed).
                                     self.subscribed_tickers.discard(sym)
                                     try:
                                         r.xadd(
@@ -429,7 +465,8 @@ class TickDataServer:
 
                         current_streams.update(to_add)
 
-                        # Notify FactorEngine via Redis stream and update subscribed_tickers
+                        # Notify FactorEngine via Redis stream, update subscribed_tickers,
+                        # and trigger custom_bar_backfill for ALL TFs on first subscription
                         for sub in subscriptions:
                             sym = sub.get("symbol", "").upper()
                             if sym:
@@ -444,6 +481,11 @@ class TickDataServer:
                                 except Exception as e:
                                     logger.warning(f"⚠️ Failed to XADD add {sym}: {e}")
 
+                                # Trigger custom_bar_backfill for ALL TFs (except 10s)
+                                # on first subscription — warm up ClickHouse for fast
+                                # chart rendering. Deduped per ticker.
+                                self._trigger_custom_bar_backfill(sym)
+
                     except json.JSONDecodeError as e:
                         logger.error(f"⚠️ JSON decode error: {e}")
 
@@ -457,49 +499,78 @@ class TickDataServer:
     # Historical backfill: Polygon → ClickHouse
     # ════════════════════════════════════════════════════════════════════════
 
+    def _trigger_custom_bar_backfill(self, ticker: str) -> None:
+        """Trigger custom_bar_backfill for ALL TFs (except 10s) in background.
+
+        Called on ticker subscription. Deduped per ticker — if backfill is
+        already in progress or completed, this is a no-op.
+
+        Runs in a thread pool so the WebSocket handler is not blocked.
+        """
+        if ticker in self._backfill_done or ticker in self._backfill_in_progress:
+            logger.debug(
+                f"_trigger_custom_bar_backfill - {ticker}: "
+                f"skipped (done={ticker in self._backfill_done}, "
+                f"in_progress={ticker in self._backfill_in_progress})"
+            )
+            return
+
+        self._backfill_in_progress.add(ticker)
+        logger.info(
+            f"_trigger_custom_bar_backfill - {ticker}: "
+            f"starting background backfill for all TFs"
+        )
+
+        def _run():
+            try:
+                self.ch_client.custom_bar_backfill_all(ticker)
+                self._backfill_done.add(ticker)
+            except Exception as e:
+                logger.error(f"_trigger_custom_bar_backfill - {ticker}: failed - {e}")
+            finally:
+                self._backfill_in_progress.discard(ticker)
+
+        self._backfill_executor.submit(_run)
+
     def _needs_historical_backfill(
         self,
         ticker: str,
         ch_bars: list,
         builder_tf: str,
     ) -> bool:
-        """Return True when ClickHouse needs historical bar data from Polygon.
+        """Return True when a single-TF on-demand backfill is needed.
 
-        Since custom_bar_backfill now handles ONLY historical data (yesterday and
-        before for intraday TFs), and trades_backfill handles today's data, we need
-        to orchestrate them properly:
+        Triggers on-demand backfill when ClickHouse has no bars for a given
+        ticker+TF, regardless of subscription status. This covers:
+          - Unsubscribed tickers (browsing charts without WS stream)
+          - Subscribed tickers where custom_bar_backfill_all missed this TF
+            (e.g., replay mode: minute_aggs exist but day_aggs don't)
+          - Subscribed tickers where the background backfill hasn't finished yet
 
-        Scenarios:
-        1. No bars + not subscribed → custom_bar_backfill (historical)
-        2. No bars + subscribed → custom_bar_backfill (historical) + trades_backfill (today)
-        3. Has bars + not subscribed → custom_bar_backfill (fill gaps)
-        4. Has bars + subscribed → skip (trades_backfill handles today, historical already exists)
-
-        The key insight: Always run custom_bar_backfill on FIRST request (empty ClickHouse)
-        because it only fetches historical data now. Subsequent requests can skip if
-        ticker is subscribed (meaning trades_backfill is handling today).
+        Uses per-ticker-per-TF tracking to avoid futile repeated attempts
+        when data genuinely doesn't exist.
         """
-        # ALWAYS backfill if ClickHouse is empty (first request)
-        # custom_bar_backfill will fetch historical, trades_backfill handles today
-        if not ch_bars:
-            logger.debug(
-                f"_needs_historical_backfill - {ticker}/{builder_tf}: "
-                f"ClickHouse empty, need custom_bar_backfill for historical data"
-            )
-            return True
+        # Already have bars → no backfill needed
+        if ch_bars:
+            return False
 
-        # Has bars + subscribed → skip (historical exists, today handled by trades_backfill)
-        if ticker in self.subscribed_tickers:
+        # Background backfill in progress → let it finish, avoid race
+        if ticker in self._backfill_in_progress:
             logger.debug(
                 f"_needs_historical_backfill - {ticker}/{builder_tf}: "
-                f"has bars + ticker subscribed, skip backfill (trades_backfill handles today)"
+                f"background backfill in progress, skipping on-demand"
             )
             return False
 
-        # Has bars + NOT subscribed → backfill to fill any gaps
+        # Already attempted this specific TF and it came back empty → don't retry
+        attempted_tfs = self._backfill_attempted.get(ticker, set())
+        if builder_tf in attempted_tfs:
+            return False
+
+        # ClickHouse empty, not in progress, not yet attempted → try backfill
         logger.debug(
             f"_needs_historical_backfill - {ticker}/{builder_tf}: "
-            f"has bars but ticker not subscribed, need backfill to fill gaps"
+            f"ClickHouse empty, triggering on-demand backfill"
         )
         return True
 

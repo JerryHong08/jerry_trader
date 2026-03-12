@@ -216,6 +216,9 @@ class AgentBFF:
                     }
                 )
 
+                # Send bootstrap data (historical news processor results)
+                await self._send_bootstrap_data(client_id)
+
                 # Keep connection alive and handle messages
                 while True:
                     data = await websocket.receive_text()
@@ -232,6 +235,67 @@ class AgentBFF:
             except Exception as e:
                 logger.error(f"WebSocket error for {client_id}: {e}")
                 self.manager.disconnect(client_id)
+
+    async def _send_bootstrap_data(self, client_id: str):
+        """Send bootstrap data (historical news processor results) to newly connected client.
+
+        This provides initial news processor results to populate the NewsRoom component
+        when the frontend first connects.
+        """
+        logger.info(f"Sending bootstrap data to client {client_id}")
+
+        try:
+            # Read the last 100 messages from the news processor results stream
+            # Using XREVRANGE to get most recent messages
+            messages = self.r.xrevrange(self.NEWS_PROCESSOR_RESULTS_STREAM, count=100)
+
+            if not messages:
+                logger.debug("No historical news processor results to bootstrap")
+                return
+
+            logger.info(f"Bootstrapping {len(messages)} news processor results")
+
+            # Send each result to the client (reverse to get oldest-first)
+            for message_id, message_data in reversed(messages):
+                symbol = message_data.get("symbol")
+                if not symbol:
+                    continue
+
+                # Parse explanation JSON if present
+                explanation = {}
+                try:
+                    explanation = json.loads(message_data.get("explanation", "{}"))
+                except Exception:
+                    explanation = {"raw": message_data.get("explanation", "")}
+
+                # Build news processor result message (same format as real-time)
+                news_result = {
+                    "type": "news_processor_result",
+                    "model": message_data.get("model", ""),
+                    "symbol": symbol,
+                    "is_catalyst": message_data.get("is_catalyst") == "true",
+                    "classification": message_data.get("classification", "NO"),
+                    "score": message_data.get("score", "0/10"),
+                    "title": message_data.get("title", ""),
+                    "published_time": message_data.get("published_time", ""),
+                    "current_time": message_data.get("current_time", ""),
+                    "explanation": explanation,
+                    "url": message_data.get("url", ""),
+                    "content_preview": message_data.get("content_preview", ""),
+                    "sources": message_data.get("sources", "[]"),
+                    "source_from": message_data.get("source_from", ""),
+                    "timestamp": message_id,
+                }
+
+                # Send to the client
+                await self.manager.send_personal_message(news_result, client_id)
+
+            logger.info(
+                f"Bootstrap complete: sent {len(messages)} results to {client_id}"
+            )
+
+        except Exception as e:
+            logger.error(f"Error sending bootstrap data to {client_id}: {e}")
 
     async def _news_processor_results_listener(self):
         """

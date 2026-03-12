@@ -53,16 +53,21 @@ export function GridContainer({
   // Focused grid: clicking a grid sets it focused so scroll goes to its content
   const [focusedGridId, setFocusedGridId] = useState<string | null>(null);
 
+  // Lock: disables pan scroll when locked
+  const [isLocked, setIsLocked] = useState(false);
+
   // === All refs for stable closures (no listener churn) ===
   const zoomRef = useRef(zoom);
   const panOffsetRef = useRef(panOffset);
   const onZoomChangeRef = useRef(onZoomChange);
   const focusedGridIdRef = useRef(focusedGridId);
+  const isLockedRef = useRef(isLocked);
   // Sync refs on every render (no useEffect needed — refs are synchronous)
   zoomRef.current = zoom;
   panOffsetRef.current = panOffset;
   onZoomChangeRef.current = onZoomChange;
   focusedGridIdRef.current = focusedGridId;
+  isLockedRef.current = isLocked;
 
   // Persist pan offset
   useEffect(() => {
@@ -76,6 +81,9 @@ export function GridContainer({
     if (!container) return;
 
     const onWheel = (e: WheelEvent) => {
+      // Lock disables all canvas interaction (pan + zoom)
+      if (isLockedRef.current) return;
+
       const curZoom = zoomRef.current;
       const curPan = panOffsetRef.current;
 
@@ -275,19 +283,29 @@ export function GridContainer({
     };
   }, [isSelecting, selectionStart, items, focusOnBounds]);
 
-  // Keyboard shortcut: F to focus on all items, Escape to deselect
+  // Keyboard shortcut: F to focus all, L to lock, Alt+L to unlock
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement).closest('input, textarea, [contenteditable]')) return;
 
       if (e.code === 'KeyF' && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
         e.preventDefault();
+        setIsLocked(false); // F cancels lock
         if (items.length === 0) return;
         const minX = Math.min(...items.map(i => i.position.x));
         const minY = Math.min(...items.map(i => i.position.y));
         const maxX = Math.max(...items.map(i => i.position.x + i.size.width));
         const maxY = Math.max(...items.map(i => i.position.y + i.size.height));
         focusOnBounds(minX, minY, maxX, maxY);
+      }
+
+      if (e.code === 'KeyL' && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+        e.preventDefault();
+        if (e.altKey) {
+          setIsLocked(false); // Alt+L unlocks
+        } else {
+          setIsLocked(true); // L locks
+        }
       }
     };
 
@@ -362,6 +380,13 @@ export function GridContainer({
             height: selRect.height,
           }}
         />
+      )}
+
+      {/* Lock indicator */}
+      {isLocked && (
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 px-3 py-1 bg-zinc-800/80 rounded text-xs text-zinc-400 pointer-events-none select-none z-[2000]">
+          🔒 Locked — press <kbd className="px-1 py-0.5 bg-zinc-700 rounded text-zinc-300 font-mono">Alt+L</kbd> or <kbd className="px-1 py-0.5 bg-zinc-700 rounded text-zinc-300 font-mono">F</kbd> to unlock
+        </div>
       )}
     </div>
   );

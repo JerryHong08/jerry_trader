@@ -447,6 +447,11 @@ class JerryTraderBackendStarter:
         else:
             self.bars_builder = None
 
+        # Wire BarsBuilder reference into TickDataServer so it can wait
+        # for trades_backfill completion before serving bar REST responses.
+        if self.tick_data_server is not None and self.bars_builder is not None:
+            self.tick_data_server._bars_builder = self.bars_builder
+
         # ChartDataBFF role is deprecated - tickdata_server now handles all chart BFF functionality
         # (tick data WebSocket + chart bars REST API on port 8000)
         # if "ChartDataBFF" in self.roles:

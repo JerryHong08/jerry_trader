@@ -13,6 +13,8 @@ const shortcuts: { category: string; items: { keys: string[]; description: strin
       { keys: ['Scroll'], description: 'Pan the canvas' },
       { keys: ['Ctrl', 'Scroll'], description: 'Zoom in / out toward cursor' },
       { keys: ['Middle-click', 'Drag'], description: 'Pan the canvas' },
+      { keys: ['L'], description: 'Lock canvas (disable pan scroll)' },
+      { keys: ['Alt', 'L'], description: 'Unlock canvas' },
     ],
   },
   {
@@ -78,10 +80,11 @@ export function HelpPanel({ open, onClose }: HelpPanelProps) {
       {/* Panel */}
       <div
         ref={panelRef}
-        className="relative bg-zinc-900 border border-zinc-800/60 rounded-md shadow-2xl w-[560px] max-h-[70vh] overflow-auto"
+        className="relative bg-zinc-900 border-2 border-zinc-700 shadow-xl max-h-[70vh] overflow-auto"
+        style={{ width: 560 }}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-800/40">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-800 bg-zinc-800/50">
           <span className="text-sm font-medium text-zinc-200">Shortcuts</span>
           <button
             onClick={onClose}
@@ -92,9 +95,9 @@ export function HelpPanel({ open, onClose }: HelpPanelProps) {
         </div>
 
         {/* Content */}
-        <div className="px-4 py-3 space-y-4">
+        <div className="px-4 py-3 divide-y divide-zinc-800">
           {shortcuts.map((group) => (
-            <div key={group.category}>
+            <div key={group.category} className="py-3 first:pt-0 last:pb-0">
               <div className="text-[10px] font-semibold uppercase tracking-widest text-zinc-600 mb-1.5">
                 {group.category}
               </div>
@@ -102,14 +105,14 @@ export function HelpPanel({ open, onClose }: HelpPanelProps) {
                 {group.items.map((item, i) => (
                   <div
                     key={i}
-                    className="flex items-center justify-between py-1.5 border-b border-zinc-800/30 last:border-0"
+                    className="flex items-center justify-between py-1.5"
                   >
                     <span className="text-[13px] text-zinc-400">{item.description}</span>
                     <div className="flex items-center gap-0.5 shrink-0 ml-3">
                       {item.keys.map((key, j) => (
                         <React.Fragment key={j}>
                           {j > 0 && <span className="text-zinc-700 text-[10px] mx-0.5">+</span>}
-                          <kbd className="px-1.5 py-[1px] bg-zinc-800/60 border border-green-600/40 rounded-[3px] text-[11px] text-zinc-500 font-mono leading-relaxed">
+                          <kbd className="px-1.5 py-[1px] bg-zinc-900 border border-zinc-700 rounded-[3px] text-[11px] text-zinc-400 font-mono leading-relaxed">
                             {key}
                           </kbd>
                         </React.Fragment>
@@ -123,9 +126,9 @@ export function HelpPanel({ open, onClose }: HelpPanelProps) {
         </div>
 
         {/* Footer */}
-        <div className="px-4 py-2 border-t border-zinc-800/40 flex justify-end">
+        <div className="px-4 py-2 border-t border-zinc-800 flex justify-end">
           <span className="text-[11px] text-zinc-600">
-            <kbd className="px-1 py-[1px] bg-zinc-800/60 border border-green-600/40 rounded-[3px] text-[10px] text-zinc-500 font-mono">Esc</kbd>
+            <kbd className="px-1 py-[1px] bg-zinc-900 border border-zinc-700 rounded-[3px] text-[10px] text-zinc-400 font-mono">Esc</kbd>
             <span className="ml-1">to close</span>
           </span>
         </div>

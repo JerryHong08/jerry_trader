@@ -34,7 +34,7 @@ import logging
 import os
 import time
 from concurrent.futures import Future
-from threading import Thread
+from threading import Event, Thread
 from typing import Any, Dict, List, Optional
 
 import clickhouse_connect
@@ -201,12 +201,17 @@ class BarsBuilderService:
         # first_ws_tick_ts:  epoch ms of the first WS tick per ticker
         # meeting_bar_start: ticker → {tf → bar_start} — the bar straddling
         #                    the REST→WS boundary per timeframe
-        # ws_meeting_bars:   ticker → {tf → bar dict} — WS half of meeting bar
+        # rest_meeting_bars: ticker → {tf → bar dict} — REST half of meeting bar
+        #                    stored by trades_backfill, merged when WS completes
         # bootstrap_done:    ticker → set of TFs that completed bootstrap
+        # bootstrap_events:  ticker → threading.Event, set when trades_backfill
+        #                    completes so tickdata_server can wait before
+        #                    serving REST bar responses with stale gap data.
         self._first_ws_tick_ts: Dict[str, int] = {}
         self._meeting_bar_start: Dict[str, Dict[str, int]] = {}
-        self._ws_meeting_bars: Dict[str, Dict[str, dict]] = {}
+        self._rest_meeting_bars: Dict[str, Dict[str, dict]] = {}
         self._bootstrap_done: Dict[str, set] = {}
+        self._bootstrap_events: Dict[str, Event] = {}
 
     # ════════════════════════════════════════════════════════════════════
     # Lifecycle
@@ -383,17 +388,47 @@ class BarsBuilderService:
         # during unsubscribe are rebuilt from the beginning of that bar
         # with complete trade data, rather than overwritten by a gap.
         # None → first subscription → 4 AM ET session start.
+        #
+        # IMPORTANT: If ANY TF has no bars (returns None), from_ms must
+        # be None (session start) because that TF needs the full trade
+        # history.  Since trades_backfill builds ALL TFs from the same
+        # trade stream, we must fetch from the earliest needed point.
+        #
+        # On re-subscribe, per_tf_starts tracks each TF's last bar_start
+        # so trades_backfill can skip writing bars that already exist
+        # correctly in ClickHouse (bar_start < per_tf_starts[tf]).
         bootstrap_tfs = list(self._bootstrap_tfs_set)
         if bootstrap_tfs:
             from_ms = None
+            all_tfs_have_bars = True
+            per_tf_starts: Dict[str, int] = {}
             for tf in bootstrap_tfs:
                 last_start = self._get_last_bar_start_today(symbol, tf)
-                if last_start is not None:
-                    if from_ms is None or last_start < from_ms:
-                        from_ms = last_start
+                if last_start is None:
+                    # At least one TF needs full bootstrap → use session start
+                    all_tfs_have_bars = False
+                    from_ms = None
+                    logger.info(
+                        f"_add_ticker - {symbol}: {tf} has no bars today, "
+                        f"bootstrapping all TFs from session start"
+                    )
+                    break
+                per_tf_starts[tf] = last_start
+                if from_ms is None or last_start < from_ms:
+                    from_ms = last_start
+
+            if not all_tfs_have_bars:
+                from_ms = None
+                per_tf_starts = {}  # no per-TF filtering for first subscribe
+
+            # Create a threading.Event so tickdata_server can wait for
+            # trades_backfill to complete before serving bar REST responses.
+            evt = Event()
+            self._bootstrap_events[symbol] = evt
+
             Thread(
                 target=self.trades_backfill,
-                args=(symbol, bootstrap_tfs, from_ms),
+                args=(symbol, bootstrap_tfs, from_ms, per_tf_starts),
                 daemon=True,
                 name=f"bootstrap-{symbol}",
             ).start()
@@ -438,11 +473,27 @@ class BarsBuilderService:
             self._pending_bars.extend(completed)
             self._stats["bars_completed"] += len(completed)
 
+        # Flush any unmerged REST meeting bar partials before clearing state.
+        # If trades_backfill stored REST partials but the WS meeting bar never
+        # completed (e.g., quick unsubscribe), write them as-is.
+        rest_partials = self._rest_meeting_bars.pop(symbol, {})
+        if rest_partials:
+            for tf, rest_bar in rest_partials.items():
+                self._pending_bars.append(rest_bar)
+                logger.info(
+                    f"_remove_ticker - {symbol}/{tf}: flushing unmerged "
+                    f"REST meeting bar partial"
+                )
+
         # Clear bootstrap/merge state so re-subscribe triggers fresh bootstrap
         self._first_ws_tick_ts.pop(symbol, None)
         self._meeting_bar_start.pop(symbol, None)
-        self._ws_meeting_bars.pop(symbol, None)
         self._bootstrap_done.pop(symbol, None)
+        # Remove bootstrap event (trades_backfill may still be running —
+        # setting it ensures any wait_for_bootstrap() call returns immediately)
+        evt = self._bootstrap_events.pop(symbol, None)
+        if evt:
+            evt.set()
 
         self.active_tickers.discard(symbol)
 
@@ -505,6 +556,7 @@ class BarsBuilderService:
         symbol: str,
         bootstrap_tfs: List[str],
         from_ms: Optional[int],
+        per_tf_starts: Optional[Dict[str, int]] = None,
     ) -> None:
         """Fetch historical trades and build bars for all bootstrap timeframes.
 
@@ -524,6 +576,12 @@ class BarsBuilderService:
         REST→WS boundary) is merged from both sources:
           historical prefix  [bar_start … first_ws_ts)
           WS         suffix  [first_ws_ts … bar_end)
+
+        Args:
+            per_tf_starts: On re-subscribe, maps TF → last bar_start in
+                ClickHouse. Bars with bar_start < per_tf_starts[tf] are
+                skipped (already exist correctly from prior subscription).
+                Empty/None on first subscribe.
 
         Live mode:   Polygon REST API (fetch_polygon_trades)
         Replay mode: local parquet files (partitioned or monolithic)
@@ -616,74 +674,134 @@ class BarsBuilderService:
                 else:
                     clean_bars.append(bar)
 
-            # Write all clean bars (no overlap with WS)
+            # ── Re-subscribe dedup: skip bars already in ClickHouse ─
+            # On re-subscribe, bars with bar_start < that TF's last
+            # bar_start already exist correctly from the prior
+            # subscription. Only keep:
+            #   - bar_start == per_tf_starts[tf]: partial bar that needs
+            #     rebuild (flushed incomplete during unsubscribe)
+            #   - bar_start > per_tf_starts[tf]: new gap-fill bars
+            if per_tf_starts:
+                original_count = len(clean_bars)
+                clean_bars = [
+                    bar
+                    for bar in clean_bars
+                    if bar["bar_start"] >= per_tf_starts.get(bar["timeframe"], 0)
+                ]
+                skipped = original_count - len(clean_bars)
+                if skipped:
+                    logger.info(
+                        f"trades_backfill - {symbol}: skipped {skipped} "
+                        f"already-existing bars (re-subscribe dedup)"
+                    )
+
+            # Write clean bars (no overlap with WS)
             self._pending_bars.extend(clean_bars)
 
-            # ── Merge meeting bars per TF ─────────────────────────────
-            ws_meeting = self._ws_meeting_bars.get(symbol, {})
-            merged_count = 0
-            for tf, rest_bar in rest_meeting_bars.items():
-                ws_bar = ws_meeting.get(tf)
-                if ws_bar:
-                    merged = self._merge_bars(rest_bar, ws_bar)
-                    self._pending_bars.append(merged)
-                    merged_count += 1
+            # ── Store REST meeting bar partials for deferred merge ────
+            # The WS meeting bars haven't completed yet (the bar's time
+            # boundary hasn't been reached).  Store the REST halves in
+            # _rest_meeting_bars — when the WS bar completes later in
+            # _on_trade, it will be merged there before writing.
+            if rest_meeting_bars:
+                rest_store = self._rest_meeting_bars.setdefault(symbol, {})
+                for tf, rest_bar in rest_meeting_bars.items():
+                    rest_store[tf] = rest_bar
                     logger.info(
-                        f"trades_backfill - {symbol}/{tf}: merged meeting bar "
-                        f"bar_start={self._ms_to_et(merged['bar_start'])}, "
-                        f"REST trades={rest_bar['trade_count']}, "
-                        f"WS trades={ws_bar['trade_count']}, "
-                        f"merged trades={merged['trade_count']}"
-                    )
-                else:
-                    # WS meeting bar not available yet — write REST partial.
-                    # ClickHouse ReplacingMergeTree will keep whichever has
-                    # later inserted_at.
-                    self._pending_bars.append(rest_bar)
-                    logger.warning(
-                        f"trades_backfill - {symbol}/{tf}: WS meeting bar "
-                        f"not captured, writing REST partial only"
+                        f"trades_backfill - {symbol}/{tf}: stored REST meeting bar "
+                        f"partial for deferred merge "
+                        f"(bar_start={self._ms_to_et(rest_bar['bar_start'])}, "
+                        f"trades={rest_bar['trade_count']})"
                     )
 
             total_bars = len(clean_bars) + len(rest_meeting_bars)
             logger.info(
                 f"trades_backfill - {symbol}: completed, "
                 f"generated {total_bars} bars across {len(bootstrap_tfs)} TFs "
-                f"(clean={len(clean_bars)}, meeting={len(rest_meeting_bars)}, "
-                f"merged={merged_count}), "
+                f"(clean={len(clean_bars)}, "
+                f"meeting_deferred={len(rest_meeting_bars)}), "
                 f"last_trade={self._ms_to_et(trades[-1][0])}"
             )
 
-            # Clean up merge state
-            self._meeting_bar_start.pop(symbol, None)
-            self._ws_meeting_bars.pop(symbol, None)
             self._bootstrap_done[symbol] = set(bootstrap_tfs)
 
         except Exception as e:
             logger.error(f"trades_backfill - {symbol}: {e}", exc_info=True)
+        finally:
+            # Signal that bootstrap is complete (success or failure)
+            # so tickdata_server REST handler can stop waiting.
+            evt = self._bootstrap_events.pop(symbol, None)
+            if evt:
+                evt.set()
 
-    def _capture_meeting_bar(self, bar: dict) -> None:
-        """Hold a copy of the WS meeting bar for later merge with bootstrap.
+    def wait_for_bootstrap(self, symbol: str, timeout: float = 3.0) -> bool:
+        """Wait until trades_backfill completes for this ticker.
+
+        Called by tickdata_server before serving bar REST responses to
+        avoid returning stale data with gap from unsubscribe period.
+
+        Args:
+            symbol: Ticker symbol.
+            timeout: Max seconds to wait (default 3s).
+
+        Returns:
+            True if bootstrap completed (or no bootstrap in progress).
+            False if timed out.
+        """
+        evt = self._bootstrap_events.get(symbol)
+        if evt is None:
+            return True  # no bootstrap in progress
+        return evt.wait(timeout=timeout)
+
+    def _try_merge_meeting_bar(self, bar: dict) -> dict:
+        """If this completed bar is a meeting bar with a stored REST partial,
+        merge them and return the merged bar.  Otherwise return the original.
 
         Called for every completed bar (from ingest_trade or check_expired).
-        For each bootstrap timeframe, captures the first bar matching the
-        expected meeting bar start.
+        The merge combines:
+          REST partial  [bar_start … first_ws_ts)   — from trades_backfill
+          WS   partial  [first_ws_ts … bar_end)      — from live WS ticks
+
+        After merging, the REST partial is removed from state.
         """
         ticker = bar.get("ticker", "")
         tf = bar.get("timeframe", "")
+
+        # Check if this bar matches a meeting bar start
         tf_starts = self._meeting_bar_start.get(ticker, {})
         expected_start = tf_starts.get(tf)
         if expected_start is None or bar["bar_start"] != expected_start:
-            return
+            return bar  # not a meeting bar
 
-        ws_bars = self._ws_meeting_bars.setdefault(ticker, {})
-        if tf not in ws_bars:
-            ws_bars[tf] = dict(bar)  # defensive copy
+        # Check if REST partial exists for merging
+        rest_bars = self._rest_meeting_bars.get(ticker, {})
+        rest_bar = rest_bars.get(tf)
+        if rest_bar:
+            merged = self._merge_bars(rest_bar, bar)
+            # Clean up: remove REST partial and meeting bar start for this TF
+            del rest_bars[tf]
+            if not rest_bars:
+                self._rest_meeting_bars.pop(ticker, None)
+            del tf_starts[tf]
+            if not tf_starts:
+                self._meeting_bar_start.pop(ticker, None)
             logger.info(
-                f"MEETING_BAR_WS - {ticker}/{tf}: captured WS meeting bar "
-                f"bar_start={self._ms_to_et(bar['bar_start'])}, "
-                f"trades={bar['trade_count']}"
+                f"MEETING_BAR_MERGED - {ticker}/{tf}: "
+                f"bar_start={self._ms_to_et(merged['bar_start'])}, "
+                f"REST trades={rest_bar['trade_count']}, "
+                f"WS trades={bar['trade_count']}, "
+                f"merged trades={merged['trade_count']}"
             )
+            return merged
+
+        # REST partial not yet available (trades_backfill still running).
+        # This is rare but possible in fast replay.  Just return the raw
+        # WS bar — trades_backfill will handle merge when it finishes.
+        logger.debug(
+            f"MEETING_BAR_WS - {ticker}/{tf}: WS meeting bar completed "
+            f"but REST partial not ready yet (trades_backfill still running?)"
+        )
+        return bar
 
     @staticmethod
     def _merge_bars(rest_bar: dict, ws_bar: dict) -> dict:
@@ -840,11 +958,11 @@ class BarsBuilderService:
         if completed:
             self._stats["bars_completed"] += len(completed)
             for bar in completed:
+                # Merge with REST meeting bar partial if this is the
+                # WS half of a meeting bar (deferred from trades_backfill).
+                bar = self._try_merge_meeting_bar(bar)
                 self._pending_bars.append(bar)
                 # self._publish_bar(bar)
-
-                # Hold a copy of the WS meeting bar for merge with bootstrap
-                self._capture_meeting_bar(bar)
 
     # ════════════════════════════════════════════════════════════════════
     # Redis pub/sub: broadcast completed bars
@@ -900,9 +1018,9 @@ class BarsBuilderService:
             if expired:
                 self._stats["bars_completed"] += len(expired)
                 for bar in expired:
+                    bar = self._try_merge_meeting_bar(bar)
                     self._pending_bars.append(bar)
                     # self._publish_bar(bar)
-                    self._capture_meeting_bar(bar)
                 logger.debug(
                     f"check_expired closed {len(expired)} bars " f"(now_ms={now_ms})"
                 )

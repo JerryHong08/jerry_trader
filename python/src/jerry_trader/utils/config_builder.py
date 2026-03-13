@@ -156,13 +156,21 @@ def build_runtime_config(
         if role_cfg.get("enabled", True):
             resolved_cfg = copy.deepcopy(role_cfg)
 
-            # Resolve database references (redis, postgres, influxdb, clickhouse)
+            # Resolve database references.
+            # `clock_redis` uses the same reference format as `redis`
+            # (e.g. "redis-a@WSL2") but is stored under a distinct role key.
             for db_type in ["redis", "postgres", "influxdb", "clickhouse"]:
                 db_ref = role_cfg.get(db_type)
                 if db_ref and isinstance(db_ref, str):
                     resolved_cfg[db_type] = _resolve_db_reference(
                         yaml_cfg, db_type, db_ref, role_name
                     )
+
+            clock_redis_ref = role_cfg.get("clock_redis")
+            if clock_redis_ref and isinstance(clock_redis_ref, str):
+                resolved_cfg["clock_redis"] = _resolve_db_reference(
+                    yaml_cfg, "redis", clock_redis_ref, role_name
+                )
 
             runtime["roles"][role_name] = resolved_cfg
 

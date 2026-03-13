@@ -177,15 +177,15 @@ mainly focus on basic modules development and strcuture buidling.
 - [ ] Snapshot data: InfluxDB → ClickHouse
 - [ ] Foundation for v3.0 stream bus architecture
 
-In this stage we introduce rust based global clock to maintain acuuracy among the whole project running time. In replay mode, The **ChartBFF machine** is the clock domain master (also runs`local_tickdata_replayer` in-process). Remote machines (running
+In this stage we introduce rust based global clock to maintain acuuracy among the whole project running time. In replay mode, The **tickdataSever machine** is the clock domain master (also runs`local_tickdata_replayer` in-process). Remote machines (running
 `MarketSnapshotReplayer`) follow via Redis heartbeat.
 
 - ✅ add replay global clock in rust to maintain time accuracy in replay mode.
-- [ ] Remote machine sync + snapshot replayer
-- [ ] Redis heartbeat publisher in `clock.py` (100ms interval, from ChartBFF machine)
-- [ ] `RemoteClockFollower` class (monotonic interpolation between heartbeats)
-- [ ] Modify `MarketSnapshotReplayer` to poll `RemoteClockFollower.now_ns()` instead of `asyncio.sleep`
-- [ ] Test cross-machine sync (same network + Tailscale)
+- ✅ Remote machine sync + snapshot replayer
+- ✅ Redis heartbeat publisher in `clock.py` (100ms interval, from TickDataServer machine)
+- ✅ `RemoteClockFollower` class (monotonic interpolation between heartbeats)
+- ✅ Modify `MarketSnapshotReplayer` to poll `RemoteClockFollower.now_ns()` instead of `asyncio.sleep`
+- ✅ Test cross-machine sync (same network + Tailscale)
 
 ### Stage3
 

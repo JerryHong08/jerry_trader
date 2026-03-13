@@ -293,7 +293,9 @@ class TickDataServer:
             # because the REST request can arrive before subscribed_tickers
             # is updated in the WS handler.
             if self._bars_builder is not None and ch_tf in self.BARS_BUILDER_TIMEFRAMES:
-                ready = self._bars_builder.wait_for_bootstrap(ticker_upper, timeout=3.0)
+                ready = self._bars_builder.wait_for_bootstrap(
+                    ticker_upper, timeout=10.0
+                )
                 if not ready:
                     logger.warning(
                         f"get_chart_bars - {ticker_upper}/{ch_tf}: "

@@ -247,14 +247,13 @@ export function SettingsMenu({ gridGap, onGridGapChange, items, onImportLayout, 
 
           {/* Instructions */}
           <div className="border-t border-zinc-800 pt-4">
-            <h3 className="text-sm mb-2">How to Add Custom Template in Code</h3>
+            <h3 className="text-sm mb-2">How to Add Custom Template</h3>
             <ol className="text-xs text-gray-400 space-y-1 list-decimal list-inside">
               <li>Arrange your modules in the perfect layout</li>
               <li>Click "Copy to Clipboard" to export the configuration</li>
-              <li>Open <code className="bg-zinc-800 px-1 py-0.5">/config/layoutTemplates.ts</code></li>
-              <li>Create a new template constant with your copied configuration</li>
-              <li>Add it to the <code className="bg-zinc-800 px-1 py-0.5">LAYOUT_TEMPLATES</code> object</li>
-              <li>Your new template will appear in the templates list above</li>
+              <li>Create a new <code className="bg-zinc-800 px-1 py-0.5">.json</code> file in <code className="bg-zinc-800 px-1 py-0.5">src/config/templates/</code></li>
+              <li>Paste the layout array into the JSON with id, name, description, and layout fields</li>
+              <li>The template will be auto-registered on next build/reload</li>
             </ol>
           </div>
         </div>

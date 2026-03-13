@@ -6,7 +6,7 @@ import { SettingsMenu } from './components/SettingsMenu';
 import { HelpPanel } from './components/HelpPanel';
 import { TimelineClock } from './components/TimelineClock';
 import { moduleRegistry } from './config/moduleRegistry';
-import { LAYOUT_TEMPLATES } from './config/layoutTemplates';
+import { LAYOUT_TEMPLATES, DEFAULT_TEMPLATE_ID } from './config/layoutTemplates';
 import { useIbbotStore } from './stores/ibbotStore';
 import { useTickDataStore } from './stores/tickDataStore';
 import { useMarketDataStore } from './stores/marketDataStore';
@@ -177,7 +177,10 @@ export default function App() {
 
     // If no saved layout, load default template
     if (items.length === 0) {
-      setItems(LAYOUT_TEMPLATES['minimal layout'].layout);
+      const defaultTemplate = LAYOUT_TEMPLATES[DEFAULT_TEMPLATE_ID];
+      if (defaultTemplate) {
+        setItems(defaultTemplate.layout);
+      }
     }
   }, []);
 

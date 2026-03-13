@@ -1,3 +1,37 @@
+## Unreleased (2026-03-13)
+
+### Feat
+
+- **clock**: `start_heartbeat_publisher(redis_client, session_id, interval_ms=100)` — background daemon thread publishes `ReplayClock` state (`ts_ns`, `speed`, `is_paused`, `wall_ns`) to `clock:heartbeat:{session_id}` every 100 ms; no-op fallback in live mode
+- **utils/remote_clock**: `RemoteClockFollower` — subscribes to clock heartbeat channel, monotonically interpolates virtual time between heartbeats using local `time.time_ns()` offset; implements `now_ms()`, `now_ns()`, `is_paused`, `speed`, `has_sync`
+- **replayer**: `MarketSnapshotReplayer` accepts `remote_clock: RemoteClockFollower`; timing loop now polls `remote_clock.now_ns() < target_ts_ns` (50 ms interval) instead of `asyncio.sleep(time_diff / speed)`, eliminating local-speed drift across machines
+- **backend_starter**: auto-starts heartbeat publisher in `run()` when in replay mode using first available redis config; wires `RemoteClockFollower` into `MarketSnapshotReplayer` when `clock_redis` is set in Replayer role config
+- **redis_keys**: `clock_heartbeat_channel(session_id)` — canonical key `clock:heartbeat:{session_id}`
+- **config**: `clock_redis` field added (commented-out example) under `Replayer` role for cross-machine clock sync configuration
+
+### Refactor
+
+- **clock**: added `import json`, `import threading` to support heartbeat publisher
+- **replayer**: timing branch split — `remote_clock` path (virtual-time poll) vs local `asyncio.sleep` fallback (backward compatible)
+
+## Unreleased (2026-03-12)
+
+### Feat
+
+- **tickdata/chart architecture**: started merge of `ChartDataBFF` into `TickDataServer` to reduce one backend process and one frontend WebSocket hop (work in progress)
+- **chart bootstrap**: intraday timespan bootstrap and gap-bootstrap flow added/refined. chart bootstrap path now combines custom bar fetch + trades rebuild for meeting-bar continuity.
+- **openclaw integration**: openclaw client bootstrap added;
+- **subscriptions**: first-subscribe and re-subscribe behavior refined in chart/tickdata orchestration
+
+### Fix
+
+- **frontend/chart**: fixed two-chart synchronized render issue
+- **frontend/chart UX**: lock behavior now applies only on zoom interactions
+
+### Chore
+
+- **ci**: multiple CI fix commits and stabilization updates
+
 ## 1.2.0 (2026-03-11)
 
 ### Feat

@@ -281,6 +281,32 @@ class JerryTraderBackendStarter:
             )
 
             role_cfg = self.roles["Replayer"]
+
+            # If clock_redis is configured and we're in replay mode, create a
+            # RemoteClockFollower so the replayer is driven by the master
+            # ReplayClock on the other machine instead of local asyncio.sleep.
+            _remote_clock = None
+            _clock_redis_cfg = role_cfg.get("clock_redis")
+            if _clock_redis_cfg and self.replay_date:
+                import redis as _redis_lib
+
+                from jerry_trader.utils.remote_clock import RemoteClockFollower
+
+                _clock_r = _redis_lib.Redis(
+                    host=_clock_redis_cfg.get("host", "127.0.0.1"),
+                    port=_clock_redis_cfg.get("port", 6379),
+                    db=_clock_redis_cfg.get("db", 0),
+                    decode_responses=True,
+                )
+                _remote_clock = RemoteClockFollower(_clock_r, self.session_id)
+                _remote_clock.start_listening()
+                logger.info(
+                    f"RemoteClockFollower started — listening on "
+                    f"clock:heartbeat:{self.session_id} "
+                    f"(master Redis: {_clock_redis_cfg.get('host', '127.0.0.1')}:"
+                    f"{_clock_redis_cfg.get('port', 6379)})"
+                )
+
             self.replayer = MarketSnapshotReplayer(
                 replay_date=self.replay_date,
                 session_id=self.session_id,
@@ -291,6 +317,7 @@ class JerryTraderBackendStarter:
                 clear=role_cfg.get("clear", False),
                 redis_config=role_cfg.get("redis"),
                 influxdb_config=role_cfg.get("influxdb"),
+                remote_clock=_remote_clock,
             )
             self._services.append(("Replayer", self.replayer))
         else:
@@ -667,6 +694,36 @@ class JerryTraderBackendStarter:
         logger.info(f"Session: {self.session_id}")
 
         self._running = True
+
+        # Start clock heartbeat publisher if in replay mode.
+        # Remote machines running RemoteClockFollower subscribe to this channel
+        # so their service timing stays in lock-step with the virtual clock here.
+        if self.replay_date:
+            _hb_redis_cfg = None
+            for _role in (
+                "TickDataServer",
+                "BarsBuilder",
+                "ChartDataBFF",
+                "FactorEngine",
+            ):
+                if _role in self.roles and self.roles[_role].get("redis"):
+                    _hb_redis_cfg = self.roles[_role]["redis"]
+                    break
+            if _hb_redis_cfg:
+                import redis as _redis_lib
+
+                from jerry_trader import clock as _clock_mod
+
+                _hb_r = _redis_lib.Redis(
+                    host=_hb_redis_cfg.get("host", "127.0.0.1"),
+                    port=_hb_redis_cfg.get("port", 6379),
+                    db=_hb_redis_cfg.get("db", 0),
+                )
+                _clock_mod.start_heartbeat_publisher(_hb_r, self.session_id)
+                logger.info(
+                    f"⏱ Clock heartbeat publisher started (100ms) → "
+                    f"clock:heartbeat:{self.session_id}"
+                )
 
         # Start limit watchdog if a limit is configured (and not in replay mode)
         if self.limit and not self.replay_date:

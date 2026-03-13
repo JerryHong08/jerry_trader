@@ -31,6 +31,8 @@ Usage::
 
 from __future__ import annotations
 
+import json
+import threading
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -189,3 +191,70 @@ def create_tick_replayer(
         start_time=start_time,
         max_gap_ms=max_gap_ms,
     )
+
+
+# ── Remote clock sync ────────────────────────────────────────────────
+
+
+def start_heartbeat_publisher(
+    redis_client,
+    session_id: str,
+    interval_ms: int = 100,
+) -> threading.Thread:
+    """Publish ReplayClock state to Redis pub/sub at ``interval_ms`` cadence.
+
+    Runs in a background daemon thread so it doesn't block the caller.
+    No-op heartbeats are sent in live mode (``_clock is None``) so remote
+    machines can detect that no replay is active.
+
+    The published channel is ``clock:heartbeat:{session_id}``.
+    Payload JSON::
+
+        {"ts_ns": int, "speed": float, "is_paused": bool, "wall_ns": int}
+
+    ``wall_ns`` is the publisher's local ``time.time_ns()`` at the moment
+    of publish; ``RemoteClockFollower`` uses it to correct for network
+    latency in the interpolation.
+
+    Args:
+        redis_client: A ``redis.Redis`` instance (sync client).
+        session_id: Session identifier — scopes the heartbeat channel.
+        interval_ms: Publish interval in milliseconds (default: 100).
+
+    Returns:
+        The background daemon ``Thread`` (already started).
+    """
+    from jerry_trader.utils.redis_keys import clock_heartbeat_channel
+
+    channel = clock_heartbeat_channel(session_id)
+    interval_s = interval_ms / 1000.0
+
+    def _loop():
+        while True:
+            try:
+                if _clock is not None:
+                    payload = json.dumps(
+                        {
+                            "ts_ns": _clock.now_ns(),
+                            "speed": _clock.speed,
+                            "is_paused": _clock.is_paused,
+                            "wall_ns": time.time_ns(),
+                        }
+                    )
+                else:
+                    payload = json.dumps(
+                        {
+                            "ts_ns": int(time.time() * 1_000_000_000),
+                            "speed": 1.0,
+                            "is_paused": False,
+                            "wall_ns": time.time_ns(),
+                        }
+                    )
+                redis_client.publish(channel, payload)
+            except Exception:
+                pass  # Redis down — keep looping, don't crash publisher
+            time.sleep(interval_s)
+
+    t = threading.Thread(target=_loop, daemon=True, name="ClockHeartbeat")
+    t.start()
+    return t

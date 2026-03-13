@@ -160,6 +160,12 @@ machines:
         clear: false
         redis: "redis-b"
         influxdb: "influxdb-b"
+        # clock_redis: points to the clock-master machine's Redis so the
+        # replayer can follow the shared ReplayClock via RemoteClockFollower.
+        # Use the same db-reference format as other redis configs when running
+        # on a separate machine from
+        # the TickDataServer (e.g. mibuntu following wsl2's clock).
+        # clock_redis: "redis-a@WSL2"
 
 # =============================================================================
 # Defaults

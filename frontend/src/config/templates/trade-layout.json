@@ -1,0 +1,54 @@
+{
+  "id": "03",
+  "name": "Trade-Layout",
+  "description": "trade layout for my laptop.",
+  "layout": [
+    {
+      "id": "order-1",
+      "moduleType": "order-management",
+      "position": { "x": 760, "y": 0 },
+      "size": { "width": 350, "height": 620 },
+      "syncGroup": "group-2",
+      "settings": {
+        "orderManagement": { "view": "placement" }
+      }
+    },
+    {
+      "id": "stock-detail-1",
+      "moduleType": "stock-detail",
+      "position": { "x": 1120, "y": 0 },
+      "size": { "width": 550, "height": 620 },
+      "syncGroup": "group-2",
+      "settings": {
+        "stockDetail": { "view": "fundamentals" }
+      }
+    },
+    {
+      "id": "chart-2",
+      "moduleType": "chart",
+      "position": { "x": 0, "y": 400 },
+      "size": { "width": 750, "height": 520 },
+      "syncGroup": "group-2",
+      "settings": {
+        "chart": { "timeframe": "1m" }
+      }
+    },
+    {
+      "id": "portfolio-1767537783678",
+      "moduleType": "portfolio",
+      "position": { "x": 0, "y": 0 },
+      "size": { "width": 750, "height": 390 },
+      "syncGroup": "group-2"
+    },
+    {
+      "id": "order-management-1772196836934",
+      "moduleType": "order-management",
+      "position": { "x": 760, "y": 630 },
+      "size": { "width": 910, "height": 290 },
+      "syncGroup": "group-2",
+      "settings": {
+        "orderManagement": { "view": "orders" }
+      }
+    }
+  ]
+}

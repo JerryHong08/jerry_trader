@@ -72,6 +72,18 @@ def signal_events_stream(session_id: str) -> str:
     return f"signal_events:{session_id}"
 
 
+def clock_heartbeat_channel(session_id: str) -> str:
+    """Redis pub/sub channel for ReplayClock heartbeats.
+
+    Published by the clock-master machine at ~100 ms intervals.
+    Subscribed by RemoteClockFollower instances on remote machines so
+    they can interpolate virtual time without local drift.
+
+    Payload JSON: {"ts_ns": int, "speed": float, "is_paused": bool, "wall_ns": int}
+    """
+    return f"clock:heartbeat:{session_id}"
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Fixed keys – one per session
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -32,12 +32,16 @@ Usage::
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from jerry_trader._rust import ReplayClock, TickDataReplayer
+from jerry_trader.utils.logger import setup_logger
+
+logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
 
 ET = ZoneInfo("America/New_York")
 
@@ -250,6 +254,7 @@ def start_heartbeat_publisher(
                             "wall_ns": time.time_ns(),
                         }
                     )
+                logger.debug(f"Publishing heartbeat to {channel}: {payload}")
                 redis_client.publish(channel, payload)
             except Exception:
                 pass  # Redis down — keep looping, don't crash publisher

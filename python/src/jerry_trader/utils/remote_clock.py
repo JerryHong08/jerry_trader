@@ -38,9 +38,12 @@ Design notes
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 class RemoteClockFollower:
@@ -124,40 +127,69 @@ class RemoteClockFollower:
     # ── Internal ─────────────────────────────────────────────────────
 
     def _listen_loop(self) -> None:
-        """Background thread: subscribe to heartbeats and update state."""
-        # Create a dedicated Redis connection for blocking subscribe
-        try:
-            conn_kwargs = self._redis.connection_pool.connection_kwargs
-            import redis as _redis_mod
+        """Background thread: subscribe to heartbeats and update state.
 
-            sub_client = _redis_mod.Redis(
-                host=conn_kwargs.get("host", "127.0.0.1"),
-                port=conn_kwargs.get("port", 6379),
-                db=conn_kwargs.get("db", 0),
-                decode_responses=True,
-            )
-        except Exception as exc:
-            import logging
+        Retries forever on connection failures (e.g. master machine not up yet,
+        transient DNS/network errors).
+        """
+        conn_kwargs = self._redis.connection_pool.connection_kwargs
+        host = conn_kwargs.get("host", "127.0.0.1")
+        port = conn_kwargs.get("port", 6379)
+        db = conn_kwargs.get("db", 0)
 
-            logging.getLogger(__name__).error(
-                f"RemoteClockFollower: failed to create subscriber connection — {exc}"
-            )
-            return
-
-        ps = sub_client.pubsub()
-        ps.subscribe(self._channel)
-
-        for msg in ps.listen():
-            if msg["type"] != "message":
-                continue
+        while True:
+            ps = None
+            sub_client = None
             try:
-                data = json.loads(msg["data"])
-                rx = time.time_ns()
-                with self._lock:
-                    self._ts_ns = int(data["ts_ns"])
-                    self._speed = float(data["speed"])
-                    self._is_paused = bool(data["is_paused"])
-                    self._rx_wall_ns = rx
-                    self._has_sync = True
-            except Exception:
-                pass  # malformed message — skip
+                import redis as _redis_mod
+
+                sub_client = _redis_mod.Redis(
+                    host=host,
+                    port=port,
+                    db=db,
+                    decode_responses=True,
+                )
+                ps = sub_client.pubsub()
+                ps.subscribe(self._channel)
+                logger.info(
+                    "RemoteClockFollower connected: %s:%s/%s channel=%s",
+                    host,
+                    port,
+                    db,
+                    self._channel,
+                )
+
+                for msg in ps.listen():
+                    if msg["type"] != "message":
+                        continue
+                    try:
+                        data = json.loads(msg["data"])
+                        rx = time.time_ns()
+                        with self._lock:
+                            self._ts_ns = int(data["ts_ns"])
+                            self._speed = float(data["speed"])
+                            self._is_paused = bool(data["is_paused"])
+                            self._rx_wall_ns = rx
+                            self._has_sync = True
+                    except Exception:
+                        pass  # malformed message — skip
+            except Exception as exc:
+                logger.error(
+                    "RemoteClockFollower subscribe error (%s:%s/%s): %s. Retrying in 2s...",
+                    host,
+                    port,
+                    db,
+                    exc,
+                )
+                time.sleep(2.0)
+            finally:
+                try:
+                    if ps is not None:
+                        ps.close()
+                except Exception:
+                    pass
+                try:
+                    if sub_client is not None:
+                        sub_client.close()
+                except Exception:
+                    pass

@@ -292,20 +292,31 @@ class JerryTraderBackendStarter:
 
                 from jerry_trader.utils.remote_clock import RemoteClockFollower
 
-                _clock_r = _redis_lib.Redis(
-                    host=_clock_redis_cfg.get("host", "127.0.0.1"),
-                    port=_clock_redis_cfg.get("port", 6379),
-                    db=_clock_redis_cfg.get("db", 0),
-                    decode_responses=True,
-                )
-                _remote_clock = RemoteClockFollower(_clock_r, self.session_id)
-                _remote_clock.start_listening()
-                logger.info(
-                    f"RemoteClockFollower started — listening on "
-                    f"clock:heartbeat:{self.session_id} "
-                    f"(master Redis: {_clock_redis_cfg.get('host', '127.0.0.1')}:"
-                    f"{_clock_redis_cfg.get('port', 6379)})"
-                )
+                _clock_host = _clock_redis_cfg.get("host", "127.0.0.1")
+                _clock_port = _clock_redis_cfg.get("port", 6379)
+                _clock_db = _clock_redis_cfg.get("db", 0)
+
+                if isinstance(_clock_host, str) and _clock_host.startswith("${"):
+                    logger.warning(
+                        "Replayer.clock_redis host is unresolved (%s). "
+                        "Set the corresponding network env var before starting; "
+                        "RemoteClockFollower disabled.",
+                        _clock_host,
+                    )
+                else:
+                    _clock_r = _redis_lib.Redis(
+                        host=_clock_host,
+                        port=_clock_port,
+                        db=_clock_db,
+                        decode_responses=True,
+                    )
+                    _remote_clock = RemoteClockFollower(_clock_r, self.session_id)
+                    _remote_clock.start_listening()
+                    logger.info(
+                        f"RemoteClockFollower started — listening on "
+                        f"clock:heartbeat:{self.session_id} "
+                        f"(master Redis: {_clock_host}:{_clock_port})"
+                    )
 
             self.replayer = MarketSnapshotReplayer(
                 replay_date=self.replay_date,
@@ -478,25 +489,6 @@ class JerryTraderBackendStarter:
         # for trades_backfill completion before serving bar REST responses.
         if self.tick_data_server is not None and self.bars_builder is not None:
             self.tick_data_server._bars_builder = self.bars_builder
-
-        # ChartDataBFF role is deprecated - tickdata_server now handles all chart BFF functionality
-        # (tick data WebSocket + chart bars REST API on port 8000)
-        # if "ChartDataBFF" in self.roles:
-        #     from jerry_trader.BackendForFrontend.chart_bff import ChartDataBFF
-        #
-        #     role_cfg = self.roles["ChartDataBFF"]
-        #     self.chart_data_bff = ChartDataBFF(
-        #         host=role_cfg.get("host", "0.0.0.0"),
-        #         port=role_cfg.get("port", 5002),
-        #         session_id=self.session_id,
-        #         redis_config=role_cfg.get("redis"),
-        #         clickhouse_config=role_cfg.get("clickhouse"),
-        #         bars_builder=self.bars_builder,
-        #     )
-        #     self._services.append(("ChartDataBFF", self.chart_data_bff))
-        # else:
-        #     self.chart_data_bff = None
-        self.chart_data_bff = None
 
         if "AgentBFF" in self.roles:
             from jerry_trader.BackendForFrontend.openclaw import AgentBFF
@@ -699,16 +691,10 @@ class JerryTraderBackendStarter:
         # Remote machines running RemoteClockFollower subscribe to this channel
         # so their service timing stays in lock-step with the virtual clock here.
         if self.replay_date:
-            _hb_redis_cfg = None
-            for _role in (
-                "TickDataServer",
-                "BarsBuilder",
-                "ChartDataBFF",
-                "FactorEngine",
-            ):
-                if _role in self.roles and self.roles[_role].get("redis"):
-                    _hb_redis_cfg = self.roles[_role]["redis"]
-                    break
+            _tick_role_cfg = self.roles.get("TickDataServer", {})
+            _hb_redis_cfg = (
+                _tick_role_cfg.get("heartbeat_redis") if _tick_role_cfg else None
+            )
             if _hb_redis_cfg:
                 import redis as _redis_lib
 
@@ -723,6 +709,13 @@ class JerryTraderBackendStarter:
                 logger.info(
                     f"⏱ Clock heartbeat publisher started (100ms) → "
                     f"clock:heartbeat:{self.session_id}"
+                    f"hb_redis_config: {_hb_redis_cfg}"
+                )
+            elif _tick_role_cfg:
+                logger.warning(
+                    "Replay mode with TickDataServer enabled but no explicit "
+                    "TickDataServer.heartbeat_redis configured; clock heartbeat "
+                    "publisher not started."
                 )
 
         # Start limit watchdog if a limit is configured (and not in replay mode)
@@ -811,25 +804,6 @@ class JerryTraderBackendStarter:
             tick_thread.start()
             self._threads.append(tick_thread)
             logger.info("TickDataServer started")
-
-        # ChartDataBFF is deprecated - tickdata_server now handles all chart BFF functionality
-        # # Start ChartDataBFF if enabled
-        # # Runs in a separate thread since it's a blocking uvicorn server
-        # if self.chart_data_bff:
-        #     chart_bff_cfg = self.roles.get("ChartDataBFF", {})
-        #     host = chart_bff_cfg.get("host", "0.0.0.0")
-        #     port = chart_bff_cfg.get("port", 5002)
-        #     logger.info(f"Starting Chart Data BFF on {host}:{port}")
-        #
-        #     def run_chart_bff():
-        #         self.chart_data_bff.run()
-        #
-        #     chart_bff_thread = Thread(
-        #         target=run_chart_bff, daemon=True, name="ChartDataBFF"
-        #     )
-        #     chart_bff_thread.start()
-        #     self._threads.append(chart_bff_thread)
-        #     logger.info("ChartDataBFF started")
 
         # Start AgentBFF in separate thread if enabled
         if self.agent_bff:

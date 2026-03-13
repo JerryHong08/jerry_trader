@@ -5,7 +5,9 @@
 --   2) Add parallel writes into this table (supplement)
 --   3) Prefer this table for volume-history reload with Influx fallback
 
-CREATE TABLE IF NOT EXISTS market_snapshot
+CREATE DATABASE IF NOT EXISTS jerry_trader;
+
+CREATE TABLE IF NOT EXISTS jerry_trader.market_snapshot
 (
     symbol String,
     date String,

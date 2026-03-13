@@ -118,7 +118,7 @@ machines:
       SnapshotProcessor:
         enabled: true
         redis: "redis-b"           # no @MACHINE = LOCAL (127.0.0.1)
-        influxdb: "influxdb-b"
+        # influxdb: "influxdb-b"
         clickhouse: "clickhouse-a" # gradual migration supplement (dual-write)
       StaticDataWorker:
         enabled: true
@@ -131,7 +131,7 @@ machines:
         port: 5001
         debug: false
         redis: "redis-b"
-        influxdb: "influxdb-b"
+        # influxdb: "influxdb-b"
         clickhouse: "clickhouse-a"
 
   collector:

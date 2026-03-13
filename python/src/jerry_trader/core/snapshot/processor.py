@@ -90,23 +90,34 @@ class SnapshotProcessor:
         self.load_history = load_history
 
         # ---------- InfluxDB Configuration ----------
+        self._influx_client = None
+        self._write_api = None
+        self._query_api = None
+
         influx_cfg = influxdb_config or {}
         self.org = influx_cfg.get("org", "jerryhong")
         self.bucket = influx_cfg.get("bucket", "")
+        self.influx_url = None
 
-        # Token from env var
-        influx_token_env = influx_cfg.get("influx_token_env")
-        token = os.environ.get(influx_token_env) if influx_token_env else None
+        if influx_cfg:
+            influx_token_env = influx_cfg.get("influx_token_env")
+            token = os.environ.get(influx_token_env) if influx_token_env else None
 
-        # URL from env var
-        influx_url_env = influx_cfg.get("influx_url_env")
-        url = os.getenv(influx_url_env) if influx_url_env else "http://localhost:8086"
+            influx_url_env = influx_cfg.get("influx_url_env")
+            self.influx_url = (
+                os.getenv(influx_url_env) if influx_url_env else "http://localhost:8086"
+            )
 
-        self._influx_client = influxdb_client.InfluxDBClient(
-            url=url, token=token, org=self.org
-        )
-        self._write_api = self._influx_client.write_api(write_options=SYNCHRONOUS)
-        self._query_api = self._influx_client.query_api()
+            self._influx_client = influxdb_client.InfluxDBClient(
+                url=self.influx_url, token=token, org=self.org
+            )
+            self._write_api = self._influx_client.write_api(write_options=SYNCHRONOUS)
+            self._query_api = self._influx_client.query_api()
+            logger.info(
+                f"__init__ - InfluxDB configured: url={self.influx_url}, bucket={self.bucket}"
+            )
+        else:
+            logger.info("__init__ - InfluxDB not configured; ClickHouse-only mode enabled")
 
         # ---------- ClickHouse Configuration (gradual migration) ----------
         self.ch_client = None
@@ -135,6 +146,11 @@ class SnapshotProcessor:
                     f"__init__ - ClickHouse unavailable, keeping Influx-only mode: {e}"
                 )
                 self.ch_client = None
+
+        if not self.ch_client and not self._influx_client:
+            raise ValueError(
+                "SnapshotProcessor requires at least one backend: influxdb or clickhouse"
+            )
 
         # ---------- Redis Configuration ----------
         redis_cfg = redis_config or {}
@@ -182,7 +198,8 @@ class SnapshotProcessor:
         logger.info(
             f"__init__ - SnapshotProcessor initialized: mode={self.run_mode}, "
             f"session_id={self.session_id}, INPUT={self.INPUT_STREAM_NAME}, OUTPUT={self.OUTPUT_STREAM_NAME}"
-            f"influxdb_url={url}, bucket={self.bucket}"
+            f", influxdb_url={self.influx_url}, bucket={self.bucket}, "
+            f"clickhouse={'connected' if self.ch_client else 'unavailable'}"
         )
 
     # =========================================================================
@@ -623,12 +640,15 @@ class SnapshotProcessor:
             # Dynamically build stream data and InfluxDB point
             stream_data = {"symbol": ticker}
             date_tag, mode_tag = session_to_influx_tags(self.session_id)
-            point = (
-                influxdb_client.Point("market_snapshot")
-                .tag("symbol", ticker)
-                .tag("date", date_tag)
-                .tag("mode", mode_tag)
-            )
+            influx_enabled = self._write_api is not None and bool(self.bucket)
+            point = None
+            if influx_enabled:
+                point = (
+                    influxdb_client.Point("market_snapshot")
+                    .tag("symbol", ticker)
+                    .tag("date", date_tag)
+                    .tag("mode", mode_tag)
+                )
 
             # Process all fields dynamically
             for field_name, field_value in row.items():
@@ -651,11 +671,13 @@ class SnapshotProcessor:
                     continue
 
                 stream_data[field_name] = numeric_value
-                point = point.field(field_name, numeric_value)
+                if point is not None:
+                    point = point.field(field_name, numeric_value)
 
             stream_tickers_data.append(stream_data)
-            point = point.time(timestamp)
-            influx_points.append(point)
+            if point is not None:
+                point = point.time(timestamp)
+                influx_points.append(point)
 
             # Gradual migration: add ClickHouse row in parallel with Influx write
             event_time_ms = int(timestamp.timestamp() * 1000)
@@ -697,7 +719,7 @@ class SnapshotProcessor:
             self.r.xadd(self.OUTPUT_STREAM_NAME, stream_message, maxlen=100)
 
         # Write to InfluxDB
-        if influx_points:
+        if influx_points and self._write_api is not None:
             self._write_api.write(
                 bucket=self.bucket, org=self.org, record=influx_points
             )
@@ -766,7 +788,12 @@ class SnapshotProcessor:
                 "_reload_volume_history - ClickHouse returned no data; falling back to InfluxDB"
             )
 
-        self._reload_volume_history_from_influx()
+        if self._query_api is not None and self.bucket:
+            self._reload_volume_history_from_influx()
+        else:
+            logger.info(
+                "_reload_volume_history - InfluxDB not configured; skipping fallback reload"
+            )
 
     def _reload_volume_history_from_clickhouse(self) -> int:
         """Reload volume history from ClickHouse for recovery.
@@ -778,17 +805,8 @@ class SnapshotProcessor:
             return 0
 
         range_start, range_end = self._get_reload_time_range(lookback_minutes=6)
-        start_ms = int(
-            datetime.fromisoformat(range_start.replace("Z", "+00:00")).timestamp()
-            * 1000
-        )
-        if range_end == "now()":
-            end_ms = int(time.time() * 1000)
-        else:
-            end_ms = int(
-                datetime.fromisoformat(range_end.replace("Z", "+00:00")).timestamp()
-                * 1000
-            )
+        start_ms = self._time_expr_to_epoch_ms(range_start)
+        end_ms = self._time_expr_to_epoch_ms(range_end)
 
         logger.info(
             f"_reload_volume_history_from_clickhouse - Reloading for {len(subscribed)} tickers "
@@ -845,8 +863,45 @@ class SnapshotProcessor:
         )
         return total_loaded
 
+    def _time_expr_to_epoch_ms(self, value: str) -> int:
+        """Convert Influx-style time expression or ISO timestamp to epoch ms."""
+        text = (value or "").strip()
+
+        if text == "now()":
+            return int(time.time() * 1000)
+
+        if text.startswith("-") and len(text) >= 3:
+            unit = text[-1]
+            amount_str = text[1:-1]
+            if amount_str.isdigit():
+                amount = int(amount_str)
+                seconds_by_unit = {
+                    "s": 1,
+                    "m": 60,
+                    "h": 3600,
+                    "d": 86400,
+                    "w": 604800,
+                }
+                if unit in seconds_by_unit:
+                    return int(time.time() * 1000) - (
+                        amount * seconds_by_unit[unit] * 1000
+                    )
+
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(f"Unsupported time expression: {value}") from exc
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=ZoneInfo("UTC"))
+        return int(parsed.timestamp() * 1000)
+
     def _reload_volume_history_from_influx(self) -> None:
         """Reload volume history from InfluxDB for recovery."""
+        if self._query_api is None or not self.bucket:
+            logger.info("_reload_volume_history_from_influx - InfluxDB unavailable")
+            return
+
         subscribed = self._get_all_subscribed_tickers()
         if not subscribed:
             logger.info("_reload_volume_history_from_influx - No subscribed tickers")

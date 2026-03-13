@@ -94,27 +94,32 @@ class JerryTraderChartDataManager:
         self.HSET_NAME = state_cursor(self.session_id)
 
         # ------- InfluxDB Configuration -------
+        self._influx_client = None
+        self._query_api = None
         self.org = "jerryhong"
+        self.influx_url = None
+
         influx_cfg = influxdb_config or {}
         self.bucket = influx_cfg.get("bucket", "")
 
-        # Token from env var
-        influx_token_env = influx_cfg.get("influx_token_env")
-        token = os.getenv(influx_token_env) if influx_token_env else None
+        if influx_cfg:
+            influx_token_env = influx_cfg.get("influx_token_env")
+            token = os.getenv(influx_token_env) if influx_token_env else None
 
-        # URL from env var
-        influx_url_env = influx_cfg.get("influx_url_env")
-        self.influx_url = (
-            os.getenv(influx_url_env) if influx_url_env else "http://localhost:8086"
-        )
-        logger.info(
-            f"__init__ - Connecting to InfluxDB at {self.influx_url}, bucket={self.bucket}"
-        )
+            influx_url_env = influx_cfg.get("influx_url_env")
+            self.influx_url = (
+                os.getenv(influx_url_env) if influx_url_env else "http://localhost:8086"
+            )
+            logger.info(
+                f"__init__ - Connecting to InfluxDB at {self.influx_url}, bucket={self.bucket}"
+            )
 
-        self._influx_client = influxdb_client.InfluxDBClient(
-            url=self.influx_url, token=token, org=self.org
-        )
-        self._query_api = self._influx_client.query_api()
+            self._influx_client = influxdb_client.InfluxDBClient(
+                url=self.influx_url, token=token, org=self.org
+            )
+            self._query_api = self._influx_client.query_api()
+        else:
+            logger.info("__init__ - InfluxDB not configured for overview chart")
 
         # ------- ClickHouse Configuration (gradual migration supplement) -------
         self.ch_client = None
@@ -238,6 +243,9 @@ class JerryTraderChartDataManager:
             if ch_results:
                 return ch_results
 
+        if self._query_api is None or not self.bucket:
+            return []
+
         date_tag, mode_tag = session_to_influx_tags(self.session_id)
         query = f"""
         from(bucket: "{self.bucket}")
@@ -341,6 +349,9 @@ class JerryTraderChartDataManager:
         Query state history for a ticker from InfluxDB movers_state.
         Returns list of {timestamp, state, stateReason} sorted by timestamp.
         """
+        if self._query_api is None or not self.bucket:
+            return []
+
         range_start, range_end = self._get_intraday_time_range()
 
         date_tag, mode_tag = session_to_influx_tags(self.session_id)

@@ -55,32 +55,14 @@ machines:
   wsl2:
     limit: "null"    # market_open | market_close | null (never stop)
     roles:
-      # StateEngine:
-      #   enabled: true
-      #   redis: "redis-a"
-      #   influxdb: "influxdb-a"
-      # ChartDataBFF:
-      #   enabled: true
-      #   host: "0.0.0.0"
-      #   port: 5002
-      #   redis: "redis-a"
-      #   clickhouse: "clickhouse-a"
       TickDataServer:
         enabled: true
         host: "0.0.0.0"
         port: 8000
         redis: "redis-a"
         heartbeat_redis: "redis-a"
-        manager_type: "synced-replayer"
-        # manager_type: "polygon"
-        preload_tickers:          # loaded at startup while clock is paused
-          - "NIPG"
-          - "PRSO"
-      # FactorEngine:
-      #   enabled: true
-      #   manager_type: "replayer" # choices=["polygon", "theta", "replayer", "synced-replayer"]
-      #   redis: "redis-a"
-      #   influxdb: "influxdb-a"
+        # manager_type: "synced-replayer" # choices=["polygon", "theta", "replayer", "synced-replayer"]
+        manager_type: "polygon"
       BarsBuilder:
         enabled: true
         redis: "redis-a"
@@ -95,6 +77,15 @@ machines:
           - "4h"
           - "1d"
           - "1w"
+      # StateEngine:
+      #   enabled: true
+      #   redis: "redis-a"
+      #   influxdb: "influxdb-a"
+      # FactorEngine:
+      #   enabled: true
+      #   manager_type: "replayer" # choices=["polygon", "theta", "replayer", "synced-replayer"]
+      #   redis: "redis-a"
+      #   influxdb: "influxdb-a"
 
   mibuntu:
     limit: "market_open"    # market_open | market_close | null (never stop)
@@ -133,7 +124,7 @@ machines:
         poll_interval: 1.0
         batch_size: 5
         redis: "redis-b"
-      GridTraderBFF:
+      JerryTraderBFF:
         enabled: true
         host: "0.0.0.0"
         port: 5001
@@ -166,7 +157,7 @@ machines:
         # Use the same db-reference format as other redis configs when running
         # on a separate machine from
         # the TickDataServer (e.g. mibuntu following wsl2's clock).
-        # clock_redis: "redis-a@WSL2"
+        clock_redis: "redis-a@WSL2"
 
 # =============================================================================
 # Defaults
@@ -174,6 +165,9 @@ machines:
 defaults:
   replay_date: null #YYYYMMDD 20260306
   replay_time: null #HHMMSS 080015
+  # Used only when TickDataServer.manager_type == "synced-replayer"
+  preload_tickers: null # list of tickers to preload for synced-replayer mode (null or empty = preload all)
+  # preload_tickers: ["NIPG","PRSO"]
   suffix_id: null
   load_history: null
   log_level: "DEBUG"

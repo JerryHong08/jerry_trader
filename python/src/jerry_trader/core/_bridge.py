@@ -17,26 +17,71 @@ from jerry_trader.utils.logger import setup_logger
 logger = setup_logger(__name__, log_to_file=True)
 
 # ─── Snapshot compute functions ───────────────────────────────────────────
+# Partial dispatch is intentional: we can progressively migrate snapshot
+# compute to Rust without requiring all symbols at once.
+from jerry_trader.core.snapshot.compute import VolumeTracker as _PyVolumeTracker
+from jerry_trader.core.snapshot.compute import (
+    compute_derived_metrics as _py_compute_derived_metrics,
+)
+from jerry_trader.core.snapshot.compute import compute_ranks as _py_compute_ranks
+from jerry_trader.core.snapshot.compute import (
+    compute_weighted_mid_price as _py_compute_weighted_mid_price,
+)
+
 try:
-    from jerry_trader._rust import (  # type: ignore[attr-defined]
-        VolumeTracker,
-        compute_derived_metrics,
-        compute_ranks,
-        compute_weighted_mid_price,
+    from jerry_trader._rust import (
+        VolumeTracker as _RustVolumeTracker,  # type: ignore[attr-defined]
     )
 
-    RUST_SNAPSHOT = True
-    logger.info("_bridge - Using Rust snapshot compute")
+    VolumeTracker = _RustVolumeTracker
+    _rust_volume = True
+    logger.info("_bridge - Using Rust VolumeTracker")
 except ImportError:
-    from jerry_trader.core.snapshot.compute import (
-        VolumeTracker,
-        compute_derived_metrics,
-        compute_ranks,
-        compute_weighted_mid_price,
+    VolumeTracker = _PyVolumeTracker
+    _rust_volume = False
+    logger.info("_bridge - Using Python VolumeTracker (Rust not available)")
+
+try:
+    from jerry_trader._rust import (
+        compute_ranks as _rust_compute_ranks,  # type: ignore[attr-defined]
     )
 
-    RUST_SNAPSHOT = False
-    logger.info("_bridge - Using Python snapshot compute (Rust not available)")
+    compute_ranks = _rust_compute_ranks
+    _rust_ranks = True
+except ImportError:
+    compute_ranks = _py_compute_ranks
+    _rust_ranks = False
+
+try:
+    from jerry_trader._rust import (
+        compute_derived_metrics as _rust_compute_derived_metrics,  # type: ignore[attr-defined]
+    )
+
+    compute_derived_metrics = _rust_compute_derived_metrics
+    _rust_derived = True
+except ImportError:
+    compute_derived_metrics = _py_compute_derived_metrics
+    _rust_derived = False
+
+try:
+    from jerry_trader._rust import (
+        compute_weighted_mid_price as _rust_compute_weighted_mid_price,  # type: ignore[attr-defined]
+    )
+
+    compute_weighted_mid_price = _rust_compute_weighted_mid_price
+    _rust_weighted_mid = True
+except ImportError:
+    compute_weighted_mid_price = _py_compute_weighted_mid_price
+    _rust_weighted_mid = False
+
+RUST_SNAPSHOT = _rust_volume or _rust_ranks or _rust_derived or _rust_weighted_mid
+logger.info(
+    "_bridge - Snapshot dispatch: rust(volume=%s, ranks=%s, derived=%s, weighted_mid=%s)",
+    _rust_volume,
+    _rust_ranks,
+    _rust_derived,
+    _rust_weighted_mid,
+)
 
 # ─── Factor compute functions ────────────────────────────────────────────
 try:

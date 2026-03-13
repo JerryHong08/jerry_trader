@@ -4,6 +4,7 @@ mod factors;
 mod bars;
 mod clock;
 mod replayer;
+mod snapshot;
 
 /// The Rust computation core, exposed to Python as `jerry_trader._rust`.
 #[pymodule]
@@ -37,6 +38,10 @@ mod _rust {
     // ── Tick-data replayer ───────────────────────────────────────────
     #[pymodule_export]
     use super::replayer::TickDataReplayer;
+
+    // ── Snapshot compute tracker ─────────────────────────────────────
+    #[pymodule_export]
+    use super::snapshot::VolumeTracker;
 
     // ── Parquet trade loader (for 10s bootstrap) ────────────────────
     #[pyfunction]

@@ -165,6 +165,12 @@ class MarketSnapshotReplayer:
         self._running = True
         logger.info("MarketSnapshotReplayer starting...")
 
+        # If remote clock follower is configured, give it a short window to
+        # receive its first heartbeat before replay begins. This avoids a
+        # startup race where the first wait falls back to local pacing.
+        if self.remote_clock is not None:
+            await self._await_remote_clock_sync(timeout_s=3.0)
+
         # Handle rollback if requested
         if self.rollback_to:
             self._rollback_to_timestamp(self.rollback_to)
@@ -183,6 +189,32 @@ class MarketSnapshotReplayer:
         logger.info(
             f"MarketSnapshotReplayer stopped. Replayed {self._files_replayed} files."
         )
+
+    async def _await_remote_clock_sync(self, timeout_s: float = 3.0) -> bool:
+        """Wait for first remote-clock heartbeat.
+
+        Returns True if synced within timeout, False otherwise.
+        """
+        if self.remote_clock is None:
+            return False
+
+        deadline = time.time() + timeout_s
+        while self._running and time.time() < deadline:
+            if self.remote_clock.has_sync:
+                logger.info(
+                    "Remote clock synced: speed=%sx paused=%s",
+                    self.remote_clock.speed,
+                    self.remote_clock.is_paused,
+                )
+                return True
+            await asyncio.sleep(0.05)
+
+        logger.warning(
+            "Remote clock follower configured but no heartbeat received within %.1fs; "
+            "starting replay with local pacing fallback until sync arrives.",
+            timeout_s,
+        )
+        return False
 
     def stop(self):
         """Stop the replayer loop."""
@@ -259,46 +291,49 @@ class MarketSnapshotReplayer:
                 logger.info("Replay stopped by user")
                 break
 
-            if i > 0:
-                if self.remote_clock is not None:
-                    # ── Clock-follower path ──────────────────────────────────
-                    # Use remote clock ONLY after at least one heartbeat arrives.
-                    # If unsynced, fall back to local-speed pacing for now.
-                    if self.remote_clock.has_sync:
-                        target_ts_ns = int(file_timestamp.timestamp() * 1_000_000_000)
-                        while (
-                            self.remote_clock.now_ns() < target_ts_ns and self._running
-                        ):
-                            await asyncio.sleep(0.05)
-                        logger.debug(
-                            f"[{file_timestamp}] remote clock reached target "
-                            f"(target_ms={target_ts_ns // 1_000_000}, "
-                            f"clock_ms={self.remote_clock.now_ms()})"
+            if self.remote_clock is not None:
+                # ── Clock-follower path ──────────────────────────────────
+                # Gate EVERY file, including the first one, on the shared
+                # remote clock so snapshots never emit ahead of the master.
+                # If unsynced, fall back to local-speed pacing.
+                if self.remote_clock.has_sync:
+                    target_ts_ns = int(file_timestamp.timestamp() * 1_000_000_000)
+                    while self.remote_clock.now_ns() < target_ts_ns and self._running:
+                        await asyncio.sleep(0.05)
+                    logger.debug(
+                        f"[{file_timestamp}] remote clock reached target "
+                        f"(target_ms={target_ts_ns // 1_000_000}, "
+                        f"clock_ms={self.remote_clock.now_ms()})"
+                    )
+                elif i > 0:
+                    if not self._warned_remote_unsynced:
+                        logger.warning(
+                            "Remote clock follower configured but not synced yet; "
+                            "falling back to local speed pacing until heartbeat arrives."
                         )
-                    else:
-                        if not self._warned_remote_unsynced:
-                            logger.warning(
-                                "Remote clock follower configured but not synced yet; "
-                                "falling back to local speed pacing until heartbeat arrives."
-                            )
-                            self._warned_remote_unsynced = True
-                        prev_timestamp = file_timestamps[i - 1][1]
-                        time_diff = (file_timestamp - prev_timestamp).total_seconds()
-                        adjusted_wait_time = time_diff / self.speed
-                        if adjusted_wait_time > 0:
-                            await asyncio.sleep(adjusted_wait_time)
-                else:
-                    # ── Local-speed fallback ─────────────────────────────────
+                        self._warned_remote_unsynced = True
                     prev_timestamp = file_timestamps[i - 1][1]
                     time_diff = (file_timestamp - prev_timestamp).total_seconds()
                     adjusted_wait_time = time_diff / self.speed
-
                     if adjusted_wait_time > 0:
-                        logger.debug(
-                            f"Waiting {adjusted_wait_time:.2f}s "
-                            f"(original: {time_diff:.2f}s)"
-                        )
                         await asyncio.sleep(adjusted_wait_time)
+                else:
+                    logger.debug(
+                        f"[{file_timestamp}] remote clock not synced yet for first file; "
+                        "waiting for startup sync/fallback handling"
+                    )
+            elif i > 0:
+                # ── Local-speed fallback ─────────────────────────────────
+                prev_timestamp = file_timestamps[i - 1][1]
+                time_diff = (file_timestamp - prev_timestamp).total_seconds()
+                adjusted_wait_time = time_diff / self.speed
+
+                if adjusted_wait_time > 0:
+                    logger.debug(
+                        f"Waiting {adjusted_wait_time:.2f}s "
+                        f"(original: {time_diff:.2f}s)"
+                    )
+                    await asyncio.sleep(adjusted_wait_time)
 
             logger.info(f"[{file_timestamp}] Reading file: {os.path.basename(file)}")
 

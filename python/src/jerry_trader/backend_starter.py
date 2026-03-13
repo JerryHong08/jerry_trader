@@ -77,6 +77,8 @@ class JerryTraderBackendStarter:
         self.suffix_id = config.get("suffix_id")
         self.load_history = config.get("load_history")
         self.limit = config.get("limit")  # market_open | market_close | None
+        # Global preload list (used only when manager_type == "synced-replayer")
+        self.preload_tickers = config.get("preload_tickers", [])
 
         # Unified session ID for all Redis keys and InfluxDB tags
         self.session_id = make_session_id(
@@ -180,6 +182,7 @@ class JerryTraderBackendStarter:
                 session_id=self.session_id,
                 redis_config=role_cfg.get("redis"),
                 influxdb_config=role_cfg.get("influxdb"),
+                clickhouse_config=role_cfg.get("clickhouse"),
             )
             self._services.append(("JerryTraderBFF", self.bff))
         else:
@@ -194,6 +197,7 @@ class JerryTraderBackendStarter:
                 load_history=self.load_history,
                 redis_config=role_cfg.get("redis"),
                 influxdb_config=role_cfg.get("influxdb"),
+                clickhouse_config=role_cfg.get("clickhouse"),
             )
             self._services.append(("SnapshotProcessor", self.processor))
         else:
@@ -357,6 +361,13 @@ class JerryTraderBackendStarter:
             if not manager_type and "FactorEngine" in self.roles:
                 manager_type = self.roles["FactorEngine"].get("manager_type")
 
+            valid_manager_types = {"polygon", "theta", "replayer", "synced-replayer"}
+            if manager_type and manager_type not in valid_manager_types:
+                raise ValueError(
+                    f"Invalid manager_type={manager_type!r} for TickDataServer. "
+                    f"Valid choices: {sorted(valid_manager_types)}"
+                )
+
             # Create shared UnifiedTickManager
             if manager_type == "synced-replayer":
                 # In-process Rust TickDataReplayer — no WebSocket hop.
@@ -395,7 +406,9 @@ class JerryTraderBackendStarter:
                     provider="synced-replayer", manager=synced_mgr
                 )
                 self._tick_replayer = tick_replayer  # keep reference
-                self._preload_list = role_cfg.get("preload_tickers", [])
+
+                # Preload only in synced-replayer mode, sourced from defaults.
+                self._preload_list = list(self.preload_tickers or [])
                 logger.info(
                     "Created synced-replayer (in-process Rust) for date=%s",
                     self.replay_date,

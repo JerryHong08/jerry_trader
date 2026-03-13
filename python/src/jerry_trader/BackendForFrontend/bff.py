@@ -35,7 +35,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from jerry_trader.DataManager.overviewchartdat_manager import (
+from jerry_trader.DataManager.overviewchartdata_manager import (
     JerryTraderChartDataManager,
 )
 from jerry_trader.utils.logger import setup_logger
@@ -161,6 +161,7 @@ class JerryTraderBFF:
         session_id: Optional[str] = None,
         redis_config: Optional[Dict[str, Any]] = None,
         influxdb_config: Optional[Dict[str, Any]] = None,
+        clickhouse_config: Optional[Dict[str, Any]] = None,
     ):
         self.host = host
         self.port = port
@@ -211,6 +212,7 @@ class JerryTraderBFF:
             session_id=self.session_id,
             redis_config=redis_config,
             influxdb_config=influxdb_config,
+            clickhouse_config=clickhouse_config,
         )
 
         # Chart settings (persistent for session)
@@ -282,7 +284,7 @@ class JerryTraderBFF:
             f"JerryTraderBFF initialized: backend host={host}, port={port}, "
             f"session_id={self.session_id}, run_mode={self.run_mode}, "
             f"redis host={redis_host}, redis port={redis_port}, redis db={redis_db}"
-            f"influxdb config={influxdb_config}"
+            f"influxdb config={influxdb_config}, clickhouse config={clickhouse_config}"
         )
 
     def _setup_routes(self):

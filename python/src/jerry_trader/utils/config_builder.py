@@ -172,6 +172,12 @@ def build_runtime_config(
                     yaml_cfg, "redis", clock_redis_ref, role_name
                 )
 
+            heartbeat_redis_ref = role_cfg.get("heartbeat_redis")
+            if heartbeat_redis_ref and isinstance(heartbeat_redis_ref, str):
+                resolved_cfg["heartbeat_redis"] = _resolve_db_reference(
+                    yaml_cfg, "redis", heartbeat_redis_ref, role_name
+                )
+
             runtime["roles"][role_name] = resolved_cfg
 
     # Apply CLI overrides using dot notation

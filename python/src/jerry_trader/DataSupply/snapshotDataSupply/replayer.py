@@ -152,6 +152,7 @@ class MarketSnapshotReplayer:
 
         self._running = False
         self._files_replayed = 0
+        self._warned_remote_unsynced = False
 
         logger.info(
             f"MarketSnapshotReplayer initialized: date={replay_date}, session_id={self.session_id},\n"
@@ -261,18 +262,31 @@ class MarketSnapshotReplayer:
             if i > 0:
                 if self.remote_clock is not None:
                     # ── Clock-follower path ──────────────────────────────────
-                    # Wait until the shared virtual clock on the master machine
-                    # has advanced to this file's real-world timestamp.
-                    # This replaces local asyncio.sleep so all machines advance
-                    # in lock-step with the master ReplayClock.
-                    target_ts_ns = int(file_timestamp.timestamp() * 1_000_000_000)
-                    while self.remote_clock.now_ns() < target_ts_ns and self._running:
-                        await asyncio.sleep(0.05)
-                    logger.debug(
-                        f"[{file_timestamp}] remote clock reached target "
-                        f"(target_ms={target_ts_ns // 1_000_000}, "
-                        f"clock_ms={self.remote_clock.now_ms()})"
-                    )
+                    # Use remote clock ONLY after at least one heartbeat arrives.
+                    # If unsynced, fall back to local-speed pacing for now.
+                    if self.remote_clock.has_sync:
+                        target_ts_ns = int(file_timestamp.timestamp() * 1_000_000_000)
+                        while (
+                            self.remote_clock.now_ns() < target_ts_ns and self._running
+                        ):
+                            await asyncio.sleep(0.05)
+                        logger.debug(
+                            f"[{file_timestamp}] remote clock reached target "
+                            f"(target_ms={target_ts_ns // 1_000_000}, "
+                            f"clock_ms={self.remote_clock.now_ms()})"
+                        )
+                    else:
+                        if not self._warned_remote_unsynced:
+                            logger.warning(
+                                "Remote clock follower configured but not synced yet; "
+                                "falling back to local speed pacing until heartbeat arrives."
+                            )
+                            self._warned_remote_unsynced = True
+                        prev_timestamp = file_timestamps[i - 1][1]
+                        time_diff = (file_timestamp - prev_timestamp).total_seconds()
+                        adjusted_wait_time = time_diff / self.speed
+                        if adjusted_wait_time > 0:
+                            await asyncio.sleep(adjusted_wait_time)
                 else:
                     # ── Local-speed fallback ─────────────────────────────────
                     prev_timestamp = file_timestamps[i - 1][1]

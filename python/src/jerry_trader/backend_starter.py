@@ -173,7 +173,7 @@ class JerryTraderBackendStarter:
 
         # Lazy imports - only import what we need
         if "JerryTraderBFF" in self.roles:
-            from jerry_trader.BackendForFrontend.bff import JerryTraderBFF
+            from jerry_trader.backend_for_frontend.bff import JerryTraderBFF
 
             role_cfg = self.roles["JerryTraderBFF"]
             self.bff = JerryTraderBFF(
@@ -217,7 +217,7 @@ class JerryTraderBackendStarter:
             self.state_engine = None
 
         if "StaticDataWorker" in self.roles:
-            from jerry_trader.DataManager.static_data_worker import StaticDataWorker
+            from jerry_trader.data_manager.static_data_worker import StaticDataWorker
 
             role_cfg = self.roles["StaticDataWorker"]
             self.static_worker = StaticDataWorker(
@@ -231,7 +231,7 @@ class JerryTraderBackendStarter:
             self.static_worker = None
 
         if "NewsWorker" in self.roles:
-            from jerry_trader.DataManager.news_worker import NewsWorker
+            from jerry_trader.data_manager.news_worker import NewsWorker
 
             role_cfg = self.roles["NewsWorker"]
             self.news_worker = NewsWorker(
@@ -265,7 +265,7 @@ class JerryTraderBackendStarter:
             self.news_processor = None
 
         if "Collector" in self.roles:
-            from jerry_trader.DataSupply.snapshotDataSupply.collector import (
+            from jerry_trader.data_supply.snapshot_data_supply.collector import (
                 MarketsnapshotCollector,
             )
 
@@ -280,7 +280,7 @@ class JerryTraderBackendStarter:
             self.collector = None
 
         if "Replayer" in self.roles:
-            from jerry_trader.DataSupply.snapshotDataSupply.replayer import (
+            from jerry_trader.data_supply.snapshot_data_supply.replayer import (
                 MarketSnapshotReplayer,
             )
 
@@ -348,8 +348,8 @@ class JerryTraderBackendStarter:
         self._shared_ws_loop = None
 
         if "ChartBFF" in self.roles:
-            from jerry_trader.BackendForFrontend.chartbff import ChartBFF
-            from jerry_trader.DataSupply.tickDataSupply.unified_tick_manager import (
+            from jerry_trader.backend_for_frontend.chart_bff import ChartBFF
+            from jerry_trader.data_supply.tick_data_supply.unified_tick_manager import (
                 UnifiedTickManager,
             )
 
@@ -373,7 +373,7 @@ class JerryTraderBackendStarter:
                 # In-process Rust TickDataReplayer — no WebSocket hop.
                 from jerry_trader.clock import create_tick_replayer
                 from jerry_trader.config import lake_data_dir
-                from jerry_trader.DataSupply.tickDataSupply.synced_replayer_manager import (
+                from jerry_trader.data_supply.tick_data_supply.synced_replayer_manager import (
                     SyncedReplayerManager,
                 )
 
@@ -471,7 +471,9 @@ class JerryTraderBackendStarter:
             self.factor_engine = None
 
         if "BarsBuilder" in self.roles:
-            from jerry_trader.DataManager.bars_builder_service import BarsBuilderService
+            from jerry_trader.data_manager.bars_builder_service import (
+                BarsBuilderService,
+            )
 
             role_cfg = self.roles["BarsBuilder"]
 
@@ -516,7 +518,7 @@ class JerryTraderBackendStarter:
             self.tick_data_server._bars_builder = self.bars_builder
 
         if "AgentBFF" in self.roles:
-            from jerry_trader.BackendForFrontend.newsbff import AgentBFF
+            from jerry_trader.backend_for_frontend.news_bff import AgentBFF
 
             role_cfg = self.roles["AgentBFF"]
             self.agent_bff = AgentBFF(

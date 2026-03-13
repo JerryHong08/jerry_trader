@@ -1,4 +1,4 @@
-"""Bootstrap OrderManagement persistence schema
+"""Bootstrap order_management persistence schema
 
 This migration is intentionally defensive:
 - If tables do not exist, it creates them.

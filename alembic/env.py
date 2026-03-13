@@ -26,8 +26,8 @@ SRC_PATH = os.path.join(PROJECT_ROOT, "src")
 if SRC_PATH not in sys.path:
     sys.path.insert(0, SRC_PATH)
 
-import OrderManagement.persistence.models  # noqa: F401,E402  (register models)
-from OrderManagement.persistence.db import Base  # noqa: E402
+import order_management.persistence.models  # noqa: F401,E402  (register models)
+from order_management.persistence.db import Base  # noqa: E402
 
 target_metadata = Base.metadata
 

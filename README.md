@@ -96,7 +96,7 @@ poetry run python -m jerry_trader.backend_starter --machine wsl2 --dry-run
 poetry run python -m jerry_trader.backend_starter --machine wsl2 --defaults.replay_date 20260115
 
 # ibkr order management backend
-uvicorn python.src.jerry_trader.OrderManagement.main:app --reload --port 8888
+uvicorn python.src.jerry_trader.order_management.main:app --reload --port 8888
 ```
 
 ### 6. Start the Frontend

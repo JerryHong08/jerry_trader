@@ -27,10 +27,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from jerry_trader.DataSupply.tickDataSupply.synced_replayer_manager import (
+from jerry_trader.data_supply.tick_data_supply.synced_replayer_manager import (
     SyncedReplayerManager,
 )
-from jerry_trader.DataSupply.tickDataSupply.unified_tick_manager import (
+from jerry_trader.data_supply.tick_data_supply.unified_tick_manager import (
     UnifiedTickManager,
 )
 

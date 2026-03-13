@@ -19,10 +19,10 @@ from influxdb_client import Point, WritePrecision
 from influxdb_client.client.write_api import WriteOptions, WriteType
 
 from jerry_trader.core._bridge import price_accel, z_score
-from jerry_trader.DataSupply.bootstrapdataSupply.polygon_fetcher import (
+from jerry_trader.data_supply.bootstrap_data_supply.polygon_fetcher import (
     fetch_polygon_trades,
 )
-from jerry_trader.DataSupply.tickDataSupply.unified_tick_manager import (
+from jerry_trader.data_supply.tick_data_supply.unified_tick_manager import (
     UnifiedTickManager,
 )
 from jerry_trader.utils.logger import setup_logger

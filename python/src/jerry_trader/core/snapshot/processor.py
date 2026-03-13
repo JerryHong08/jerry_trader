@@ -39,8 +39,8 @@ from jerry_trader.core._bridge import (
     compute_ranks,
     compute_weighted_mid_price,
 )
-from jerry_trader.DataUtils.data_utils import get_common_stocks
-from jerry_trader.DataUtils.transforms import _parse_transfrom_timetamp
+from jerry_trader.data_utils.data_utils import get_common_stocks
+from jerry_trader.data_utils.transforms import _parse_transfrom_timetamp
 from jerry_trader.schema import enforce_snapshot_schema
 from jerry_trader.utils.logger import setup_logger
 from jerry_trader.utils.redis_keys import (
@@ -117,7 +117,9 @@ class SnapshotProcessor:
                 f"__init__ - InfluxDB configured: url={self.influx_url}, bucket={self.bucket}"
             )
         else:
-            logger.info("__init__ - InfluxDB not configured; ClickHouse-only mode enabled")
+            logger.info(
+                "__init__ - InfluxDB not configured; ClickHouse-only mode enabled"
+            )
 
         # ---------- ClickHouse Configuration (gradual migration) ----------
         self.ch_client = None

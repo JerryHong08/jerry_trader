@@ -236,6 +236,11 @@ some other features to make it better.
 
 - [ ] when switch to frontend chart [10s,1m] timespan, the newest bar always start a new bar based on incoming websocket since connected, the new rendered bar will cover up the the last bar timespan duration time open,high,low price. this seems not to be fixed in a short term for not effect the current tickdata orchestration of between frontend and backend.
 - ✅ 4h local data in replay fetch has a problem overlapping the bar though we have cut_off before resample in local_data_loader.
+- ✅ some of the bars are built empty volume. this originated from a race between ingest_trade and time-driven close; current work has migrated to `advance` + Rust completed-queue flow and is being validated in runtime.
+  - ✅ Rust output queue path integrated; completed bars are now drained from Rust via `drain_completed()` in flush loop (thread hazard reduced, second-flush burst reduced).
+  - ✅ Rename `check_expired` → `advance` across runtime and tests (bars_builder_service + Rust API + test suite updated).
+  - ✅ Min-heap scheduling added in Rust (`expiry_heap` with stale-entry seq guard) so expiry scan is boundary-driven instead of full map sweep.
+  - ✅ Watermark-based close + late-arrival window added (`configure_watermark(late_arrival_ms, idle_close_ms)`) with idle fallback; tests run with strict window for deterministic boundary assertions.
 
 ### Current frontend preview
 

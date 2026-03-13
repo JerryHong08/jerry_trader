@@ -324,31 +324,37 @@ class TestBarDictFields:
         assert set(flushed[0].keys()) == self.EXPECTED_KEYS
 
 
-# ── check_expired (wall-time bar completion) ─────────────────────────
+# ── advance (wall-time bar completion) ───────────────────────────────
 
 
-class TestCheckExpired:
-    """Test BarBuilder.check_expired() — wall-time driven bar closure."""
+class TestAdvance:
+    """Test BarBuilder.advance() — wall-time driven bar closure."""
+
+    @staticmethod
+    def _builder(timeframes):
+        b = BarBuilder(timeframes)
+        b.configure_watermark(late_arrival_ms=0, idle_close_ms=1)
+        return b
 
     def test_no_bars_returns_empty(self):
-        b = BarBuilder(["1m"])
-        assert b.check_expired(_ts(10, 0, 0)) == []
+        b = self._builder(["1m"])
+        assert b.advance(_ts(10, 0, 0)) == []
 
     def test_unexpired_bar_not_returned(self):
-        b = BarBuilder(["1m"])
+        b = self._builder(["1m"])
         # Trade at 09:30:05 → 1m bar from 09:30 to 09:31
         b.ingest_trade("AAPL", 150.0, 100, _ts(9, 30, 5))
         # At 09:30:30, bar hasn't ended yet
-        expired = b.check_expired(_ts(9, 30, 30))
+        expired = b.advance(_ts(9, 30, 30))
         assert expired == []
         # Bar should still be in-progress
         assert b.get_current_bar("AAPL", "1m") is not None
 
     def test_expired_bar_returned(self):
-        b = BarBuilder(["1m"])
+        b = self._builder(["1m"])
         b.ingest_trade("AAPL", 150.0, 100, _ts(9, 30, 5))
         # At 09:31:00, the 1m bar (09:30–09:31) is expired
-        expired = b.check_expired(_ts(9, 31, 0))
+        expired = b.advance(_ts(9, 31, 0))
         assert len(expired) == 1
         bar = expired[0]
         assert bar["ticker"] == "AAPL"
@@ -358,47 +364,47 @@ class TestCheckExpired:
         assert bar["bar_end"] == _ts(9, 31, 0)
 
     def test_expired_bar_removed_from_state(self):
-        b = BarBuilder(["1m"])
+        b = self._builder(["1m"])
         b.ingest_trade("AAPL", 150.0, 100, _ts(9, 30, 5))
-        b.check_expired(_ts(9, 31, 0))
+        b.advance(_ts(9, 31, 0))
         # Bar should be gone
         assert b.get_current_bar("AAPL", "1m") is None
         # Second call should return empty
-        assert b.check_expired(_ts(9, 31, 0)) == []
+        assert b.advance(_ts(9, 31, 0)) == []
 
     def test_mixed_expiry_across_timeframes(self):
-        b = BarBuilder(["1m", "5m"])
+        b = self._builder(["1m", "5m"])
         b.ingest_trade("AAPL", 150.0, 100, _ts(9, 30, 5))
         # At 09:31, only 1m bar is expired (5m ends at 09:35)
-        expired = b.check_expired(_ts(9, 31, 0))
+        expired = b.advance(_ts(9, 31, 0))
         assert len(expired) == 1
         assert expired[0]["timeframe"] == "1m"
         # 5m bar still in progress
         assert b.get_current_bar("AAPL", "5m") is not None
 
     def test_all_timeframes_expire_at_boundary(self):
-        b = BarBuilder(["1m", "5m"])
+        b = self._builder(["1m", "5m"])
         b.ingest_trade("AAPL", 150.0, 100, _ts(9, 30, 5))
         # At 09:35, both 1m (09:30–09:31) and 5m (09:30–09:35) are expired
-        expired = b.check_expired(_ts(9, 35, 0))
+        expired = b.advance(_ts(9, 35, 0))
         assert len(expired) == 2
         tfs = {bar["timeframe"] for bar in expired}
         assert tfs == {"1m", "5m"}
 
     def test_multi_ticker_expiry(self):
-        b = BarBuilder(["1m"])
+        b = self._builder(["1m"])
         b.ingest_trade("AAPL", 150.0, 100, _ts(9, 30, 5))
         b.ingest_trade("MSFT", 300.0, 50, _ts(9, 30, 10))
         # At 09:31, both tickers' 1m bars are expired
-        expired = b.check_expired(_ts(9, 31, 0))
+        expired = b.advance(_ts(9, 31, 0))
         assert len(expired) == 2
         tickers = {bar["ticker"] for bar in expired}
         assert tickers == {"AAPL", "MSFT"}
 
-    def test_ingest_after_check_expired_starts_new_bar(self):
-        b = BarBuilder(["1m"])
+    def test_ingest_after_advance_starts_new_bar(self):
+        b = self._builder(["1m"])
         b.ingest_trade("AAPL", 150.0, 100, _ts(9, 30, 5))
-        b.check_expired(_ts(9, 31, 0))
+        b.advance(_ts(9, 31, 0))
         # New trade at 09:31:10 starts a fresh bar
         completed = b.ingest_trade("AAPL", 152.0, 200, _ts(9, 31, 10))
         assert completed == []  # no bar completed by this trade
@@ -407,9 +413,9 @@ class TestCheckExpired:
         assert bar["open"] == 152.0
         assert bar["bar_start"] == _ts(9, 31, 0)
 
-    def test_check_expired_bar_has_all_fields(self):
-        b = BarBuilder(["1m"])
+    def test_advance_bar_has_all_fields(self):
+        b = self._builder(["1m"])
         b.ingest_trade("AAPL", 150.0, 100, _ts(9, 30, 5))
-        expired = b.check_expired(_ts(9, 31, 0))
+        expired = b.advance(_ts(9, 31, 0))
         assert len(expired) == 1
         assert set(expired[0].keys()) == TestBarDictFields.EXPECTED_KEYS

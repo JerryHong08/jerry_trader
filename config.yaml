@@ -67,6 +67,13 @@ machines:
         enabled: true
         redis: "redis-a"
         clickhouse: "clickhouse-a"
+        # Runtime bar close policy (live ingestion):
+        # hold bar closure briefly for out-of-order ticks.
+        late_arrival_ms: 100
+        idle_close_ms: 2000
+        # Bootstrap policy (trades_backfill): strict boundary close.
+        bootstrap_late_arrival_ms: 0
+        bootstrap_idle_close_ms: 1
         timeframes:
           - "10s"
           - "1m"

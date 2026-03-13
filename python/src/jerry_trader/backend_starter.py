@@ -482,6 +482,12 @@ class JerryTraderBackendStarter:
                     redis_config=role_cfg.get("redis"),
                     clickhouse_config=role_cfg.get("clickhouse"),
                     timeframes=role_cfg.get("timeframes"),
+                    late_arrival_ms=role_cfg.get("late_arrival_ms", 100),
+                    idle_close_ms=role_cfg.get("idle_close_ms", 2000),
+                    bootstrap_late_arrival_ms=role_cfg.get(
+                        "bootstrap_late_arrival_ms", 0
+                    ),
+                    bootstrap_idle_close_ms=role_cfg.get("bootstrap_idle_close_ms", 1),
                     ws_manager=self.tick_data_server.manager,
                     ws_loop=self._shared_ws_loop,
                 )
@@ -493,6 +499,12 @@ class JerryTraderBackendStarter:
                     redis_config=role_cfg.get("redis"),
                     clickhouse_config=role_cfg.get("clickhouse"),
                     timeframes=role_cfg.get("timeframes"),
+                    late_arrival_ms=role_cfg.get("late_arrival_ms", 100),
+                    idle_close_ms=role_cfg.get("idle_close_ms", 2000),
+                    bootstrap_late_arrival_ms=role_cfg.get(
+                        "bootstrap_late_arrival_ms", 0
+                    ),
+                    bootstrap_idle_close_ms=role_cfg.get("bootstrap_idle_close_ms", 1),
                 )
             self._services.append(("BarsBuilder", self.bars_builder))
         else:

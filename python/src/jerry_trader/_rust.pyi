@@ -104,11 +104,17 @@ class BarBuilder:
         """Get the current partial bar, or None if no bar in progress."""
         ...
 
-    def check_expired(self, now_ms: int) -> list[dict]:
-        """Complete any bars whose boundary time has passed.
+    def configure_watermark(
+        self, late_arrival_ms: int = 200, idle_close_ms: int = 2000
+    ) -> None:
+        """Configure late-arrival hold and idle close windows in milliseconds."""
+        ...
+
+    def advance(self, now_ms: int) -> list[dict]:
+        """Advance builder time and close bars that have crossed watermark.
 
         Call periodically with ``clock.now_ms()`` so bars close at the
-        correct wall-time boundary even when no trade arrives.
+        correct boundary even when no trade arrives.
 
         Args:
             now_ms: Current time in epoch milliseconds.
@@ -116,6 +122,10 @@ class BarBuilder:
         Returns:
             List of completed bar dicts (may be empty).
         """
+        ...
+
+    def drain_completed(self) -> list[dict]:
+        """Drain completed bars currently queued inside Rust."""
         ...
 
     def flush(self) -> list[dict]:

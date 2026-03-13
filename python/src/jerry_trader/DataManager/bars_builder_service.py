@@ -34,7 +34,7 @@ import logging
 import os
 import time
 from concurrent.futures import Future
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from typing import Any, Dict, List, Optional
 
 import clickhouse_connect
@@ -89,6 +89,10 @@ class BarsBuilderService:
         redis_config: Optional[Dict[str, Any]] = None,
         clickhouse_config: Optional[Dict[str, Any]] = None,
         timeframes: Optional[List[str]] = None,
+        late_arrival_ms: int = 100,
+        idle_close_ms: int = 2000,
+        bootstrap_late_arrival_ms: int = 0,
+        bootstrap_idle_close_ms: int = 1,
         ws_manager: Optional[UnifiedTickManager] = None,
         ws_loop: Optional[asyncio.AbstractEventLoop] = None,
         manager_type: Optional[str] = None,
@@ -109,7 +113,22 @@ class BarsBuilderService:
             "1w",
         ]
         self.bar_builder = BarBuilder(self.timeframes)
+        self.bar_builder.configure_watermark(
+            late_arrival_ms=late_arrival_ms,
+            idle_close_ms=idle_close_ms,
+        )
+        self._bootstrap_late_arrival_ms = bootstrap_late_arrival_ms
+        self._bootstrap_idle_close_ms = bootstrap_idle_close_ms
         logger.info(f"BarBuilder initialized: {self.bar_builder}")
+        logger.info(
+            "BarBuilder watermark config: runtime late_arrival_ms=%s, "
+            "runtime idle_close_ms=%s, bootstrap late_arrival_ms=%s, "
+            "bootstrap idle_close_ms=%s",
+            late_arrival_ms,
+            idle_close_ms,
+            bootstrap_late_arrival_ms,
+            bootstrap_idle_close_ms,
+        )
 
         # ── ClickHouse ───────────────────────────────────────────────
         ch_cfg = clickhouse_config or {}
@@ -141,6 +160,7 @@ class BarsBuilderService:
 
         # Pending completed bars waiting to be flushed to ClickHouse
         self._pending_bars: List[Dict] = []
+        self._pending_lock = Lock()
 
         # ── Redis ────────────────────────────────────────────────────
         redis_cfg = redis_config or {}
@@ -251,7 +271,7 @@ class BarsBuilderService:
         if remaining:
             # Convert ET → UTC before storing
             remaining = [self._convert_bar_et_to_utc(bar) for bar in remaining]
-            self._pending_bars.extend(remaining)
+            self._enqueue_bars(remaining)
             self._stats["bars_completed"] += len(remaining)
         self._flush_to_clickhouse()
 
@@ -473,7 +493,7 @@ class BarsBuilderService:
         if completed:
             # Convert ET → UTC before storing
             completed = [self._convert_bar_et_to_utc(bar) for bar in completed]
-            self._pending_bars.extend(completed)
+            self._enqueue_bars(completed)
             self._stats["bars_completed"] += len(completed)
 
         # Flush any unmerged REST meeting bar partials before clearing state.
@@ -482,7 +502,7 @@ class BarsBuilderService:
         rest_partials = self._rest_meeting_bars.pop(symbol, {})
         if rest_partials:
             for tf, rest_bar in rest_partials.items():
-                self._pending_bars.append(rest_bar)
+                self._enqueue_bars([rest_bar])
                 logger.info(
                     f"_remove_ticker - {symbol}/{tf}: flushing unmerged "
                     f"REST meeting bar partial"
@@ -639,18 +659,22 @@ class BarsBuilderService:
 
             # ── Build bars for all bootstrap TFs at once ──────────────
             bootstrap_builder = BarBuilder(bootstrap_tfs)
+            bootstrap_builder.configure_watermark(
+                late_arrival_ms=self._bootstrap_late_arrival_ms,
+                idle_close_ms=self._bootstrap_idle_close_ms,
+            )
             bootstrap_bars = bootstrap_builder.ingest_trades_batch(symbol, trades_et)
 
             # FIX: Close all time-expired bars before flushing.
             # Without this, if there's a 6-minute gap with no trades, the 1min
-            # bars during that gap won't be generated. check_expired() forces
+            # bars during that gap won't be generated. advance() forces
             # the BarBuilder to close bars at their time boundaries.
             last_trade_et_ms = trades_et[-1][0]
-            expired = bootstrap_builder.check_expired(last_trade_et_ms)
+            expired = bootstrap_builder.advance(last_trade_et_ms)
             if expired:
                 bootstrap_bars.extend(expired)
                 logger.debug(
-                    f"trades_backfill - {symbol}: check_expired closed "
+                    f"trades_backfill - {symbol}: advance closed "
                     f"{len(expired)} time-based bars (last_trade={self._ms_to_et(last_trade_et_ms)})"
                 )
 
@@ -699,7 +723,7 @@ class BarsBuilderService:
                     )
 
             # Write clean bars (no overlap with WS)
-            self._pending_bars.extend(clean_bars)
+            self._enqueue_bars(clean_bars)
 
             # ── Store REST meeting bar partials for deferred merge ────
             # The WS meeting bars haven't completed yet (the bar's time
@@ -789,7 +813,7 @@ class BarsBuilderService:
         """If this completed bar is a meeting bar with a stored REST partial,
         merge them and return the merged bar.  Otherwise return the original.
 
-        Called for every completed bar (from ingest_trade or check_expired).
+        Called for every completed bar (from ingest_trade rollover or advance).
         The merge combines:
           REST partial  [bar_start … first_ws_ts)   — from trades_backfill
           WS   partial  [first_ws_ts … bar_end)      — from live WS ticks
@@ -956,15 +980,9 @@ class BarsBuilderService:
         # Rust expects timestamps in US/Eastern time for correct session boundary calculations
         ts_et_ms = self._utc_ms_to_et_ms(ts_ms)
 
-        # Feed to Rust BarBuilder
-        completed = self.bar_builder.ingest_trade(
-            symbol, float(price), float(size), ts_et_ms
-        )
+        # Feed to Rust BarBuilder (completed bars are drained by _flush_loop)
+        self.bar_builder.ingest_trade(symbol, float(price), float(size), ts_et_ms)
         self._stats["ticks_ingested"] += 1
-
-        # Convert bar timestamps from ET back to UTC for storage/publishing
-        if completed:
-            completed = [self._convert_bar_et_to_utc(bar) for bar in completed]
 
         # Detect meeting bars for all bootstrap TFs on first WS tick.
         # Skip if bootstrap already completed (avoid spurious re-detection).
@@ -987,15 +1005,6 @@ class BarsBuilderService:
             if meeting_starts:
                 self._meeting_bar_start[symbol] = meeting_starts
 
-        if completed:
-            self._stats["bars_completed"] += len(completed)
-            for bar in completed:
-                # Merge with REST meeting bar partial if this is the
-                # WS half of a meeting bar (deferred from trades_backfill).
-                bar = self._try_merge_meeting_bar(bar)
-                self._pending_bars.append(bar)
-                # self._publish_bar(bar)
-
     # ════════════════════════════════════════════════════════════════════
     # Redis pub/sub: broadcast completed bars
     # ════════════════════════════════════════════════════════════════════
@@ -1015,50 +1024,46 @@ class BarsBuilderService:
     # ════════════════════════════════════════════════════════════════════
 
     def _flush_loop(self) -> None:
-        """Periodically check for expired bars and flush to ClickHouse.
+        """Periodically advance bar state and flush to ClickHouse.
 
-        Polls every 50 ms real-time.  When virtual time crosses a 500 ms
-        boundary we run ``check_expired``; any completed bars are flushed
+        Polls every 10 ms real-time.  When virtual time crosses a 100 ms
+        boundary we run ``advance`` and drain completed bars; any completed bars are flushed
         to ClickHouse immediately so writes land right at :00, :10, …
         """
-        POLL_SEC = 0.05  # 50 ms real-time poll
+        POLL_SEC = 0.01  # 10 ms real-time poll
 
         logger.info("Flush loop started")
-        # Align to the current virtual-time 500 ms slot.
-        last_slot = clock_mod.now_ms() // 500
+        # Align to the current virtual-time 100 ms slot.
+        last_slot = clock_mod.now_ms() // 100
 
         while self._running:
             time.sleep(POLL_SEC)
 
             now_ms = clock_mod.now_ms()
-            cur_slot = now_ms // 500
+            cur_slot = now_ms // 100
 
             if cur_slot <= last_slot:
-                continue  # haven't crossed a 500 ms boundary yet
+                continue  # haven't crossed a 100 ms boundary yet
             last_slot = cur_slot
 
             # Wall-time bar completion: close any bars whose boundary
             # has passed, even if no new trade arrived.
             # Convert UTC → ET for Rust BarBuilder
             now_et_ms = self._utc_ms_to_et_ms(now_ms)
-            expired = self.bar_builder.check_expired(now_et_ms)
+            advanced = self.bar_builder.advance(now_et_ms)
+            if advanced:
+                logger.debug(f"advance closed {len(advanced)} bars (now_ms={now_ms})")
 
-            # Convert expired bar timestamps from ET to UTC
-            if expired:
-                expired = [self._convert_bar_et_to_utc(bar) for bar in expired]
-
-            if expired:
-                self._stats["bars_completed"] += len(expired)
-                for bar in expired:
-                    bar = self._try_merge_meeting_bar(bar)
-                    self._pending_bars.append(bar)
-                    # self._publish_bar(bar)
-                logger.debug(
-                    f"check_expired closed {len(expired)} bars " f"(now_ms={now_ms})"
-                )
+            completed = self.bar_builder.drain_completed()
+            if completed:
+                completed = [self._convert_bar_et_to_utc(bar) for bar in completed]
+                self._stats["bars_completed"] += len(completed)
+                merged = [self._try_merge_meeting_bar(bar) for bar in completed]
+                self._enqueue_bars(merged)
+                # self._publish_bar(bar)
 
             # Flush to ClickHouse immediately when bars are pending.
-            if self._pending_bars:
+            if self._has_pending_bars():
                 self._flush_to_clickhouse()
 
         # Final flush on shutdown
@@ -1067,12 +1072,9 @@ class BarsBuilderService:
 
     def _flush_to_clickhouse(self) -> None:
         """Insert pending bars into ClickHouse via the shared ohlcv_writer."""
-        if not self._pending_bars:
+        bars = self._drain_pending_bars()
+        if not bars:
             return
-
-        # Drain pending bars atomically
-        bars = self._pending_bars
-        self._pending_bars = []
 
         try:
             n = write_bars(
@@ -1091,7 +1093,25 @@ class BarsBuilderService:
                 f"_flush_to_clickhouse: failed to insert {len(bars)} bars - {e}"
             )
             # Re-queue failed bars for retry
-            self._pending_bars = bars + self._pending_bars
+            self._enqueue_bars(bars)
+
+    def _enqueue_bars(self, bars: List[Dict]) -> None:
+        if not bars:
+            return
+        with self._pending_lock:
+            self._pending_bars.extend(bars)
+
+    def _has_pending_bars(self) -> bool:
+        with self._pending_lock:
+            return bool(self._pending_bars)
+
+    def _drain_pending_bars(self) -> List[Dict]:
+        with self._pending_lock:
+            if not self._pending_bars:
+                return []
+            bars = self._pending_bars
+            self._pending_bars = []
+            return bars
 
     # ════════════════════════════════════════════════════════════════════
     # Query API (for REST endpoints / frontend)
@@ -1160,8 +1180,10 @@ class BarsBuilderService:
         REST responses prevents a gap between ClickHouse and the
         partial (in-progress) bar.
         """
+        with self._pending_lock:
+            pending = list(self._pending_bars)
         return [
             bar
-            for bar in self._pending_bars
+            for bar in pending
             if bar.get("ticker") == ticker and bar.get("timeframe") == timeframe
         ]

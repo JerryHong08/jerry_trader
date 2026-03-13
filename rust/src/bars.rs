@@ -8,12 +8,15 @@
 
 use pyo3::prelude::*;
 use pyo3::Py;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 
 // ── Timeframe ───────────────────────────────────────────────────────
 
 /// Supported bar timeframes with their duration in milliseconds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Timeframe {
     Sec10,
     Min1,
@@ -295,11 +298,19 @@ struct BarState {
     bar_start: i64,    // epoch ms — aligned bar start
     bar_end: i64,      // epoch ms — when this bar completes
     session: Session,
+    seq: u64,
 }
 
 impl BarState {
     /// Create a new bar starting with the given trade.
-    fn new(price: f64, size: f64, bar_start: i64, bar_end: i64, session: Session) -> Self {
+    fn new(
+        price: f64,
+        size: f64,
+        bar_start: i64,
+        bar_end: i64,
+        session: Session,
+        seq: u64,
+    ) -> Self {
         Self {
             open: price,
             high: price,
@@ -312,6 +323,7 @@ impl BarState {
             bar_start,
             bar_end,
             session,
+            seq,
         }
     }
 
@@ -365,14 +377,24 @@ impl BarState {
 struct TickerBars {
     /// Active bar per timeframe.  `None` = no bar in progress.
     bars: HashMap<Timeframe, BarState>,
+    max_event_ts: i64,
 }
 
 impl TickerBars {
     fn new() -> Self {
         Self {
             bars: HashMap::with_capacity(8),
+            max_event_ts: 0,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ExpiryEntry {
+    bar_end: i64,
+    ticker: String,
+    tf: Timeframe,
+    seq: u64,
 }
 
 // ── BarBuilder (#[pyclass]) ─────────────────────────────────────────
@@ -401,6 +423,16 @@ pub struct BarBuilder {
     tickers: HashMap<String, TickerBars>,
     /// Which timeframes this builder is tracking.
     timeframes: Vec<Timeframe>,
+    /// Completed bars waiting for caller to drain.
+    completed_queue: VecDeque<CompletedBar>,
+    /// Expiry scheduler keyed by earliest bar_end.
+    expiry_heap: BinaryHeap<Reverse<ExpiryEntry>>,
+    /// Monotonic sequence for stale-heap-entry detection.
+    next_seq: u64,
+    /// Keep bars open this long for late-arriving trades (ms).
+    late_arrival_ms: i64,
+    /// If ticker is idle longer than this, wall-time closes bars (ms).
+    idle_close_ms: i64,
 }
 
 #[pymethods]
@@ -434,7 +466,19 @@ impl BarBuilder {
         Ok(Self {
             tickers: HashMap::new(),
             timeframes: tfs,
+            completed_queue: VecDeque::new(),
+            expiry_heap: BinaryHeap::new(),
+            next_seq: 1,
+            late_arrival_ms: 200,
+            idle_close_ms: 2_000,
         })
+    }
+
+    /// Configure late-arrival hold window and idle close timeout.
+    #[pyo3(signature = (late_arrival_ms=200, idle_close_ms=2000))]
+    fn configure_watermark(&mut self, late_arrival_ms: i64, idle_close_ms: i64) {
+        self.late_arrival_ms = late_arrival_ms.max(0);
+        self.idle_close_ms = idle_close_ms.max(1);
     }
 
     /// Ingest a single trade and return any completed bars.
@@ -468,6 +512,9 @@ impl BarBuilder {
             .tickers
             .entry(ticker.to_string())
             .or_insert_with(TickerBars::new);
+        if timestamp_ms > ticker_bars.max_event_ts {
+            ticker_bars.max_event_ts = timestamp_ms;
+        }
 
         let mut completed = Vec::new();
 
@@ -480,10 +527,26 @@ impl BarBuilder {
                     if timestamp_ms >= bar.bar_end {
                         // Current bar is completed — emit it.
                         let cb = bar.to_completed(ticker, tf);
+                        self.completed_queue.push_back(cb.clone());
                         completed.push(cb.to_py_dict(py)?);
 
                         // Start a new bar.
-                        *bar = BarState::new(price, size, bar_start_ts, bar_end_ts, session);
+                        let seq = self.next_seq;
+                        self.next_seq += 1;
+                        *bar = BarState::new(
+                            price,
+                            size,
+                            bar_start_ts,
+                            bar_end_ts,
+                            session,
+                            seq,
+                        );
+                        self.expiry_heap.push(Reverse(ExpiryEntry {
+                            bar_end: bar_end_ts,
+                            ticker: ticker.to_string(),
+                            tf,
+                            seq,
+                        }));
                     } else {
                         // Same bar — update in place.
                         bar.update(price, size);
@@ -491,10 +554,25 @@ impl BarBuilder {
                 }
                 None => {
                     // First trade for this ticker+timeframe.
+                    let seq = self.next_seq;
+                    self.next_seq += 1;
                     ticker_bars.bars.insert(
                         tf,
-                        BarState::new(price, size, bar_start_ts, bar_end_ts, session),
+                        BarState::new(
+                            price,
+                            size,
+                            bar_start_ts,
+                            bar_end_ts,
+                            session,
+                            seq,
+                        ),
                     );
+                    self.expiry_heap.push(Reverse(ExpiryEntry {
+                        bar_end: bar_end_ts,
+                        ticker: ticker.to_string(),
+                        tf,
+                        seq,
+                    }));
                 }
             }
         }
@@ -539,6 +617,9 @@ impl BarBuilder {
             if session == Session::Closed {
                 continue;
             }
+            if timestamp_ms > ticker_bars.max_event_ts {
+                ticker_bars.max_event_ts = timestamp_ms;
+            }
 
             for &tf in &self.timeframes {
                 let bar_start_ts = SessionCalendar::bar_start(timestamp_ms, tf);
@@ -547,17 +628,49 @@ impl BarBuilder {
                 match ticker_bars.bars.get_mut(&tf) {
                     Some(bar) => {
                         if timestamp_ms >= bar.bar_end {
-                            completed_bars.push(bar.to_completed(ticker, tf));
-                            *bar = BarState::new(price, size, bar_start_ts, bar_end_ts, session);
+                            let cb = bar.to_completed(ticker, tf);
+                            self.completed_queue.push_back(cb.clone());
+                            completed_bars.push(cb);
+                            let seq = self.next_seq;
+                            self.next_seq += 1;
+                            *bar = BarState::new(
+                                price,
+                                size,
+                                bar_start_ts,
+                                bar_end_ts,
+                                session,
+                                seq,
+                            );
+                            self.expiry_heap.push(Reverse(ExpiryEntry {
+                                bar_end: bar_end_ts,
+                                ticker: ticker.to_string(),
+                                tf,
+                                seq,
+                            }));
                         } else {
                             bar.update(price, size);
                         }
                     }
                     None => {
+                        let seq = self.next_seq;
+                        self.next_seq += 1;
                         ticker_bars.bars.insert(
                             tf,
-                            BarState::new(price, size, bar_start_ts, bar_end_ts, session),
+                            BarState::new(
+                                price,
+                                size,
+                                bar_start_ts,
+                                bar_end_ts,
+                                session,
+                                seq,
+                            ),
                         );
+                        self.expiry_heap.push(Reverse(ExpiryEntry {
+                            bar_end: bar_end_ts,
+                            ticker: ticker.to_string(),
+                            tf,
+                            seq,
+                        }));
                     }
                 }
             }
@@ -610,30 +723,63 @@ impl BarBuilder {
     ///
     /// Returns:
     ///   List of completed bar dicts (may be empty).
-    fn check_expired(
+    fn advance(
         &mut self,
         py: Python<'_>,
         now_ms: i64,
     ) -> PyResult<Vec<Py<PyAny>>> {
         let mut completed = Vec::new();
+        let mut deferred: Vec<ExpiryEntry> = Vec::new();
+        let max_threshold = now_ms - self.late_arrival_ms;
 
-        for (ticker, ticker_bars) in &mut self.tickers {
-            let expired_tfs: Vec<Timeframe> = ticker_bars
-                .bars
-                .iter()
-                .filter(|(_, bar)| now_ms >= bar.bar_end)
-                .map(|(&tf, _)| tf)
-                .collect();
+        while let Some(Reverse(entry)) = self.expiry_heap.peek().cloned() {
+            if entry.bar_end > max_threshold {
+                break;
+            }
+            let _ = self.expiry_heap.pop();
 
-            for tf in expired_tfs {
-                if let Some(bar) = ticker_bars.bars.remove(&tf) {
-                    let cb = bar.to_completed(ticker, tf);
-                    completed.push(cb.to_py_dict(py)?);
-                }
+            let Some(ticker_bars) = self.tickers.get_mut(&entry.ticker) else {
+                continue;
+            };
+            let Some(active) = ticker_bars.bars.get(&entry.tf) else {
+                continue;
+            };
+            if active.seq != entry.seq {
+                continue;
+            }
+
+            let ticker_threshold = if now_ms - ticker_bars.max_event_ts >= self.idle_close_ms {
+                now_ms - self.late_arrival_ms
+            } else {
+                ticker_bars.max_event_ts - self.late_arrival_ms
+            };
+
+            if entry.bar_end > ticker_threshold {
+                deferred.push(entry);
+                continue;
+            }
+
+            if let Some(bar) = ticker_bars.bars.remove(&entry.tf) {
+                let cb = bar.to_completed(&entry.ticker, entry.tf);
+                self.completed_queue.push_back(cb.clone());
+                completed.push(cb.to_py_dict(py)?);
             }
         }
 
+        for entry in deferred {
+            self.expiry_heap.push(Reverse(entry));
+        }
+
         Ok(completed)
+    }
+
+    /// Drain and return all completed bars currently queued.
+    fn drain_completed(&mut self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        let mut out = Vec::with_capacity(self.completed_queue.len());
+        while let Some(cb) = self.completed_queue.pop_front() {
+            out.push(cb.to_py_dict(py)?);
+        }
+        Ok(out)
     }
 
     /// Flush all open bars — force-complete and return them.
@@ -645,6 +791,7 @@ impl BarBuilder {
         for (ticker, ticker_bars) in &self.tickers {
             for (&tf, bar) in &ticker_bars.bars {
                 let cb = bar.to_completed(ticker, tf);
+                self.completed_queue.push_back(cb.clone());
                 completed.push(cb.to_py_dict(py)?);
             }
         }
@@ -671,6 +818,7 @@ impl BarBuilder {
         if let Some(ticker_bars) = self.tickers.remove(ticker) {
             for (&tf, bar) in &ticker_bars.bars {
                 let cb = bar.to_completed(ticker, tf);
+                self.completed_queue.push_back(cb.clone());
                 completed.push(cb.to_py_dict(py)?);
             }
         }
@@ -687,9 +835,11 @@ impl BarBuilder {
     fn __repr__(&self) -> String {
         let tf_labels: Vec<&str> = self.timeframes.iter().map(|tf| tf.label()).collect();
         format!(
-            "BarBuilder(tickers={}, timeframes={:?})",
+            "BarBuilder(tickers={}, timeframes={:?}, late_arrival_ms={}, idle_close_ms={})",
             self.tickers.len(),
             tf_labels,
+            self.late_arrival_ms,
+            self.idle_close_ms,
         )
     }
 }
@@ -824,7 +974,14 @@ mod tests {
 
     #[test]
     fn test_bar_state_new_and_update() {
-        let mut bar = BarState::new(100.0, 50.0, ts(10, 0, 0), ts(10, 1, 0), Session::Regular);
+        let mut bar = BarState::new(
+            100.0,
+            50.0,
+            ts(10, 0, 0),
+            ts(10, 1, 0),
+            Session::Regular,
+            1,
+        );
         assert_eq!(bar.open, 100.0);
         assert_eq!(bar.high, 100.0);
         assert_eq!(bar.low, 100.0);
@@ -865,12 +1022,19 @@ mod tests {
         assert_eq!(bs_wed, BASE_DAY_MS);
     }
 
-    // ── check_expired (pure-Rust) ───────────────────────────────────
+    // ── advance (pure-Rust) ─────────────────────────────────────────
 
     #[test]
     fn test_bar_state_expired_detection() {
         // A 1m bar from 10:00:00 to 10:01:00.
-        let bar = BarState::new(100.0, 50.0, ts(10, 0, 0), ts(10, 1, 0), Session::Regular);
+        let bar = BarState::new(
+            100.0,
+            50.0,
+            ts(10, 0, 0),
+            ts(10, 1, 0),
+            Session::Regular,
+            1,
+        );
         // At 10:00:30, bar should NOT be expired.
         assert!(ts(10, 0, 30) < bar.bar_end);
         // At 10:01:00 exactly, bar IS expired (now_ms >= bar_end).
@@ -886,12 +1050,26 @@ mod tests {
         // Insert 1m bar ending at 10:01
         tb.bars.insert(
             Timeframe::Min1,
-            BarState::new(100.0, 50.0, ts(10, 0, 0), ts(10, 1, 0), Session::Regular),
+            BarState::new(
+                100.0,
+                50.0,
+                ts(10, 0, 0),
+                ts(10, 1, 0),
+                Session::Regular,
+                1,
+            ),
         );
         // Insert 5m bar ending at 10:05
         tb.bars.insert(
             Timeframe::Min5,
-            BarState::new(100.0, 50.0, ts(10, 0, 0), ts(10, 5, 0), Session::Regular),
+            BarState::new(
+                100.0,
+                50.0,
+                ts(10, 0, 0),
+                ts(10, 5, 0),
+                Session::Regular,
+                2,
+            ),
         );
 
         // At 10:02, only the 1m bar is expired.

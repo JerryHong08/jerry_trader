@@ -2,7 +2,7 @@
  * ChartModule – OHLCV candlestick chart powered by lightweight-charts
  *
  * Combines historical bar data (bootstrap from BFF REST API) with real-time
- * trade tick updates from TickDataServer WebSocket.
+ * trade tick updates from ChartBFF WebSocket.
  *
  * Features:
  *   - Candlestick chart with timeframe selector (1m → 1M)

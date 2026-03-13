@@ -216,7 +216,7 @@ class JerryTraderChartDataManager:
         return [ticker for ticker, rank in current_membership]
 
     def get_ticker_history(
-        self, ticker: str, since: Optional[datetime] = None, limit: int = 500
+        self, ticker: str, since: Optional[datetime] = None
     ) -> List[Dict]:
         """
         Query historical snapshot data for a ticker from InfluxDB.
@@ -238,7 +238,6 @@ class JerryTraderChartDataManager:
                 ticker=ticker,
                 range_start=range_start,
                 range_end=range_end,
-                limit=limit,
             )
             if ch_results:
                 return ch_results
@@ -282,7 +281,6 @@ class JerryTraderChartDataManager:
         ticker: str,
         range_start: str,
         range_end: str,
-        limit: int,
     ) -> List[Dict]:
         """Query historical snapshot data for a ticker from ClickHouse.
 
@@ -312,7 +310,6 @@ class JerryTraderChartDataManager:
                   AND event_time_ms >= {start_ms:Int64}
                   AND event_time_ms <= {end_ms:Int64}
                 ORDER BY event_time_ms ASC
-                LIMIT {limit:UInt32}
             """
             result = self.ch_client.query(
                 query,
@@ -322,7 +319,6 @@ class JerryTraderChartDataManager:
                     "mode": mode_tag,
                     "start_ms": start_ms,
                     "end_ms": end_ms,
-                    "limit": limit,
                 },
             )
 

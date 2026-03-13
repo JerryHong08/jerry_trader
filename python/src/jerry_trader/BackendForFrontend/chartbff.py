@@ -1,5 +1,5 @@
 """
-TickDataServer - Backend for OrderTrader frontend tick data
+ChartBFF - Backend for OrderTrader frontend tick data
 
 A FastAPI + WebSocket server that serves real-time tick data to the OrderTrader
 frontend. Can run standalone or as a role within backend_starter.py.
@@ -15,7 +15,7 @@ Usage:
     uvicorn src.DataManager.tickdata_server:create_standalone_app --factory --port 8000
 
     # As a role in backend_starter (production)
-    # Configured via config.yaml TickDataServer role
+    # Configured via config.yaml ChartBFF role
 """
 
 import asyncio
@@ -45,7 +45,7 @@ logger = setup_logger(__name__, log_to_file=True)
 load_dotenv()
 
 
-class TickDataServer:
+class ChartBFF:
     """
     Backend for OrderTrader frontend tick data visualization.
 
@@ -122,9 +122,7 @@ class TickDataServer:
             self.manager = UnifiedTickManager(provider=manager_type)
             self._owns_manager = True
 
-        logger.info(
-            f"🚀 TickDataServer using {self.manager.provider.upper()} data manager"
-        )
+        logger.info(f"🚀 ChartBFF using {self.manager.provider.upper()} data manager")
 
         # Redis for factor_tasks stream
         redis_cfg = redis_config or {}
@@ -164,7 +162,7 @@ class TickDataServer:
         self._bars_builder = bars_builder
 
         # Build FastAPI app
-        self.app = FastAPI(title="TickDataServer", version="1.0.0")
+        self.app = FastAPI(title="ChartBFF", version="1.0.0")
 
         # Add CORS middleware
         self.app.add_middleware(
@@ -178,7 +176,7 @@ class TickDataServer:
         self._setup_routes()
 
         logger.info(
-            f"TickDataServer initialized: host={host}, port={port}, "
+            f"ChartBFF initialized: host={host}, port={port}, "
             f"session_id={self.session_id}, provider={self.manager.provider}, "
             f"shared_manager={not self._owns_manager}"
         )
@@ -592,11 +590,11 @@ class TickDataServer:
         return True
 
     def run(self, debug: bool = False):
-        """Run the TickDataServer (blocking). Used by backend_starter."""
+        """Run the ChartBFF (blocking). Used by backend_starter."""
         import uvicorn
 
         logger.info("=" * 60)
-        logger.info(f"Starting TickDataServer on {self.host}:{self.port}")
+        logger.info(f"Starting ChartBFF on {self.host}:{self.port}")
         logger.info("=" * 60)
 
         uvicorn.run(
@@ -608,7 +606,7 @@ class TickDataServer:
 
     def cleanup(self):
         """Clean up resources."""
-        logger.info("TickDataServer resources cleaned up")
+        logger.info("ChartBFF resources cleaned up")
 
 
 async def _consume_stream(
@@ -643,7 +641,7 @@ async def _consume_stream(
 
 def create_standalone_app() -> FastAPI:
     """
-    Factory function for running TickDataServer standalone with uvicorn.
+    Factory function for running ChartBFF standalone with uvicorn.
 
     Usage:
         uvicorn src.DataManager.tickdata_server:create_standalone_app --factory --port 8000
@@ -652,7 +650,7 @@ def create_standalone_app() -> FastAPI:
         replay_date=os.getenv("REPLAY_DATE"),
         suffix_id=os.getenv("SUFFIX_ID"),
     )
-    server = TickDataServer(session_id=session_id)
+    server = ChartBFF(session_id=session_id)
 
     # For standalone mode, start stream_forever on startup
     @server.app.on_event("startup")

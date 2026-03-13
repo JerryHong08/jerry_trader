@@ -62,7 +62,7 @@ machines:
         debug: false
         redis: "redis-b"
         influxdb: "influxdb-b"
-      TickDataServer:
+      ChartBFF:
         enabled: true
         host: "0.0.0.0"
         port: 8000

@@ -2,7 +2,7 @@
 BarsBuilderService — orchestrates tick-to-bar aggregation.
 
 Wires together:
-  1. UnifiedTickManager  (existing, shared with TickDataServer)
+  1. UnifiedTickManager  (existing, shared with ChartBFF
   2. Rust BarBuilder      (jerry_trader._rust.BarBuilder)
   3. ClickHouse           (clickhouse-connect for bar persistence)
   4. Redis pub/sub        (broadcast completed bars to WebSocket layer)
@@ -22,9 +22,9 @@ Architecture
  ClickHouse  Redis PUB   Future: FactorEngine
  (persist)  (WS push)
 
-Co-location with TickDataServer
+Co-location with ChartBFF
 ────────────────────────────────
-When both BarsBuilder and TickDataServer run on the same machine,
+When both BarsBuilder and ChartBFF run on the same machine,
 they share a single UnifiedTickManager instance (same as FactorEngine).
 backend_starter passes ws_manager + ws_loop in that case.
 """
@@ -305,7 +305,7 @@ class BarsBuilderService:
 
     def _tasks_listener(self) -> None:
         """Listen for add/remove ticker commands on the same Redis stream
-        that TickDataServer publishes to."""
+        that ChartBFF publishes to."""
         logger.info(f"Tasks listener started on {self.STREAM_NAME}")
         while self._running:
             try:

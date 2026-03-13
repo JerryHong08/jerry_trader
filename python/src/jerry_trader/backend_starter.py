@@ -339,23 +339,23 @@ class JerryTraderBackendStarter:
             self.replayer = None
 
         # ============================================================================
-        # TickDataServer + FactorEngine — shared UnifiedTickManager when co-located
+        # ChartBFF + FactorEngine — shared UnifiedTickManager when co-located
         # ============================================================================
-        # Initialize TickDataServer first (if enabled) so its manager can be shared
+        # Initialize ChartBFF first (if enabled) so its manager can be shared
         # with FactorEngine. When both run on the same machine, they share a single
         # connection to the data provider via fan-out queues.
         self._shared_ws_manager = None
         self._shared_ws_loop = None
 
-        if "TickDataServer" in self.roles:
-            from jerry_trader.BackendForFrontend.tickdata_server import TickDataServer
+        if "ChartBFF" in self.roles:
+            from jerry_trader.BackendForFrontend.chartbff import ChartBFF
             from jerry_trader.DataSupply.tickDataSupply.unified_tick_manager import (
                 UnifiedTickManager,
             )
 
-            role_cfg = self.roles["TickDataServer"]
+            role_cfg = self.roles["ChartBFF"]
 
-            # Determine manager type: TickDataServer config takes precedence,
+            # Determine manager type: ChartBFF config takes precedence,
             # fallback to FactorEngine config if co-located
             manager_type = role_cfg.get("manager_type")
             if not manager_type and "FactorEngine" in self.roles:
@@ -364,7 +364,7 @@ class JerryTraderBackendStarter:
             valid_manager_types = {"polygon", "theta", "replayer", "synced-replayer"}
             if manager_type and manager_type not in valid_manager_types:
                 raise ValueError(
-                    f"Invalid manager_type={manager_type!r} for TickDataServer. "
+                    f"Invalid manager_type={manager_type!r} for ChartBFF. "
                     f"Valid choices: {sorted(valid_manager_types)}"
                 )
 
@@ -430,16 +430,16 @@ class JerryTraderBackendStarter:
             if self._preload_list and self._tick_replayer is not None:
                 self._preload_tickers(self._preload_list)
 
-            self.tick_data_server = TickDataServer(
+            self.tick_data_server = ChartBFF(
                 host=role_cfg.get("host", "0.0.0.0"),
                 port=role_cfg.get("port", 8000),
                 session_id=self.session_id,
                 ws_manager=self._shared_ws_manager,
                 redis_config=role_cfg.get("redis"),
             )
-            self._services.append(("TickDataServer", self.tick_data_server))
+            self._services.append(("ChartBFF", self.tick_data_server))
             logger.info(
-                f"TickDataServer initialized with shared {self._shared_ws_manager.provider.upper()} manager"
+                f"ChartBFF initialized with shared {self._shared_ws_manager.provider.upper()} manager"
             )
         else:
             self.tick_data_server = None
@@ -449,7 +449,7 @@ class JerryTraderBackendStarter:
 
             role_cfg = self.roles["FactorEngine"]
 
-            # If TickDataServer is also enabled, share the UnifiedTickManager
+            # If ChartBFF is also enabled, share the UnifiedTickManager
             if self.tick_data_server is not None:
                 self.factor_engine = FactorManager(
                     session_id=self.session_id,
@@ -475,7 +475,7 @@ class JerryTraderBackendStarter:
 
             role_cfg = self.roles["BarsBuilder"]
 
-            # If TickDataServer is also enabled, share the UnifiedTickManager
+            # If ChartBFF is also enabled, share the UnifiedTickManager
             if self.tick_data_server is not None:
                 self.bars_builder = BarsBuilderService(
                     session_id=self.session_id,
@@ -498,13 +498,13 @@ class JerryTraderBackendStarter:
         else:
             self.bars_builder = None
 
-        # Wire BarsBuilder reference into TickDataServer so it can wait
+        # Wire BarsBuilder reference into ChartBFF so it can wait
         # for trades_backfill completion before serving bar REST responses.
         if self.tick_data_server is not None and self.bars_builder is not None:
             self.tick_data_server._bars_builder = self.bars_builder
 
         if "AgentBFF" in self.roles:
-            from jerry_trader.BackendForFrontend.openclaw import AgentBFF
+            from jerry_trader.BackendForFrontend.newsbff import AgentBFF
 
             role_cfg = self.roles["AgentBFF"]
             self.agent_bff = AgentBFF(
@@ -598,7 +598,7 @@ class JerryTraderBackendStarter:
 
         if self.tick_data_server:
             self.tick_data_server.cleanup()
-            logger.info("TickDataServer stopped")
+            logger.info("ChartBFF stopped")
 
         # Stop shared WS loop if it exists
         if self._shared_ws_loop and self._shared_ws_loop.is_running():
@@ -704,7 +704,7 @@ class JerryTraderBackendStarter:
         # Remote machines running RemoteClockFollower subscribe to this channel
         # so their service timing stays in lock-step with the virtual clock here.
         if self.replay_date:
-            _tick_role_cfg = self.roles.get("TickDataServer", {})
+            _tick_role_cfg = self.roles.get("ChartBFF", {})
             _hb_redis_cfg = (
                 _tick_role_cfg.get("heartbeat_redis") if _tick_role_cfg else None
             )
@@ -726,8 +726,8 @@ class JerryTraderBackendStarter:
                 )
             elif _tick_role_cfg:
                 logger.warning(
-                    "Replay mode with TickDataServer enabled but no explicit "
-                    "TickDataServer.heartbeat_redis configured; clock heartbeat "
+                    "Replay mode with ChartBFF enabled but no explicit "
+                    "ChartBFF.heartbeat_redis configured; clock heartbeat "
                     "publisher not started."
                 )
 
@@ -800,23 +800,21 @@ class JerryTraderBackendStarter:
             self.bars_builder.start()
             logger.info("BarsBuilder started")
 
-        # Start TickDataServer if enabled
+        # Start ChartBFF if enabled
         # Runs in a separate thread since it's a blocking uvicorn server
         if self.tick_data_server:
-            tick_cfg = self.roles.get("TickDataServer", {})
+            tick_cfg = self.roles.get("ChartBFF", {})
             host = tick_cfg.get("host", "0.0.0.0")
             port = tick_cfg.get("port", 8000)
-            logger.info(f"Starting TickDataServer on {host}:{port}")
+            logger.info(f"Starting ChartBFF on {host}:{port}")
 
             def run_tick_server():
                 self.tick_data_server.run()
 
-            tick_thread = Thread(
-                target=run_tick_server, daemon=True, name="TickDataServer"
-            )
+            tick_thread = Thread(target=run_tick_server, daemon=True, name="ChartBFF")
             tick_thread.start()
             self._threads.append(tick_thread)
-            logger.info("TickDataServer started")
+            logger.info("ChartBFF started")
 
         # Start AgentBFF in separate thread if enabled
         if self.agent_bff:

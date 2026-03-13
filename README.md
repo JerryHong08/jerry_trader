@@ -173,7 +173,7 @@ mainly focus on basic modules development and strcuture buidling.
 - ✅ deep review how current bar_buidler builds the bars in different senarios. 10s bootstrap done.
 - ✅ _needs_historical_backfill logic refine.
 - ✅ Snapshot processor to rust
-- [ ] Snapshot data: InfluxDB → ClickHouse
+- ✅ Snapshot data: InfluxDB → ClickHouse
 - [ ] Downstream consumers + InfluxDB→ClickHouse migration
 - [ ] FactorEngine consumes batched bars/data (not raw ticks)
 - [ ] Foundation for v3.0 stream bus architecture
@@ -183,7 +183,7 @@ In this stage we introduce rust based global clock to maintain acuuracy among th
 
 - ✅ add replay global clock in rust to maintain time accuracy in replay mode.
 - ✅ Remote machine sync + snapshot replayer
-- ✅ Redis heartbeat publisher in `clock.py` (100ms interval, from TickDataServer machine)
+- ✅ Redis heartbeat publisher in `clock.py` (100ms interval, from ChartBFF machine)
 - ✅ `RemoteClockFollower` class (monotonic interpolation between heartbeats)
 - ✅ Modify `MarketSnapshotReplayer` to poll `RemoteClockFollower.now_ns()` instead of `asyncio.sleep`
 - ✅ Test cross-machine sync (same network + Tailscale)

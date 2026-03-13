@@ -1,16 +1,17 @@
 [project]
 name = "jerry_trader"
-version = "0.2.0"
+version = "1.1.0"
 description = ""
 authors = [
     {name = "JerryHong", email = "huntcamilla06@gmail.com"}
 ]
 readme = "README.md"
-requires-python = ">=3.11,<3.15"
+requires-python = ">=3.11,<4.0"
 dependencies = [
     "python-dotenv>=1.1.1,<2.0.0",
     "ib-insync>=0.9.86,<0.10.0",
     "pandas>=2.3.1,<3.0.0",
+    "polars>=1.34.0,<2.0.0",
     "polygon-api-client>=1.16.2,<2.0.0",
     "fastapi>=0.120.1,<0.121.0",
     "pyarrow>=22.0.0,<23.0.0",
@@ -31,8 +32,7 @@ dependencies = [
     "protobuf>=6.33.5,<7.0.0",
     "google>=3.0.0,<4.0.0",
     "duckdb>=1.4.4,<2.0.0",
-    "clickhouse-connect>=0.14.1,<0.15.0",
-    "polars[rtcompat] (>=1.38.1,<2.0.0)",
+    "clickhouse-connect (>=0.8,<0.14)",
 ]
 
 [tool.poetry]

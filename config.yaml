@@ -55,7 +55,7 @@ machines:
   wsl2:
     limit: "null"    # market_open | market_close | null (never stop)
     roles:
-      TickDataServer:
+      ChartBFF:
         enabled: true
         host: "0.0.0.0"
         port: 8000

@@ -1,7 +1,7 @@
 /**
  * TickData Zustand Store
  *
- * Manages the TickDataServer WebSocket (wsl2 machine, default port 8000).
+ * Manages the ChartBFF WebSocket (wsl2 machine, default port 8000).
  * Provides real-time quote (Q) and trade (T) data for:
  *   - OrderBook / quote display
  *   - ChartModule (real-time line chart)

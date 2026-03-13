@@ -2,24 +2,50 @@
 
 this file has my trading system module summary and the roadmap from very early experimental stage to planned.
 
+Details in [Jerry_Trader.pdf](docs/jerry_trader.pdf)
+
 ## Installation & Quick Start
 
-this project is built for my multiple machines working under the same network or through tailscale. you can configure each machine's role in the through [config.yaml](/config.yaml.example)
+This project is designed for a multi-machine setup connected via a local network or [Tailscale](https://tailscale.com/). Each machine's role is defined in [`config.yaml`](/config.yaml.example).
 
 ### 1. Clone & Configure
 
 ```bash
-git clone <repo-url> jerry_trader && cd jerry_trader
+git clone https://github.com/JerryHong08/jerry_trader.git && cd jerry_trader
+```
 
-Edit `.env` — at minimum you need:
+#### 1.1 `basic_config.yaml`
 
-- `POLYGON_API_KEY` — Polygon.io Advanced subscription (real-time snapshot + tick data)
-- Database URLs for PostgreSQL / InfluxDB (if using persistence)
-- `IB_PORT` — 7496 (paper) or 7497 (live) for IBKR TWS; 4002/4001 for Gateway
+| Key | Description |
+|-----|-------------|
+| `data.data_dir` | Local path where market data (Parquet files) is stored |
 
-Edit `basic_config.yaml`:
+#### 1.2 `.env`
 
-- `data.data_dir` — local path where market data is stored
+At minimum you need:
+
+| Variable | Purpose |
+|----------|---------|
+| `POLYGON_API_KEY` | Polygon.io Advanced subscription (real-time snapshot + tick data) |
+| `DATABASE_URL` | PostgreSQL connection string (order persistence) |
+| `INFLUXDB_URL` / `INFLUXDB_TOKEN` | InfluxDB connection (factor engine metrics) |
+| `IB_PORT` | `7496` (TWS paper) / `7497` (TWS live) / `4002` (Gateway paper) / `4001` (Gateway live) |
+
+> For the IB API client library, see [Download the TWS API](https://www.interactivebrokers.com/campus/ibkr-api-page/twsapi-doc/#find-the-api).
+
+#### 1.3 `config.yaml` — Machine Roles
+
+The system has multiple services that can be distributed across machines. my setup uses 3:
+
+| Machine | Services |
+|---------|----------|
+| **A** | TickData Engine, BarBuilder, Factor Engine, Order Execution |
+| **B** | Market Snapshot engine (collect/replay), strategy-driving pre-processing(top20, normalization) |
+| **C** | News Module (fetch, LLM classification) |
+
+See [`config.yaml.example`](/config.yaml.example) for the full schema and role definitions.
+
+I recommend at least 2 machines, and highly recommend separate order execution and tickdata process with other parts.
 
 ### 2. Install Python Dependencies
 
@@ -31,11 +57,13 @@ poetry install
 poetry env info
 ```
 
-for ibapi installation, see [Download the TWS API](https://www.interactivebrokers.com/campus/ibkr-api-page/twsapi-doc/#find-the-api)
-
 ### 3. Build the Rust Extension
 
 ```bash
+# before run maturin, make sure you have cargo installed,
+# if not, run below command then restarted the shell.
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
 # Build and install the Rust extension into the Poetry venv
 poetry run maturin develop
 
@@ -66,6 +94,9 @@ poetry run python -m jerry_trader.backend_starter --machine wsl2 --dry-run
 
 # With replay mode (historical date)
 poetry run python -m jerry_trader.backend_starter --machine wsl2 --defaults.replay_date 20260115
+
+# ibkr order management backend
+uvicorn python.src.jerry_trader.OrderManagement.main:app --reload --port 8888
 ```
 
 ### 6. Start the Frontend
@@ -92,7 +123,7 @@ poetry run black python/
 poetry run isort python/
 ```
 
-## roadmap
+## Roadmap
 
 ### Stage 1 & Initial Start
 
@@ -110,11 +141,11 @@ mainly focus on basic function test and expriment.
   - IBKR Gateway/TWS connect & starter(using `/opt/ibc/gatewaystart.sh`). now moved to use windows gateway for wsl mirrored network mode.
   - Basic IB Classes like Contract, Order...
 
-### Stage2(Current)
+### Stage2
 
 mainly focus on basic modules development and strcuture buidling.
 
-- ✅using figma make frontend code package.
+- ✅ using figma make frontend code package.
   this frontend layout of trading system is gird layout, and each grid/module is seperated for easy to develop and customize.
   - Top Gainers/Rank List
   - Overview Chart
@@ -124,124 +155,93 @@ mainly focus on basic modules development and strcuture buidling.
   - Chart
 
 - migrate the backend data source to the frontend replacing the mock data.
-  - ✅start with building a backend for frontend(bff), then migrate data step by step.
+  - ✅ start with building a backend for frontend(bff), then migrate data step by step.
   - first start with the Top Gainers column data.
-    - ✅first we test with basic direct emit columns like ['symbol', 'rank', 'price', 'change', 'changePercent', 'volume', 'relativeVolume5min', 'relativeVolumeDaily'].
-    - ✅then we test the state column
-    - ✅then we test the passively fetched and emitted columns like ['float_share','marketCap','news'].
-  - ✅after that or during test of column data, we can test the overviewchartdata emit, which needs to normalize the frontend chart and get_chart_data in overviewchartdataManager.py.
-  - ✅then Stock Detail. the data request is driven by top gainers and backend data management, so it should use cache, and also the data request can be driven by the frontend button. it's basic the same as the static data column update in top gainers column.
-  - ✅then the Portfolio and Order Management. this module is isolated, so it's easier to integrate.
+    - ✅ first we test with basic direct emit columns like ['symbol', 'rank', 'price', 'change', 'changePercent', 'volume', 'relativeVolume5min', 'relativeVolumeDaily'].
+    - ✅ then we test the state column
+    - ✅ then we test the passively fetched and emitted columns like ['float_share','marketCap','news'].
+  - ✅ after that or during test of column data, we can test the overviewchartdata emit, which needs to normalize the frontend chart and get_chart_data in overviewchartdataManager.py.
+  - ✅ then Stock Detail. the data request is driven by top gainers and backend data management, so it should use cache, and also the data request can be driven by the frontend button. it's basic the same as the static data column update in top gainers column.
+  - ✅ then the Portfolio and Order Management. this module is isolated, so it's easier to integrate.
 
 ### Stage2.5(Current)
 
-📌the last one is the Chart module, based on tradingview lightweight chart, the focus is balance between the real-time update and historical data retrival. **data management and historical data bootstrap. also build a architecture prepared for stage3 strategy real-time/replay computation, execution, analysis**
+✅ the last and the hardest one is the Chart module, based on tradingview lightweight chart, the focus is balance between the real-time update and historical data retrival. **data management and historical data bootstrap. also build a architecture prepared for stage3 strategy real-time/replay computation, execution, analysis**
 
-- bootstrap using api&cache
-- write a data pipeline in Rust
-  - current architecture:
+- ✅ add frontend request_id to prevent race conditions.
+- ✅ frontend charts seperated.
+- ✅ deep review how current bar_buidler builds the bars in different senarios. 10s bootstrap done.
+- ✅ _needs_historical_backfill logic refine.
+- [ ] Downstream consumers + InfluxDB→ClickHouse migration
+- [ ] FactorEngine consumes batched bars/data (not raw ticks)
+- [ ] Snapshot data: InfluxDB → ClickHouse
+- [ ] Foundation for v3.0 stream bus architecture
 
-    ``` bash
-    v1.0
+In this stage we introduce rust based global clock to maintain acuuracy among the whole project running time. In replay mode, The **tickdataSever machine** is the clock domain master (also runs`local_tickdata_replayer` in-process). Remote machines (running
+`MarketSnapshotReplayer`) follow via Redis heartbeat.
 
-    frontend
-      -> request - bff for historical data api fetch(cache&incremental design)
-      -> subscribe - tickdataServer for real-time websocket
-
-    problem:
-      bar consistency issues
-      UI complexity
-      duplicate aggregation logic
-      hard to scale
-    ```
-
-  - planned architecture(for better tradingng ui):
-
-    ``` bash
-    v2.0
-
-    frontend
-      -> request - bars builder for historical data api fetch(The builder maintains rolling bar states.)
-      -> subscribe - bars builder for real-time websocket
-
-    Backend pipeline:
-      polygon ticks
-          │
-          ▼
-      tick ingestion
-          │
-          ▼
-      Bar Builder Service
-          │
-          ├─ maintains rolling bar states
-          │
-          ├─ persists completed bars
-          │
-          └─ streams realtime bar updates
-
-    Frontend behavior:
-      getBars()
-      subscribeBars()
-
-    Advantages:
-      UI becomes simple
-      bar consistency guaranteed
-      deterministic bar generation
-      lower websocket bandwidth
-    ```
-
-  - planned architecture(for better quant strategy computation&execution):
-
-    ``` bash
-    v3.0
-
-    market feed
-      │
-      ▼
-    tick ingestion
-      │
-      ▼
-    stream bus
-      │
-      ├─ bar builder
-      ├─ feature engine
-      └─ strategy engine
-
-    more to be discussed yet.
-
-    ```
-
-- restructure and introduce rust
+- ✅ add replay global clock in rust to maintain time accuracy in replay mode.
+- ✅ Remote machine sync + snapshot replayer
+- ✅ Redis heartbeat publisher in `clock.py` (100ms interval, from TickDataServer machine)
+- ✅ `RemoteClockFollower` class (monotonic interpolation between heartbeats)
+- ✅ Modify `MarketSnapshotReplayer` to poll `RemoteClockFollower.now_ns()` instead of `asyncio.sleep`
+- ✅ Test cross-machine sync (same network + Tailscale)
 
 ### Stage3
 
-mainly focus on strategy computation,execution,replay backtest.
+mainly focus on strategy computation,execution,replay backtest. and the optimization for UX/UI and orchestration/backend.
 
-- ✅separated works to other computuers using ssh. configured in config.yaml.
-- visualization of factors in chart module.
-- real-time risk management engine/trigger.
-  - risk manage rule
-- developing machine learning module.
-  - build breakout-compute-analyze oriented Context Model using current recored files.
-  - simulate market_snapshot replay using historical trade&quote bulk file.
-  - build historical context model.
-- rewrite stateEngine in rust.
-- rewrite factorEegine in Rust.
+strategy:
+
+- [ ] rewrite stateEngine in rust.
+  - [ ] Factor output: InfluxDB → ClickHouse
+- [ ] rewrite factorEegine in Rust.
+- [ ] real-time risk management engine/trigger.
+  - [ ] risk manage rule.
+- [ ] developing machine learning module.
+  - [ ] build breakout-compute-analyze oriented Context Model using current recored files.
+  - [ ] simulate market_snapshot replay using historical trade&quote bulk file.
+  - [ ] build historical context model.
+
+ochesration:
+
+- [ ] tickers fit in strategy/condition pre locate.
+- [ ] Strategy pre-locate orchestrator: accepts `(ticker, timestamp)` list, auto-sequences jumps
+- [ ] pre-located tickers pipeline backtest visualization& validation.
+- ✅ preload parquet load method optimization.
+
+frontend:
+
+- [ ] simple indicators visualization
+- [ ] visualization of factors in chart module.
+- [ ] abstract all the search box into one.
+- [ ] better UX
+  - ✅ keyboard shortcut
+  - [ ] frame group
 
 ### optional features
 
 some other features to make it better.
 
-- historical orders analysis modules.
-- Add more modules, like Agent module to monitor the global staus also focus on one ticker at the same time.
-- news room
+- ✅ separated works to other computuers using ssh. configured in config.yaml.
+- [ ] historical orders analysis modules.
+- [ ] Add more modules, like Agent module to monitor the global staus also focus on one ticker at the same time.
+  - [ ] News engine output from log to json log. route to openclaw/heartbeat llm in the future.
+    - ✅ news room
+      - [ ] focus mode
+    - [ ] chatbox
+
+### open issues
+
+- [ ] when switch to frontend chart [10s,1m] timespan, the newest bar always start a new bar based on incoming websocket since connected, the new rendered bar will cover up the the last bar timespan duration time open,high,low price. this seems not to be fixed in a short term for not effect the current tickdata orchestration of between frontend and backend.
+- ✅ 4h local data in replay fetch has a problem overlapping the bar though we have cut_off before resample in local_data_loader.
 
 ### Current frontend preview
 
 #### Overview Layout Set
 
 <p align="center">
-  <img src="./assets/gridtrader.png" alt="gridtrader" width="600">
+  <img src="./assets/JerryTrader.png" alt="JerryTrader" width="600">
   <br><em>Portfolio, order history and chart are using mock data</em>
 </p>
 
@@ -251,9 +251,4 @@ some other features to make it better.
   <img src="./assets/trade_layout01.png" alt="trade_layout01" width="800">
 </p>
 
-#### Layout Setting
-
-<p align="center">
-  <img src="./assets/layout_setting.png" alt="layout_setting" width="450">
-  <br><em>Import, load and customize your layout in the setting panel</em>
-</p>
+>You can customize your layout in setting.

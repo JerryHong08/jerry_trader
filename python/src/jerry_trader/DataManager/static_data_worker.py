@@ -241,7 +241,9 @@ class StaticDataWorker:
         5. Emit notification to stream
         """
         logger.info(f"Fetching static data for {symbol}")
-        current_timestamp = datetime.now(ZoneInfo("America/New_York"))
+        from jerry_trader import clock
+
+        current_timestamp = clock.now_datetime()
 
         # Collect data
         profile_data: Dict[str, Any] = {"symbol": symbol}

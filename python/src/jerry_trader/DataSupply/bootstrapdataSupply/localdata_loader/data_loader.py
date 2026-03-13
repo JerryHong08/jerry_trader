@@ -57,6 +57,10 @@ class LoaderConfig:
     use_cache: bool
     use_duck_db: bool
     skip_low_volume: bool
+    # Optional replay-time cutoff.  When set, source bars with
+    # ``timestamps > cutoff_ts`` are discarded *before* resampling
+    # so that aggregated bars (4h, 1W, 1M) never include future data.
+    cutoff_ts: Optional[datetime] = None
 
 
 class TimestampGenerator:
@@ -176,13 +180,17 @@ class OHLCVResampler:
 
     @staticmethod
     def parse_timeframe(timeframe: str) -> int:
-        """Parse timeframe string to minutes"""
-        match = re.match(r"(\d+)([mhd])", timeframe.lower())
+        """Parse timeframe string to minutes.
+
+        Accepts: 1m, 5m, 15m, 30m, 1h, 4h, 1d, 7d, 1w, 1mo
+        Returns the equivalent number of minutes.
+        """
+        match = re.match(r"(\d+)(mo|[mhdw])", timeframe.lower())
         if not match:
             raise ValueError(f"Invalid timeframe: {timeframe}")
 
         value, unit = int(match.group(1)), match.group(2)
-        multipliers = {"m": 1, "h": 60, "d": 1440}
+        multipliers = {"m": 1, "h": 60, "d": 1440, "w": 10080, "mo": 43200}
         return value * multipliers[unit]
 
     @staticmethod
@@ -772,7 +780,12 @@ class RawDataLoader:
     def _load_with_polars(self, paths: List[str], use_s3: bool) -> pl.LazyFrame:
         """Load data using Polars"""
         if all(f.endswith(".parquet") for f in paths):
-            return pl.scan_parquet(paths)
+            # Scan each file individually and concat with
+            # diagonal_relaxed so mixed integer widths (e.g. UInt32 vs
+            # UInt64 volume columns across dates) are automatically
+            # super-typed without error.
+            lfs = [pl.scan_parquet(p) for p in paths]
+            return pl.concat(lfs, how="diagonal_relaxed")
 
         if use_s3:
             return pl.scan_csv(
@@ -1003,12 +1016,67 @@ class StockDataLoader:
         print("Filling missing timestamps...")
         lf_full = self._forward_fill_missing(lf, time_range_lf)
 
+        # ── Pre-resample cutoff ─────────────────────────────────
+        # In replay mode the raw Parquet files contain data beyond
+        # the replay clock.  Filtering *before* resampling ensures
+        # aggregated bars (4h, 1W, 1M) never incorporate future bars
+        # into their OHLCV values.
+        if config.cutoff_ts is not None:
+            print(f"cutoff ts:{config.cutoff_ts}")
+            lf_full = lf_full.filter(pl.col("timestamps") <= config.cutoff_ts)
+
         # Resample if needed
         if config.timeframe not in ("1m", "1d"):
-            print(f"Resampling to {config.timeframe}...")
-            lf_full = self.resampler.resample(lf_full, config.timeframe)
+            if unit in ("w", "mo") or (unit == "d" and value > 1):
+                # Calendar-aligned resample (weekly / monthly) via
+                # group_by_dynamic — the session-based resampler only
+                # works for intraday bars.  Multi-day "d" values (7d, 30d)
+                # also need calendar resampling, not session bucketing.
+                print(f"Calendar-resampling to {config.timeframe}...")
+                lf_full = self._resample_calendar(lf_full, config.timeframe)
+            else:
+                # Session-aware resample (15m, 1h, 4h)
+                print(f"Resampling to {config.timeframe}...")
+                lf_full = self.resampler.resample(lf_full, config.timeframe)
 
         return lf_full
+
+    @staticmethod
+    def _resample_calendar(lf: pl.LazyFrame, timeframe: str) -> pl.LazyFrame:
+        """Resample daily bars to weekly or monthly using calendar alignment.
+
+        Uses Polars ``group_by_dynamic`` for calendar-aligned bucketing:
+          - 7d / 1w  → ``"1w"``  (ISO Monday-aligned weeks)
+          - 30d / 1mo → ``"1mo"`` (calendar months)
+
+        The session-based ``OHLCVResampler.resample()`` cannot handle
+        multi-day buckets because its bar-id logic is anchored to
+        intraday session start times.
+        """
+        polars_every_map = {"7d": "1w", "1w": "1w", "30d": "1mo", "1mo": "1mo"}
+        polars_every = polars_every_map.get(timeframe.lower())
+        if polars_every is None:
+            return lf  # unknown → pass through unchanged
+
+        # group_by_dynamic requires a sorted datetime index
+        lf = lf.sort("timestamps")
+
+        has_transactions = "transactions" in lf.collect_schema().names()
+        agg_exprs = [
+            pl.col("open").first(),
+            pl.col("high").max(),
+            pl.col("low").min(),
+            pl.col("close").last(),
+            pl.col("volume").sum(),
+        ]
+        if has_transactions:
+            agg_exprs.append(pl.col("transactions").sum())
+
+        return (
+            lf.group_by_dynamic("timestamps", every=polars_every, group_by="ticker")
+            .agg(agg_exprs)
+            .sort(["ticker", "timestamps"])
+        )
 
     def _generate_ticker_timestamps(
         self, lf: pl.LazyFrame, timeframe: str, full_hour: bool, is_daily: bool
@@ -1175,17 +1243,19 @@ def stock_load_process(
 
 if __name__ == "__main__":
     # Example usage
-    tickers = ["NVDA"]
+    tickers = ["PRSO"]
     plot = True
     ticker_plot = tickers[0]
-    timeframe = "1d"
+    timeframe = "30m"
     result = stock_load_process(
         tickers=tickers,
-        start_date="2026-01-31",
-        end_date="2026-02-07",
+        start_date="2026-01-06",
+        end_date="2026-03-06",
+        data_type="minute_aggs_v1",
         timeframe=timeframe,
-        use_cache=True,
+        use_cache=False,
         skip_low_volume=False,
+        full_hour=True,
     )
 
     print(result.collect())

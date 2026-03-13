@@ -814,8 +814,10 @@ class NewsWorker:
         - Live mode: current time
         - Replay mode: get current replay time from latest market snapshot data
         """
+        from jerry_trader import clock
+
         if self.run_mode == "live":
-            return datetime.now(ZoneInfo("America/New_York")).replace(microsecond=0)
+            return clock.now_datetime().replace(microsecond=0)
 
         # Replay mode: get current time from latest market snapshot data
         try:

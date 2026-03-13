@@ -1,11 +1,10 @@
 """
-GridTrader Backend Starter
+JerryTrader Backend Starter
 
-Starts selected backend services for GridTrader based on working machine:
-SnapshotProcessor, StaticDataWorker, GridTrader BFF.
+Starts selected backend services for JerryTrader based on working machine:
+SnapshotProcessor, StaticDataWorker, JerryTrader BFF.
 StateEngine.
-NewsWorker, NewsProcessor.
-
+NewsWorker, NewsProcessor.AgentBFF (News Processor Results).
 Usage:
     # Start with machine config
     python -m jerry_trader.backend_starter --machine wsl2
@@ -21,7 +20,6 @@ Note: Ensure Redis and InfluxDB are running before starting.
 
 import argparse
 import asyncio
-import copy
 import logging
 import os
 import signal
@@ -31,7 +29,6 @@ from datetime import datetime
 from datetime import time as dtime
 from pathlib import Path
 from threading import Thread
-from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
 
 import exchange_calendars as xcals
@@ -39,260 +36,21 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-import yaml
-
+from jerry_trader.utils.config_builder import (
+    DEFAULT_CONFIG_PATH,
+    build_runtime_config,
+    load_yaml_config,
+    parse_override_args,
+)
 from jerry_trader.utils.logger import setup_logger
-from jerry_trader.utils.paths import PROJECT_ROOT
 from jerry_trader.utils.session import make_session_id
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.INFO)
-DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 
 
-def load_yaml_config(config_path: Path = DEFAULT_CONFIG_PATH) -> dict:
-    """Load YAML configuration file."""
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
-
-
-def deep_merge(base: dict, override: dict) -> dict:
-    """Deep merge override into base dict. Override values take precedence."""
-    result = copy.deepcopy(base)
-    for key, value in override.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-            result[key] = deep_merge(result[key], value)
-        else:
-            result[key] = value
-    return result
-
-
-def set_nested_value(d: dict, key_path: str, value: Any) -> None:
+class JerryTraderBackendStarter:
     """
-    Set a nested value in a dict using dot notation.
-    e.g., set_nested_value(d, "llm.models.deepseek.thinking_mode", True)
-    """
-    keys = key_path.split(".")
-    current = d
-    for key in keys[:-1]:
-        if key not in current:
-            current[key] = {}
-        current = current[key]
-
-    # Type coercion for common cases
-    final_key = keys[-1]
-    if isinstance(value, str):
-        # Convert string to appropriate type
-        if value.lower() == "true":
-            value = True
-        elif value.lower() == "false":
-            value = False
-        elif value.lower() == "null" or value.lower() == "none":
-            value = None
-        else:
-            try:
-                value = int(value)
-            except ValueError:
-                try:
-                    value = float(value)
-                except ValueError:
-                    pass  # Keep as string
-
-    current[final_key] = value
-
-
-def parse_override_args(unknown_args: list) -> Dict[str, Any]:
-    """
-    Parse unknown args as config overrides.
-    Supports: --key.subkey.subsubkey value or --key.subkey=value
-    """
-    overrides = {}
-    i = 0
-    while i < len(unknown_args):
-        arg = unknown_args[i]
-        if arg.startswith("--"):
-            key = arg[2:]  # Remove --
-
-            if "=" in key:
-                # Handle --key=value format
-                key, value = key.split("=", 1)
-                overrides[key] = value
-            elif i + 1 < len(unknown_args) and not unknown_args[i + 1].startswith("--"):
-                # Handle --key value format
-                overrides[key] = unknown_args[i + 1]
-                i += 1
-            else:
-                # Flag without value, treat as True
-                overrides[key] = True
-        i += 1
-    return overrides
-
-
-def build_runtime_config(
-    yaml_cfg: dict,
-    machine: str,
-    overrides: Dict[str, Any],
-) -> dict:
-    """
-    Build runtime configuration by merging:
-    1. Defaults from YAML
-    2. Machine-specific config
-    3. CLI overrides
-
-    Overrides can use dot notation:
-    - "replay_date" or "defaults.replay_date" -> sets replay_date
-    - "llm.active_model" -> sets llm.active_model
-    - "roles.GridTraderBFF.port" -> sets role-specific param
-
-    Database references use "db-name@MACHINE" format:
-    - "redis-b@OLDMAN" -> resolves host from OLDMAN_IP env var
-    - "redis-b" -> defaults to LOCAL (127.0.0.1)
-    """
-    if machine not in yaml_cfg.get("machines", {}):
-        available = list(yaml_cfg.get("machines", {}).keys())
-        raise ValueError(f"Unknown machine '{machine}'. Available: {available}")
-
-    machine_cfg = yaml_cfg["machines"][machine]
-
-    # Start with defaults (these become top-level in runtime config)
-    runtime = copy.deepcopy(yaml_cfg.get("defaults", {}))
-
-    # Add machine-level limit (market_open | market_close | null)
-    runtime["limit"] = machine_cfg.get("limit", None)
-
-    # Add LLM config
-    runtime["llm"] = copy.deepcopy(yaml_cfg.get("llm", {}))
-
-    # Add enabled roles with their config, resolving database references
-    runtime["roles"] = {}
-    for role_name, role_cfg in machine_cfg.get("roles", {}).items():
-        if role_cfg.get("enabled", True):
-            resolved_cfg = copy.deepcopy(role_cfg)
-
-            # Resolve database references (redis, postgres, influxdb)
-            for db_type in ["redis", "postgres", "influxdb"]:
-                db_ref = role_cfg.get(db_type)
-                if db_ref and isinstance(db_ref, str):
-                    resolved_cfg[db_type] = _resolve_db_reference(
-                        yaml_cfg, db_type, db_ref, role_name
-                    )
-
-            runtime["roles"][role_name] = resolved_cfg
-
-    # Apply CLI overrides using dot notation
-    # Support both "replay_date" and "defaults.replay_date" for convenience
-    for key_path, value in overrides.items():
-        # Strip "defaults." prefix if present (for convenience)
-        if key_path.startswith("defaults."):
-            key_path = key_path[9:]  # Remove "defaults."
-        set_nested_value(runtime, key_path, value)
-
-    # Normalize date fields to strings (YAML parses YYYYMMDD as int)
-    _normalize_date_fields(runtime)
-
-    return runtime
-
-
-def _resolve_db_reference(
-    yaml_cfg: dict, db_type: str, db_ref: str, role_name: str
-) -> Optional[dict]:
-    """
-    Resolve database reference string to actual config.
-
-    Format: "db-name@MACHINE" or "db-name" (defaults to LOCAL)
-
-    Examples:
-        "redis-b@OLDMAN" -> {host: env(OLDMAN_IP), port: 6379, db: 0}
-        "redis-b" -> {host: "127.0.0.1", port: 6379, db: 0}
-        "postgres-a@WSL2" -> {host: ..., port: 5432, database: ..., url: "postgresql://..."}
-    """
-    # Parse "db-name@MACHINE" format
-    if "@" in db_ref:
-        db_name, machine_name = db_ref.rsplit("@", 1)
-    else:
-        db_name = db_ref
-        machine_name = "LOCAL"
-
-    # Get database template from databases section
-    databases = yaml_cfg.get("databases", {})
-    db_configs = databases.get(db_type, {})
-
-    if db_name not in db_configs:
-        logger.warning(
-            f"{db_type.capitalize()} config '{db_name}' not found for role {role_name}. "
-            f"Available: {list(db_configs.keys())}"
-        )
-        return None
-
-    # Copy database template (handle None/empty entries in YAML)
-    template = db_configs[db_name]
-    resolved = copy.deepcopy(template) if template is not None else {}
-
-    # Resolve host from network section
-    network = yaml_cfg.get("network", {})
-    if machine_name not in network:
-        logger.warning(
-            f"Machine '{machine_name}' not found in network section for {role_name}.{db_type}. "
-            f"Available: {list(network.keys())}"
-        )
-        return None
-
-    host_env_var = network[machine_name]
-
-    if host_env_var is None:
-        # LOCAL = 127.0.0.1
-        resolved["host"] = "127.0.0.1"
-    else:
-        # Resolve from environment variable
-        host_value = os.getenv(host_env_var)
-        if host_value:
-            resolved["host"] = host_value
-        else:
-            logger.warning(
-                f"Environment variable '{host_env_var}' not set for {role_name}.{db_type}. "
-                f"Using env var name as placeholder."
-            )
-            # Keep env var name as placeholder for debugging
-            resolved["host"] = f"${{{host_env_var}}}"
-
-    # For influxdb, resolve the URL env var based on machine
-    if db_type == "influxdb":
-        resolved["influx_url_env"] = f"{machine_name}_INFLUXDB_URL"
-
-    # For postgres, resolve the URL env var based on machine
-    if db_type == "postgres":
-        database_url_env = f"{machine_name}_DATABASE_URL"
-        resolved["database_url_env"] = database_url_env
-        # Also resolve the actual URL for convenience
-        resolved["url"] = os.getenv(database_url_env)
-
-    return resolved
-
-
-def _normalize_date_fields(config: dict) -> None:
-    """
-    Convert date fields from int to string format.
-    YAML interprets values like 20260115 as integers, but we need them as strings.
-    """
-    date_fields = ["replay_date", "load_history", "start_from", "rollback_to"]
-
-    for field in date_fields:
-        if field in config and config[field] is not None:
-            config[field] = str(config[field])
-
-    # Also check in roles for role-specific date fields
-    if "roles" in config:
-        for role_name, role_cfg in config["roles"].items():
-            if isinstance(role_cfg, dict):
-                for field in date_fields:
-                    if field in role_cfg and role_cfg[field] is not None:
-                        role_cfg[field] = str(role_cfg[field])
-
-
-class GridTraderBackendStarter:
-    """
-    Manages and starts backend services for GridTrader based on machine roles.
+    Manages and starts backend services for JerryTrader based on machine roles.
 
     Services (started based on machine config):
     - SnapshotProcessor: Receives data, processes, stores to InfluxDB and Redis
@@ -300,7 +58,7 @@ class GridTraderBackendStarter:
     - StaticDataWorker: Fetches static data (fundamentals, float) for subscribed tickers
     - NewsWorker: Fetches and caches news data for subscribed tickers
     - NewsProcessor: Processes news with LLM
-    - GridTraderBFF: Backend For Frontend (FastAPI + WebSocket server)
+    - JerryTraderBFF: Backend For Frontend (FastAPI + WebSocket server)    - AgentBFF: News Processor Results BFF (separate machine support)
     """
 
     def __init__(self, config: dict):
@@ -315,6 +73,7 @@ class GridTraderBackendStarter:
 
         # Extract common params from config
         self.replay_date = config.get("replay_date")
+        self.replay_time = config.get("replay_time")  # HHMMSS (optional)
         self.suffix_id = config.get("suffix_id")
         self.load_history = config.get("load_history")
         self.limit = config.get("limit")  # market_open | market_close | None
@@ -338,8 +97,72 @@ class GridTraderBackendStarter:
         self.tz = ZoneInfo("America/New_York")
         self.calendar = xcals.get_calendar("XNYS")
 
+        # Initialize clock *before* services — synced-replayer needs
+        # the ReplayClock to exist so create_tick_replayer() can read
+        # data_start_ts_ns and speed from it.
+        self._init_clock()
+
         # Initialize only enabled services based on roles
         self._init_services()
+
+    def _init_clock(self):
+        """Initialize the global clock (replay or live mode).
+
+        Must run before ``_init_services()`` because the synced-replayer
+        path calls ``clock.create_tick_replayer()`` which requires an
+        active ``ReplayClock``.
+        """
+        from jerry_trader import clock
+
+        if self.replay_date:
+            # Build replay start timestamp from replay_date (YYYYMMDD) + replay_time (HHMMSS).
+            # Priority for start time:
+            #   1. defaults.replay_time (HHMMSS)  — CLI or config.yaml
+            #   2. Replayer role's start_from (HH:MM)
+            #   3. 04:00:00 ET (premarket open)
+            rd = str(self.replay_date)
+
+            if len(rd) != 8 or not rd.isdigit():
+                raise ValueError(f"replay_date must be YYYYMMDD, got: {rd!r}")
+
+            year, month, day = int(rd[:4]), int(rd[4:6]), int(rd[6:8])
+
+            rt = str(self.replay_time).zfill(6) if self.replay_time else None
+            if rt and len(rt) == 6 and rt.isdigit():
+                # replay_time = HHMMSS
+                hour, minute, second = int(rt[:2]), int(rt[2:4]), int(rt[4:6])
+            elif rt and len(rt) == 4 and rt.isdigit():
+                # replay_time = HHMM
+                hour, minute, second = int(rt[:2]), int(rt[2:4]), 0
+            else:
+                second = 0
+                # Fallback: Replayer role's start_from (HH:MM)
+                start_time_str = None
+                if "Replayer" in self.roles:
+                    start_time_str = self.roles["Replayer"].get("start_from")
+                if start_time_str:
+                    parts = start_time_str.split(":")
+                    hour, minute = int(parts[0]), int(parts[1])
+                else:
+                    hour, minute = 4, 0  # premarket open
+
+            replay_start_dt = datetime(
+                year, month, day, hour, minute, second, tzinfo=self.tz
+            )
+            data_start_ts_ns = int(replay_start_dt.timestamp() * 1_000_000_000)
+
+            replay_speed = 1.0
+            if "Replayer" in self.roles:
+                replay_speed = self.roles["Replayer"].get("speed", 1.0)
+
+            clock.init_replay(data_start_ts_ns, speed=replay_speed)
+            logger.info(
+                f"🕐 ReplayClock initialized: {replay_start_dt.strftime('%Y-%m-%d %H:%M')} ET, "
+                f"speed={replay_speed}x"
+            )
+        else:
+            clock.set_live_mode()
+            logger.info("🕐 Clock: live mode (time.time)")
 
     def _init_services(self):
         """Initialize backend services based on enabled roles."""
@@ -347,23 +170,23 @@ class GridTraderBackendStarter:
         logger.info(f"Enabled roles: {list(self.roles.keys())}")
 
         # Lazy imports - only import what we need
-        if "GridTraderBFF" in self.roles:
-            from jerry_trader.BackendForFrontend.bff import GridTraderBFF
+        if "JerryTraderBFF" in self.roles:
+            from jerry_trader.BackendForFrontend.bff import JerryTraderBFF
 
-            role_cfg = self.roles["GridTraderBFF"]
-            self.bff = GridTraderBFF(
+            role_cfg = self.roles["JerryTraderBFF"]
+            self.bff = JerryTraderBFF(
                 host=role_cfg.get("host", "localhost"),
                 port=role_cfg.get("port", 5001),
                 session_id=self.session_id,
                 redis_config=role_cfg.get("redis"),
                 influxdb_config=role_cfg.get("influxdb"),
             )
-            self._services.append(("GridTraderBFF", self.bff))
+            self._services.append(("JerryTraderBFF", self.bff))
         else:
             self.bff = None
 
         if "SnapshotProcessor" in self.roles:
-            from jerry_trader.ComputeEngine.snapshot_processor import SnapshotProcessor
+            from jerry_trader.core.snapshot.processor import SnapshotProcessor
 
             role_cfg = self.roles["SnapshotProcessor"]
             self.processor = SnapshotProcessor(
@@ -377,7 +200,7 @@ class GridTraderBackendStarter:
             self.processor = None
 
         if "StateEngine" in self.roles:
-            from jerry_trader.ComputeEngine.state_engine import StateEngine
+            from jerry_trader.core.signals.state_engine import StateEngine
 
             role_cfg = self.roles["StateEngine"]
             self.state_engine = StateEngine(
@@ -422,7 +245,7 @@ class GridTraderBackendStarter:
             self.news_worker = None
 
         if "NewsProcessor" in self.roles:
-            from jerry_trader.ComputeEngine.news_processor import NewsProcessor
+            from jerry_trader.core.news.processor import NewsProcessor
 
             role_cfg = self.roles["NewsProcessor"]
             llm_cfg = self.config.get("llm", {})
@@ -458,6 +281,32 @@ class GridTraderBackendStarter:
             )
 
             role_cfg = self.roles["Replayer"]
+
+            # If clock_redis is configured and we're in replay mode, create a
+            # RemoteClockFollower so the replayer is driven by the master
+            # ReplayClock on the other machine instead of local asyncio.sleep.
+            _remote_clock = None
+            _clock_redis_cfg = role_cfg.get("clock_redis")
+            if _clock_redis_cfg and self.replay_date:
+                import redis as _redis_lib
+
+                from jerry_trader.utils.remote_clock import RemoteClockFollower
+
+                _clock_r = _redis_lib.Redis(
+                    host=_clock_redis_cfg.get("host", "127.0.0.1"),
+                    port=_clock_redis_cfg.get("port", 6379),
+                    db=_clock_redis_cfg.get("db", 0),
+                    decode_responses=True,
+                )
+                _remote_clock = RemoteClockFollower(_clock_r, self.session_id)
+                _remote_clock.start_listening()
+                logger.info(
+                    f"RemoteClockFollower started — listening on "
+                    f"clock:heartbeat:{self.session_id} "
+                    f"(master Redis: {_clock_redis_cfg.get('host', '127.0.0.1')}:"
+                    f"{_clock_redis_cfg.get('port', 6379)})"
+                )
+
             self.replayer = MarketSnapshotReplayer(
                 replay_date=self.replay_date,
                 session_id=self.session_id,
@@ -468,6 +317,7 @@ class GridTraderBackendStarter:
                 clear=role_cfg.get("clear", False),
                 redis_config=role_cfg.get("redis"),
                 influxdb_config=role_cfg.get("influxdb"),
+                remote_clock=_remote_clock,
             )
             self._services.append(("Replayer", self.replayer))
         else:
@@ -483,7 +333,7 @@ class GridTraderBackendStarter:
         self._shared_ws_loop = None
 
         if "TickDataServer" in self.roles:
-            from jerry_trader.DataManager.tickdata_server import TickDataServer
+            from jerry_trader.BackendForFrontend.tickdata_server import TickDataServer
             from jerry_trader.DataSupply.tickDataSupply.unified_tick_manager import (
                 UnifiedTickManager,
             )
@@ -497,7 +347,52 @@ class GridTraderBackendStarter:
                 manager_type = self.roles["FactorEngine"].get("manager_type")
 
             # Create shared UnifiedTickManager
-            self._shared_ws_manager = UnifiedTickManager(provider=manager_type)
+            if manager_type == "synced-replayer":
+                # In-process Rust TickDataReplayer — no WebSocket hop.
+                from jerry_trader.clock import create_tick_replayer
+                from jerry_trader.config import lake_data_dir
+                from jerry_trader.DataSupply.tickDataSupply.synced_replayer_manager import (
+                    SyncedReplayerManager,
+                )
+
+                if not self.replay_date:
+                    raise ValueError(
+                        "synced-replayer requires defaults.replay_date in config"
+                    )
+
+                # Build start_time in HH:MM:SS for the Rust replayer
+                start_time_hms: str | None = None
+                if self.replay_time:
+                    t = str(self.replay_time).zfill(6)  # "080015" → "08:00:15"
+                    start_time_hms = f"{t[:2]}:{t[2:4]}:{t[4:6]}"
+                elif "Replayer" in self.roles and self.roles["Replayer"].get(
+                    "start_from"
+                ):
+                    start_time_hms = self.roles["Replayer"]["start_from"]
+
+                replayer_speed = 1.0
+                if "Replayer" in self.roles:
+                    replayer_speed = float(self.roles["Replayer"].get("speed", 1.0))
+
+                tick_replayer = create_tick_replayer(
+                    replay_date=self.replay_date,
+                    lake_data_dir=lake_data_dir,
+                    start_time=start_time_hms,
+                )
+                synced_mgr = SyncedReplayerManager(tick_replayer)
+                self._shared_ws_manager = UnifiedTickManager(
+                    provider="synced-replayer", manager=synced_mgr
+                )
+                self._tick_replayer = tick_replayer  # keep reference
+                self._preload_list = role_cfg.get("preload_tickers", [])
+                logger.info(
+                    "Created synced-replayer (in-process Rust) for date=%s",
+                    self.replay_date,
+                )
+            else:
+                self._shared_ws_manager = UnifiedTickManager(provider=manager_type)
+                self._tick_replayer = None
+                self._preload_list = []
 
             # Create shared event loop for the ws_manager
             self._shared_ws_loop = asyncio.new_event_loop()
@@ -505,6 +400,11 @@ class GridTraderBackendStarter:
                 target=self._run_shared_ws_loop, daemon=True, name="SharedWSLoop"
             )
             self._shared_ws_thread.start()
+
+            # Pre-load ticker data (Parquet) while clock is paused so
+            # the data is in memory before the frontend subscribes.
+            if self._preload_list and self._tick_replayer is not None:
+                self._preload_tickers(self._preload_list)
 
             self.tick_data_server = TickDataServer(
                 host=role_cfg.get("host", "0.0.0.0"),
@@ -521,7 +421,7 @@ class GridTraderBackendStarter:
             self.tick_data_server = None
 
         if "FactorEngine" in self.roles:
-            from jerry_trader.ComputeEngine.factor_engine import FactorManager
+            from jerry_trader.core.factors.engine import FactorManager
 
             role_cfg = self.roles["FactorEngine"]
 
@@ -545,6 +445,72 @@ class GridTraderBackendStarter:
             self._services.append(("FactorEngine", self.factor_engine))
         else:
             self.factor_engine = None
+
+        if "BarsBuilder" in self.roles:
+            from jerry_trader.DataManager.bars_builder_service import BarsBuilderService
+
+            role_cfg = self.roles["BarsBuilder"]
+
+            # If TickDataServer is also enabled, share the UnifiedTickManager
+            if self.tick_data_server is not None:
+                self.bars_builder = BarsBuilderService(
+                    session_id=self.session_id,
+                    redis_config=role_cfg.get("redis"),
+                    clickhouse_config=role_cfg.get("clickhouse"),
+                    timeframes=role_cfg.get("timeframes"),
+                    ws_manager=self.tick_data_server.manager,
+                    ws_loop=self._shared_ws_loop,
+                )
+            else:
+                # Standalone BarsBuilder with its own manager
+                self.bars_builder = BarsBuilderService(
+                    session_id=self.session_id,
+                    manager_type=role_cfg.get("manager_type"),
+                    redis_config=role_cfg.get("redis"),
+                    clickhouse_config=role_cfg.get("clickhouse"),
+                    timeframes=role_cfg.get("timeframes"),
+                )
+            self._services.append(("BarsBuilder", self.bars_builder))
+        else:
+            self.bars_builder = None
+
+        # Wire BarsBuilder reference into TickDataServer so it can wait
+        # for trades_backfill completion before serving bar REST responses.
+        if self.tick_data_server is not None and self.bars_builder is not None:
+            self.tick_data_server._bars_builder = self.bars_builder
+
+        # ChartDataBFF role is deprecated - tickdata_server now handles all chart BFF functionality
+        # (tick data WebSocket + chart bars REST API on port 8000)
+        # if "ChartDataBFF" in self.roles:
+        #     from jerry_trader.BackendForFrontend.chart_bff import ChartDataBFF
+        #
+        #     role_cfg = self.roles["ChartDataBFF"]
+        #     self.chart_data_bff = ChartDataBFF(
+        #         host=role_cfg.get("host", "0.0.0.0"),
+        #         port=role_cfg.get("port", 5002),
+        #         session_id=self.session_id,
+        #         redis_config=role_cfg.get("redis"),
+        #         clickhouse_config=role_cfg.get("clickhouse"),
+        #         bars_builder=self.bars_builder,
+        #     )
+        #     self._services.append(("ChartDataBFF", self.chart_data_bff))
+        # else:
+        #     self.chart_data_bff = None
+        self.chart_data_bff = None
+
+        if "AgentBFF" in self.roles:
+            from jerry_trader.BackendForFrontend.openclaw import AgentBFF
+
+            role_cfg = self.roles["AgentBFF"]
+            self.agent_bff = AgentBFF(
+                host=role_cfg.get("host", "0.0.0.0"),
+                port=role_cfg.get("port", 5003),
+                session_id=self.session_id,
+                redis_config=role_cfg.get("redis"),
+            )
+            self._services.append(("AgentBFF", self.agent_bff))
+        else:
+            self.agent_bff = None
 
         logger.info(f"Initialized {len(self._services)} services")
 
@@ -621,6 +587,10 @@ class GridTraderBackendStarter:
             self.factor_engine.stop()
             logger.info("FactorEngine stopped")
 
+        if self.bars_builder:
+            self.bars_builder.stop()
+            logger.info("BarsBuilder stopped")
+
         if self.tick_data_server:
             self.tick_data_server.cleanup()
             logger.info("TickDataServer stopped")
@@ -634,6 +604,9 @@ class GridTraderBackendStarter:
 
         if self.bff:
             self.bff.cleanup()
+
+        if self.agent_bff:
+            self.agent_bff.cleanup()
 
         logger.info("All services cleaned up")
 
@@ -655,6 +628,35 @@ class GridTraderBackendStarter:
                 self._shared_ws_loop.shutdown_asyncgens()
             )
             self._shared_ws_loop.close()
+
+    # ── Preload ──────────────────────────────────────────────────────
+
+    _PRELOAD_CLIENT = "__preload__"
+
+    def _preload_tickers(self, tickers: list[str]) -> None:
+        """Batch-preload Parquet data for *tickers* with the clock paused.
+
+        Uses ``batch_preload`` to scan each Parquet file only once for
+        all tickers (instead of N separate scans).  The clock is paused
+        during loading so virtual time does not advance.
+        """
+        import time as _time
+
+        from jerry_trader import clock as clock_mod
+
+        logger.info("Pre-loading %d ticker(s): %s", len(tickers), tickers)
+        t0 = _time.monotonic()
+
+        # Pause the clock so virtual time doesn't drift during I/O.
+        clock_mod.pause()
+        try:
+            # Batch-load: 1 Parquet scan per data type for ALL tickers.
+            self._tick_replayer.batch_preload(tickers, ["Q", "T"])
+        finally:
+            clock_mod.resume()
+
+        elapsed = _time.monotonic() - t0
+        logger.info("Pre-load complete: %d ticker(s) in %.1fs", len(tickers), elapsed)
 
     def _start_async_worker_in_thread(self, worker, name: str):
         """Start an async worker in a separate thread with its own event loop."""
@@ -678,7 +680,7 @@ class GridTraderBackendStarter:
     def run(self):
         """Run backend services based on enabled roles."""
         logger.info("=" * 70)
-        logger.info("Starting GridTrader Backend")
+        logger.info("Starting JerryTrader Backend")
         logger.info(f"Enabled roles: {list(self.roles.keys())}")
         logger.info(f"Limit: {self.limit or 'None (never auto-stop)'}")
         logger.info("=" * 70)
@@ -692,6 +694,36 @@ class GridTraderBackendStarter:
         logger.info(f"Session: {self.session_id}")
 
         self._running = True
+
+        # Start clock heartbeat publisher if in replay mode.
+        # Remote machines running RemoteClockFollower subscribe to this channel
+        # so their service timing stays in lock-step with the virtual clock here.
+        if self.replay_date:
+            _hb_redis_cfg = None
+            for _role in (
+                "TickDataServer",
+                "BarsBuilder",
+                "ChartDataBFF",
+                "FactorEngine",
+            ):
+                if _role in self.roles and self.roles[_role].get("redis"):
+                    _hb_redis_cfg = self.roles[_role]["redis"]
+                    break
+            if _hb_redis_cfg:
+                import redis as _redis_lib
+
+                from jerry_trader import clock as _clock_mod
+
+                _hb_r = _redis_lib.Redis(
+                    host=_hb_redis_cfg.get("host", "127.0.0.1"),
+                    port=_hb_redis_cfg.get("port", 6379),
+                    db=_hb_redis_cfg.get("db", 0),
+                )
+                _clock_mod.start_heartbeat_publisher(_hb_r, self.session_id)
+                logger.info(
+                    f"⏱ Clock heartbeat publisher started (100ms) → "
+                    f"clock:heartbeat:{self.session_id}"
+                )
 
         # Start limit watchdog if a limit is configured (and not in replay mode)
         if self.limit and not self.replay_date:
@@ -757,6 +789,11 @@ class GridTraderBackendStarter:
             self.factor_engine.start()
             logger.info("FactorEngine started")
 
+        # Start BarsBuilder if enabled (it creates its own threads)
+        if self.bars_builder:
+            self.bars_builder.start()
+            logger.info("BarsBuilder started")
+
         # Start TickDataServer if enabled
         # Runs in a separate thread since it's a blocking uvicorn server
         if self.tick_data_server:
@@ -775,12 +812,44 @@ class GridTraderBackendStarter:
             self._threads.append(tick_thread)
             logger.info("TickDataServer started")
 
+        # ChartDataBFF is deprecated - tickdata_server now handles all chart BFF functionality
+        # # Start ChartDataBFF if enabled
+        # # Runs in a separate thread since it's a blocking uvicorn server
+        # if self.chart_data_bff:
+        #     chart_bff_cfg = self.roles.get("ChartDataBFF", {})
+        #     host = chart_bff_cfg.get("host", "0.0.0.0")
+        #     port = chart_bff_cfg.get("port", 5002)
+        #     logger.info(f"Starting Chart Data BFF on {host}:{port}")
+        #
+        #     def run_chart_bff():
+        #         self.chart_data_bff.run()
+        #
+        #     chart_bff_thread = Thread(
+        #         target=run_chart_bff, daemon=True, name="ChartDataBFF"
+        #     )
+        #     chart_bff_thread.start()
+        #     self._threads.append(chart_bff_thread)
+        #     logger.info("ChartDataBFF started")
+
+        # Start AgentBFF in separate thread if enabled
+        if self.agent_bff:
+
+            def run_agent_bff():
+                self.agent_bff.run()
+
+            agent_bff_thread = Thread(
+                target=run_agent_bff, daemon=True, name="AgentBFF"
+            )
+            agent_bff_thread.start()
+            self._threads.append(agent_bff_thread)
+            logger.info("AgentBFF started")
+
         # Run BFF in the main thread (blocking) if enabled
         if self.bff:
-            bff_cfg = self.roles.get("GridTraderBFF", {})
+            bff_cfg = self.roles.get("JerryTraderBFF", {})
             host = bff_cfg.get("host", "localhost")
             port = bff_cfg.get("port", 5001)
-            logger.info(f"Starting GridTrader BFF on {host}:{port}")
+            logger.info(f"Starting JerryTrader BFF on {host}:{port}")
             self.bff.run()
         else:
             # If no BFF, just keep running
@@ -790,9 +859,9 @@ class GridTraderBackendStarter:
 
 
 def main():
-    """Main entry point for GridTrader backend."""
+    """Main entry point for JerryTrader backend."""
     parser = argparse.ArgumentParser(
-        description="GridTrader Backend Starter",
+        description="JerryTrader Backend Starter",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -807,13 +876,13 @@ Examples:
     python -m jerry_trader.backend_starter --machine mibuntu --llm.models.deepseek.thinking_mode true
 
     # Override role-specific settings
-    python -m jerry_trader.backend_starter --machine wsl2 --roles.GridTraderBFF.port 8080
+    python -m jerry_trader.backend_starter --machine wsl2 --roles.JerryTraderBFF.port 8080
 
     # Combine multiple overrides
     python -m jerry_trader.backend_starter --machine wsl2 \\
         --replay_date 20260115 \\
         --suffix_id test \\
-        --roles.GridTraderBFF.host 0.0.0.0
+        --roles.JerryTraderBFF.host 0.0.0.0
 
     # Dry run to see resolved config
     python -m jerry_trader.backend_starter --machine wsl2 --dry-run
@@ -881,12 +950,12 @@ Config override paths (dot notation):
         sys.exit(0)
 
     # Create and run backend with resolved config
-    starter = GridTraderBackendStarter(config=runtime_config)
+    starter = JerryTraderBackendStarter(config=runtime_config)
 
     try:
         starter.run()
     except Exception as e:
-        logger.error(f"GridTrader backend error: {e}")
+        logger.error(f"JerryTrader backend error: {e}")
         import traceback
 
         traceback.print_exc()

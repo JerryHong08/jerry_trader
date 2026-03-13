@@ -57,6 +57,11 @@ def news_article_stream(session_id: str) -> str:
     return f"news_article_stream:{session_id}"
 
 
+def news_processor_results_stream(session_id: str) -> str:
+    """News processor classification results → BFF → Frontend NewsRoom."""
+    return f"news_processor_results:{session_id}"
+
+
 def factor_tasks_stream(session_id: str) -> str:
     """Factor computation task queue → FactorEngine."""
     return f"factor_tasks:{session_id}"
@@ -65,6 +70,18 @@ def factor_tasks_stream(session_id: str) -> str:
 def signal_events_stream(session_id: str) -> str:
     """State-change signal events (ACTIVE / QUIET) → BFF, replay."""
     return f"signal_events:{session_id}"
+
+
+def clock_heartbeat_channel(session_id: str) -> str:
+    """Redis pub/sub channel for ReplayClock heartbeats.
+
+    Published by the clock-master machine at ~100 ms intervals.
+    Subscribed by RemoteClockFollower instances on remote machines so
+    they can interpolate virtual time without local drift.
+
+    Payload JSON: {"ts_ns": int, "speed": float, "is_paused": bool, "wall_ns": int}
+    """
+    return f"clock:heartbeat:{session_id}"
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -213,6 +230,7 @@ ALL_STREAM_BUILDERS = [
     movers_state_stream,
     static_update_stream,
     news_article_stream,
+    news_processor_results_stream,
     factor_tasks_stream,
     signal_events_stream,
 ]

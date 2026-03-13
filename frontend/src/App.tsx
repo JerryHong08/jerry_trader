@@ -1,14 +1,16 @@
 import React, { useState, useEffect } from 'react';
-import { Plus } from 'lucide-react';
+import { Plus, Undo2, Redo2, ZoomIn, ZoomOut, HelpCircle, Lock, Unlock } from 'lucide-react';
 import { GridContainer } from './components/GridContainer';
 import { ModuleSidebar } from './components/ModuleSidebar';
 import { SettingsMenu } from './components/SettingsMenu';
+import { HelpPanel } from './components/HelpPanel';
 import { TimelineClock } from './components/TimelineClock';
 import { moduleRegistry } from './config/moduleRegistry';
-import { LAYOUT_TEMPLATES } from './config/layoutTemplates';
+import { LAYOUT_TEMPLATES, DEFAULT_TEMPLATE_ID } from './config/layoutTemplates';
 import { useIbbotStore } from './stores/ibbotStore';
 import { useTickDataStore } from './stores/tickDataStore';
 import { useMarketDataStore } from './stores/marketDataStore';
+import { useLayoutStore } from './stores/layoutStore';
 import { PinDialog } from './components/PinDialog';
 import {
   IS_DEMO,
@@ -139,45 +141,94 @@ const findAutoPosition = (
 };
 
 export default function App() {
-  // Load from localStorage or use default layout
-  const loadInitialLayout = (): GridItemConfig[] => {
-    const saved = localStorage.getItem('trading-system-layout');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        // parsed.map((item: GridItemConfig);
-        return parsed;
-      } catch (e) {
-        console.error('Failed to parse saved layout:', e);
-      }
-    }
-    return LAYOUT_TEMPLATES['minimal layout'].layout;
-  };
+  // Use layout store for undo/redo functionality
+  const {
+    items,
+    setItems,
+    addItem: addStoreItem,
+    removeItem: removeStoreItem,
+    updateItem: updateStoreItem,
+    undo,
+    redo,
+    canUndo,
+    canRedo,
+    loadFromStorage
+  } = useLayoutStore();
 
-  const loadInitialGap = (): number => {
+  const [gridGap, setGridGap] = useState(() => {
     const saved = localStorage.getItem('trading-system-gap');
-    if (saved) {
-      return Number(saved);
-    }
-    return DEFAULT_GRID_GAP;
-  };
-
-  const [items, setItems] = useState<GridItemConfig[]>(loadInitialLayout);
-  const [gridGap, setGridGap] = useState(loadInitialGap);
+    return saved ? Number(saved) : DEFAULT_GRID_GAP;
+  });
+  const [zoom, setZoom] = useState(() => {
+    const saved = localStorage.getItem('trading-system-zoom');
+    return saved ? Number(saved) : 1.0;
+  });
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [isLocked, setIsLocked] = useState(false);
   const [currentTemplateId, setCurrentTemplateId] = useState<string>(() => {
     return localStorage.getItem('trading-system-template') || '';
   });
   const [selectedSymbols, setSelectedSymbols] = useState<Record<string, string>>({});
 
-  // Auto-save to localStorage whenever items or gap changes
+  // Load initial layout from localStorage on mount
   useEffect(() => {
-    localStorage.setItem('trading-system-layout', JSON.stringify(items));
-  }, [items]);
+    loadFromStorage();
 
+    // If no saved layout, load default template
+    if (items.length === 0) {
+      const defaultTemplate = LAYOUT_TEMPLATES[DEFAULT_TEMPLATE_ID];
+      if (defaultTemplate) {
+        setItems(defaultTemplate.layout);
+      }
+    }
+  }, []);
+
+  // Auto-save gap to localStorage
   useEffect(() => {
     localStorage.setItem('trading-system-gap', String(gridGap));
   }, [gridGap]);
+
+  // Auto-save zoom to localStorage
+  useEffect(() => {
+    localStorage.setItem('trading-system-zoom', String(zoom));
+  }, [zoom]);
+
+  // Keyboard shortcuts for undo/redo
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Undo: Ctrl+Z (Windows/Linux) or Cmd+Z (Mac)
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        if (canUndo()) {
+          undo();
+        }
+      }
+      // Redo: Ctrl+Y (Windows/Linux) or Cmd+Shift+Z (Mac)
+      else if (((e.ctrlKey || e.metaKey) && e.key === 'y') ||
+               ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'z')) {
+        e.preventDefault();
+        if (canRedo()) {
+          redo();
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [undo, redo, canUndo, canRedo]);
+
+  // Keyboard shortcut: Ctrl+/ to toggle help panel
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === '/') {
+        e.preventDefault();
+        setHelpOpen(v => !v);
+      }
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, []);
 
   // Initialize backend stores on mount (or seed mock data in demo mode)
   useEffect(() => {
@@ -230,18 +281,16 @@ export default function App() {
       size: defaultSize,
       syncGroup: null,
     };
-    setItems([...items, newItem]);
+    addStoreItem(newItem);
     setSidebarOpen(false);
   };
 
   const removeModule = (id: string) => {
-    setItems(items.filter(item => item.id !== id));
+    removeStoreItem(id);
   };
 
   const updateItem = (id: string, updates: Partial<GridItemConfig>) => {
-    setItems(items.map(item =>
-      item.id === id ? { ...item, ...updates } : item
-    ));
+    updateStoreItem(id, updates);
   };
 
   const handleSymbolSelect = (syncGroup: string | null, symbol: string) => {
@@ -282,6 +331,9 @@ export default function App() {
       {/* Privacy PIN dialog (global) */}
       <PinDialog />
 
+      {/* Help Panel */}
+      <HelpPanel open={helpOpen} onClose={() => setHelpOpen(false)} />
+
       {/* Sidebar */}
       <ModuleSidebar
         isOpen={sidebarOpen}
@@ -292,11 +344,86 @@ export default function App() {
       {/* Main Grid Area */}
       <div className="flex-1 flex flex-col overflow-hidden">
         <div className="p-4 border-b border-zinc-800 flex items-center justify-between">
-          <h1 className="text-xl">Trading System</h1>
+          <div className="flex items-center gap-3">
+            <h1 className="text-xl">Trading System</h1>
+            {/* Undo/Redo Buttons */}
+            <div className="flex items-center gap-1 ml-2">
+              <button
+                onClick={undo}
+                disabled={!canUndo()}
+                className={`p-2 transition-colors ${
+                  canUndo()
+                    ? 'hover:bg-zinc-800 text-white'
+                    : 'text-zinc-600 cursor-not-allowed'
+                }`}
+                title="Undo (Ctrl+Z)"
+              >
+                <Undo2 className="w-4 h-4" />
+              </button>
+              <button
+                onClick={redo}
+                disabled={!canRedo()}
+                className={`p-2 transition-colors ${
+                  canRedo()
+                    ? 'hover:bg-zinc-800 text-white'
+                    : 'text-zinc-600 cursor-not-allowed'
+                }`}
+                title="Redo (Ctrl+Y)"
+              >
+                <Redo2 className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
           <div className="absolute left-1/2 -translate-x-1/2">
             <TimelineClock />
           </div>
           <div className="flex items-center gap-4">
+            {/* Zoom Controls */}
+            <div className="flex items-center gap-2 px-3 py-1 bg-zinc-800 rounded">
+              <button
+                onClick={() => setIsLocked(v => !v)}
+                className={`p-1 transition-colors rounded ${
+                  isLocked ? 'text-amber-400 hover:bg-zinc-700' : 'text-zinc-500 hover:bg-zinc-700 hover:text-zinc-300'
+                }`}
+                title={isLocked ? 'Zoom Locked (L to toggle)' : 'Zoom Unlocked (L to toggle)'}
+              >
+                {isLocked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
+              </button>
+              <button
+                onClick={() => setZoom(Math.max(0.25, +(zoom - 0.1).toFixed(2)))}
+                disabled={zoom <= 0.25}
+                className={`p-1 transition-colors ${
+                  zoom > 0.25 ? 'hover:bg-zinc-700 text-white' : 'text-zinc-600 cursor-not-allowed'
+                }`}
+                title="Zoom Out"
+              >
+                <ZoomOut className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => setZoom(1.0)}
+                className="text-sm text-zinc-400 min-w-[3rem] text-center hover:text-white transition-colors"
+                title="Reset to 100%"
+              >
+                {Math.round(zoom * 100)}%
+              </button>
+              <button
+                onClick={() => setZoom(Math.min(3.0, +(zoom + 0.1).toFixed(2)))}
+                disabled={zoom >= 3.0}
+                className={`p-1 transition-colors ${
+                  zoom < 3.0 ? 'hover:bg-zinc-700 text-white' : 'text-zinc-600 cursor-not-allowed'
+                }`}
+                title="Zoom In"
+              >
+                <ZoomIn className="w-4 h-4" />
+              </button>
+            </div>
+            <button
+              onClick={() => setHelpOpen(v => !v)}
+              className="p-2 hover:bg-zinc-700 transition-colors rounded"
+              title="Help (Ctrl+/)"
+            >
+              <HelpCircle className="w-4 h-4" />
+            </button>
             <SettingsMenu
               gridGap={gridGap}
               onGridGapChange={setGridGap}
@@ -323,6 +450,10 @@ export default function App() {
           onSymbolSelect={handleSymbolSelect}
           onSyncGroupChange={handleSyncGroupChange}
           gridGap={gridGap}
+          zoom={zoom}
+          onZoomChange={setZoom}
+          isLocked={isLocked}
+          onLockChange={setIsLocked}
         />
       </div>
     </div>

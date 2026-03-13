@@ -38,6 +38,7 @@ from jerry_trader.utils.redis_keys import (
     rollback_session_streams,
     state_cursor,
 )
+from jerry_trader.utils.remote_clock import RemoteClockFollower
 from jerry_trader.utils.session import make_session_id
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
@@ -88,6 +89,7 @@ class MarketSnapshotReplayer:
         session_id: Optional[str] = None,
         redis_config: Optional[Dict[str, Any]] = None,
         influxdb_config: Optional[Dict[str, Any]] = None,
+        remote_clock: Optional[RemoteClockFollower] = None,
     ):
         """
         Initialize the market snapshot replayer.
@@ -111,6 +113,10 @@ class MarketSnapshotReplayer:
         self.start_from = start_from
         self.rollback_to = rollback_to
         self.clear = clear
+        # RemoteClockFollower from the clock-master machine (optional).
+        # When set, timing is driven by the master's virtual clock instead of
+        # local asyncio.sleep, keeping all machines aligned.
+        self.remote_clock = remote_clock
 
         # Unified session id
         self.session_id = session_id or make_session_id(
@@ -253,15 +259,32 @@ class MarketSnapshotReplayer:
                 break
 
             if i > 0:
-                prev_timestamp = file_timestamps[i - 1][1]
-                time_diff = (file_timestamp - prev_timestamp).total_seconds()
-                adjusted_wait_time = time_diff / self.speed
-
-                if adjusted_wait_time > 0:
+                if self.remote_clock is not None:
+                    # ── Clock-follower path ──────────────────────────────────
+                    # Wait until the shared virtual clock on the master machine
+                    # has advanced to this file's real-world timestamp.
+                    # This replaces local asyncio.sleep so all machines advance
+                    # in lock-step with the master ReplayClock.
+                    target_ts_ns = int(file_timestamp.timestamp() * 1_000_000_000)
+                    while self.remote_clock.now_ns() < target_ts_ns and self._running:
+                        await asyncio.sleep(0.05)
                     logger.debug(
-                        f"Waiting {adjusted_wait_time:.2f}s (original: {time_diff:.2f}s)"
+                        f"[{file_timestamp}] remote clock reached target "
+                        f"(target_ms={target_ts_ns // 1_000_000}, "
+                        f"clock_ms={self.remote_clock.now_ms()})"
                     )
-                    await asyncio.sleep(adjusted_wait_time)
+                else:
+                    # ── Local-speed fallback ─────────────────────────────────
+                    prev_timestamp = file_timestamps[i - 1][1]
+                    time_diff = (file_timestamp - prev_timestamp).total_seconds()
+                    adjusted_wait_time = time_diff / self.speed
+
+                    if adjusted_wait_time > 0:
+                        logger.debug(
+                            f"Waiting {adjusted_wait_time:.2f}s "
+                            f"(original: {time_diff:.2f}s)"
+                        )
+                        await asyncio.sleep(adjusted_wait_time)
 
             logger.info(f"[{file_timestamp}] Reading file: {os.path.basename(file)}")
 

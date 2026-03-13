@@ -44,6 +44,7 @@ export interface ChartBarsResponse {
   from: string;
   to: string;
   error?: string;
+  requestId?: string;
 }
 
 /** Per-symbol chart state */
@@ -55,21 +56,31 @@ export interface SymbolChartState {
   error: string | null;
   source: string | null;
   lastFetchTime: number | null; // When bars were last fetched (ms)
+  requestId: string | null;     // Echoed from BFF to detect stale responses
+}
+
+/** Build the composite store key: "moduleId::TICKER" */
+export function chartStoreKey(moduleId: string, ticker: string): string {
+  return `${moduleId}::${ticker.toUpperCase()}`;
 }
 
 type ChartDataState = {
-  // Per-symbol bar data
+  // Per-instance + symbol bar data (keyed by "moduleId::TICKER")
   symbolBars: Record<string, SymbolChartState>;
 
-  // Actions
-  fetchBars: (ticker: string, timeframe: ChartTimeframe) => Promise<void>;
+  // Actions — moduleId scopes state per chart instance
+  fetchBars: (moduleId: string, ticker: string, timeframe: ChartTimeframe) => Promise<void>;
   updateFromTrade: (
+    moduleId: string,
     symbol: string,
     price: number,
     size: number,
     timestampMs: number,
   ) => void;
-  clearSymbol: (symbol: string) => void;
+  applyBarUpdate: (moduleId: string, ticker: string, timeframe: string, bar: OHLCVBar) => void;
+  /** Broadcast a bar update to ALL chart instances showing this ticker+timeframe */
+  broadcastBarUpdate: (ticker: string, timeframe: string, bar: OHLCVBar) => void;
+  clearSymbol: (moduleId: string, symbol: string) => void;
   reset: () => void;
 };
 
@@ -77,18 +88,19 @@ type ChartDataState = {
 // Config
 // ============================================================================
 
-function getBffBaseUrl(): string {
+function getChartBffBaseUrl(): string {
   const defaultHost =
     typeof window !== 'undefined' ? window.location.hostname : 'localhost';
   const url =
-    typeof import.meta !== 'undefined' && import.meta.env?.VITE_BFF_URL
-      ? (import.meta.env.VITE_BFF_URL as string)
-      : `http://${defaultHost}:5001`;
-  return url || `http://${defaultHost}:5001`;
+    typeof import.meta !== 'undefined' && import.meta.env?.VITE_CHART_BFF_URL
+      ? (import.meta.env.VITE_CHART_BFF_URL as string)
+      : `http://${defaultHost}:5002`;
+  return url || `http://${defaultHost}:5002`;
 }
 
 /** Bar duration in seconds for each timeframe */
 const TIMEFRAME_DURATION_SEC: Record<ChartTimeframe, number> = {
+  '10s': 10,
   '1m': 60,
   '5m': 300,
   '15m': 900,
@@ -102,6 +114,7 @@ const TIMEFRAME_DURATION_SEC: Record<ChartTimeframe, number> = {
 
 /** Minimum refetch interval per timeframe (ms) — prevents hammering API */
 const MIN_REFETCH_INTERVAL: Record<ChartTimeframe, number> = {
+  '10s': 10_000, // 10s
   '1m': 30_000, // 30s
   '5m': 60_000,
   '15m': 120_000,
@@ -123,28 +136,33 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
   // ========================================================================
   // Fetch historical bars
   // ========================================================================
-  fetchBars: async (ticker: string, timeframe: ChartTimeframe) => {
+  fetchBars: async (moduleId: string, ticker: string, timeframe: ChartTimeframe) => {
     const tickerUpper = ticker.toUpperCase();
-    const existing = get().symbolBars[tickerUpper];
+    const key = chartStoreKey(moduleId, tickerUpper);
+    const existing = get().symbolBars[key];
 
     // Skip if already loading
     if (existing?.loading) return;
 
-    // Skip if recently fetched for the same timeframe
+    // Skip if recently fetched for the same timeframe (unless previous fetch errored)
     if (
       existing &&
       existing.timeframe === timeframe &&
       existing.lastFetchTime &&
+      !existing.error &&
       Date.now() - existing.lastFetchTime < MIN_REFETCH_INTERVAL[timeframe]
     ) {
       return;
     }
 
     // Set loading state
+    // Generate a unique request ID so we can discard stale responses
+    const requestId = `${tickerUpper}-${timeframe}-${Date.now()}`;
+
     set((s) => ({
       symbolBars: {
         ...s.symbolBars,
-        [tickerUpper]: {
+        [key]: {
           bars: existing?.timeframe === timeframe ? existing.bars : [],
           timeframe,
           barDurationSec: TIMEFRAME_DURATION_SEC[timeframe],
@@ -152,13 +170,14 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
           error: null,
           source: existing?.source ?? null,
           lastFetchTime: existing?.lastFetchTime ?? null,
+          requestId,
         },
       },
     }));
 
     try {
-      const baseUrl = getBffBaseUrl();
-      const params = new URLSearchParams({ timeframe });
+      const baseUrl = getChartBffBaseUrl();
+      const params = new URLSearchParams({ timeframe, request_id: requestId });
       const url = `${baseUrl}/api/chart/bars/${tickerUpper}?${params}`;
 
       const res = await fetch(url);
@@ -168,15 +187,23 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
 
       const data: ChartBarsResponse = await res.json();
 
+      // Race condition guard: if another fetch for this ticker was started
+      // while we were waiting, our requestId will no longer match — discard.
+      const current = get().symbolBars[key];
+      if (current?.requestId !== requestId) {
+        return; // superseded by a newer fetch
+      }
+
       if (data.error) {
         set((s) => ({
           symbolBars: {
             ...s.symbolBars,
-            [tickerUpper]: {
-              ...s.symbolBars[tickerUpper],
+            [key]: {
+              ...s.symbolBars[key],
               loading: false,
               error: data.error ?? 'No data',
               lastFetchTime: Date.now(),
+              requestId,
             },
           },
         }));
@@ -186,7 +213,7 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
       set((s) => ({
         symbolBars: {
           ...s.symbolBars,
-          [tickerUpper]: {
+          [key]: {
             bars: data.bars,
             timeframe,
             barDurationSec: data.barDurationSec || TIMEFRAME_DURATION_SEC[timeframe],
@@ -194,6 +221,7 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
             error: null,
             source: data.source,
             lastFetchTime: Date.now(),
+            requestId,
           },
         },
       }));
@@ -214,8 +242,8 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
       set((s) => ({
         symbolBars: {
           ...s.symbolBars,
-          [tickerUpper]: {
-            ...s.symbolBars[tickerUpper],
+          [key]: {
+            ...s.symbolBars[key],
             loading: false,
             error: errMsg,
             lastFetchTime: Date.now(),
@@ -229,13 +257,15 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
   // Real-time bar update from trade tick
   // ========================================================================
   updateFromTrade: (
+    moduleId: string,
     symbol: string,
     price: number,
     size: number,
     timestampMs: number,
   ) => {
     const tickerUpper = symbol.toUpperCase();
-    const state = get().symbolBars[tickerUpper];
+    const key = chartStoreKey(moduleId, tickerUpper);
+    const state = get().symbolBars[key];
     if (!state || state.bars.length === 0 || state.loading) return;
 
     const bars = [...state.bars];
@@ -244,11 +274,11 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
     const tradeSec = Math.floor(timestampMs / 1000);
 
     // Compute the bar boundary this trade belongs to.
-    // For daily+ bars (>= 86400s), Polygon bar timestamps are NOT exact
-    // multiples of barDuration (they use market-open or date-based offsets).
-    // Use range comparison instead of floor alignment for those.
+    // For bars >= 1h (3600s), bar timestamps are session-aligned (BarBuilder)
+    // or market-open-based, NOT exact multiples of barDuration from epoch.
+    // Use range comparison against the last bar instead of floor alignment.
     let tradeBarTime: number;
-    if (barDuration >= 86400) {
+    if (barDuration >= 3600) {
       if (tradeSec >= lastBar.time && tradeSec < lastBar.time + barDuration) {
         // Trade falls within the current bar's expected range
         tradeBarTime = lastBar.time;
@@ -296,7 +326,7 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
     set((s) => ({
       symbolBars: {
         ...s.symbolBars,
-        [tickerUpper]: {
+        [key]: {
           ...state,
           bars,
         },
@@ -305,12 +335,101 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
   },
 
   // ========================================================================
+  // Server-pushed completed bar (from BarsBuilder via BFF WebSocket)
+  // ========================================================================
+  applyBarUpdate: (moduleId: string, ticker: string, timeframe: string, bar: OHLCVBar) => {
+    const tickerUpper = ticker.toUpperCase();
+    const key = chartStoreKey(moduleId, tickerUpper);
+    const state = get().symbolBars[key];
+    if (!state || state.loading) return;
+
+    // Map BarBuilder timeframe names (lowercase) to frontend convention
+    const tfMap: Record<string, string> = {
+      '10s': '10s', '1m': '1m', '5m': '5m', '15m': '15m',
+      '1h': '1h', '4h': '4h', '1d': '1D', '1w': '1W',
+    };
+    const frontendTf = tfMap[timeframe] ?? timeframe;
+
+    // Only apply if this update matches the currently displayed timeframe
+    if (state.timeframe !== frontendTf) return;
+
+    const bars = [...state.bars];
+    const lastBar = bars[bars.length - 1];
+
+    if (lastBar && bar.time === lastBar.time) {
+      // Update existing bar in place (late tick → re-emit)
+      bars[bars.length - 1] = bar;
+    } else if (!lastBar || bar.time > lastBar.time) {
+      // New completed bar — append
+      bars.push(bar);
+      if (bars.length > 2000) {
+        bars.splice(0, bars.length - 2000);
+      }
+    }
+    // else: stale bar — ignore
+
+    set((s) => ({
+      symbolBars: {
+        ...s.symbolBars,
+        [key]: {
+          ...state,
+          bars,
+        },
+      },
+    }));
+  },
+
+  // ========================================================================
+  // Broadcast bar update to ALL instances showing this ticker+timeframe
+  // (called from WebSocket handler which doesn't know about moduleIds)
+  // ========================================================================
+  broadcastBarUpdate: (ticker: string, timeframe: string, bar: OHLCVBar) => {
+    const tickerUpper = ticker.toUpperCase();
+    const suffix = `::${tickerUpper}`;
+
+    // Map BarBuilder timeframe names to frontend convention
+    const tfMap: Record<string, string> = {
+      '10s': '10s', '1m': '1m', '5m': '5m', '15m': '15m',
+      '1h': '1h', '4h': '4h', '1d': '1D', '1w': '1W',
+    };
+    const frontendTf = tfMap[timeframe] ?? timeframe;
+
+    const allBars = get().symbolBars;
+    const updates: Record<string, SymbolChartState> = {};
+
+    for (const [key, state] of Object.entries(allBars)) {
+      if (!key.endsWith(suffix)) continue;
+      if (state.loading || state.timeframe !== frontendTf) continue;
+
+      const bars = [...state.bars];
+      const lastBar = bars[bars.length - 1];
+
+      if (lastBar && bar.time === lastBar.time) {
+        bars[bars.length - 1] = bar;
+      } else if (!lastBar || bar.time > lastBar.time) {
+        bars.push(bar);
+        if (bars.length > 2000) bars.splice(0, bars.length - 2000);
+      } else {
+        continue; // stale
+      }
+
+      updates[key] = { ...state, bars };
+    }
+
+    if (Object.keys(updates).length > 0) {
+      set((s) => ({
+        symbolBars: { ...s.symbolBars, ...updates },
+      }));
+    }
+  },
+
+  // ========================================================================
   // Cleanup
   // ========================================================================
-  clearSymbol: (symbol: string) => {
+  clearSymbol: (moduleId: string, symbol: string) => {
     set((s) => {
       const next = { ...s.symbolBars };
-      delete next[symbol.toUpperCase()];
+      delete next[chartStoreKey(moduleId, symbol)];
       return { symbolBars: next };
     });
   },

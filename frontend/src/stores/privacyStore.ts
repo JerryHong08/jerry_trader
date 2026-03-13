@@ -13,7 +13,7 @@
 
 import { create } from 'zustand';
 
-const STORAGE_KEY = 'gridtrader-privacy-mode';
+const STORAGE_KEY = 'JerryTrader-privacy-mode';
 const UNLOCK_PIN = (import.meta.env.VITE_PRIVACY_PIN ?? '1234').trim();
 
 interface PrivacyState {

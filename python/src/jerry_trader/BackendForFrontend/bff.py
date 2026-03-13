@@ -1,10 +1,13 @@
 """
-BFF (Backend For Frontend) for GridTrader
+Market Data BFF (Backend For Frontend) for JerryTrader
 
 FastAPI + WebSocket server for real-time visualization connecting React frontend
 with Python backend services via Redis streams.
 
-This version is designed for the GridTrader frontend which uses:
+Serves market data: rank list, overview chart, stock detail, news, static data.
+Chart bar data (OHLCV) is served by the separate Chart Data BFF (chart_bff.py).
+
+This version is designed for the JerryTrader frontend which uses:
 - RankList: Column-based data display with multiple columns
 - OverviewChartModule: Segmented line chart with state-colored segments
 
@@ -18,11 +21,8 @@ import argparse
 import asyncio
 import json
 import logging
-import os
-import time
 from contextlib import asynccontextmanager
-from datetime import datetime
-from threading import Thread
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set
 
 from dotenv import load_dotenv
@@ -35,8 +35,9 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from jerry_trader.DataManager.chart_data_service import ChartDataService
-from jerry_trader.DataManager.overviewchartdat_manager import GridTraderChartDataManager
+from jerry_trader.DataManager.overviewchartdat_manager import (
+    JerryTraderChartDataManager,
+)
 from jerry_trader.utils.logger import setup_logger
 from jerry_trader.utils.redis_keys import (
     market_snapshot_processed,
@@ -44,6 +45,7 @@ from jerry_trader.utils.redis_keys import (
     news_article_stream,
     news_item_prefix,
     news_pending,
+    news_processor_results_stream,
     news_ticker_prefix,
     static_pending,
     static_ticker_profile_prefix,
@@ -123,6 +125,8 @@ class ConnectionManager:
                 await self.active_connections[client_id].send_json(message)
             except Exception as e:
                 logger.error(f"Error sending to {client_id}: {e}")
+                # Remove failed connection to prevent repeated errors
+                self.disconnect(client_id)
 
     async def broadcast_to_subscribers(self, message: dict, domain: str):
         """Send message to all clients subscribed to a domain."""
@@ -133,12 +137,12 @@ class ConnectionManager:
         return {k: len(v) for k, v in self.subscriptions.items()}
 
 
-# ============ GridTrader BFF Class ============
+# ============ JerryTrader BFF Class ============
 
 
-class GridTraderBFF:
+class JerryTraderBFF:
     """
-    Backend For Frontend for GridTrader React application using FastAPI.
+    Backend For Frontend for JerryTrader React application using FastAPI.
 
     Connects to backend services via Redis streams:
     - market_snapshot_processed:{date} - For rank list and chart updates
@@ -185,6 +189,9 @@ class GridTraderBFF:
         self.STATE_STREAM_NAME = movers_state_stream(self.session_id)
         self.STATIC_UPDATE_STREAM = static_update_stream(self.session_id)
         self.NEWS_ARTICLE_STREAM = news_article_stream(self.session_id)
+        self.NEWS_PROCESSOR_RESULTS_STREAM = news_processor_results_stream(
+            self.session_id
+        )
         self.STATIC_SUMMARY_PREFIX = static_ticker_summary_prefix(self.session_id)
         self.STATIC_PROFILE_PREFIX = static_ticker_profile_prefix(self.session_id)
         self.NEWS_TICKER_PREFIX = news_ticker_prefix(self.session_id)
@@ -200,16 +207,10 @@ class GridTraderBFF:
         self.VERSION_KEY_PREFIX = static_version_prefix(self.session_id)
 
         # Initialize chart data manager (overview chart)
-        self.chart_manager = GridTraderChartDataManager(
+        self.chart_manager = JerryTraderChartDataManager(
             session_id=self.session_id,
             redis_config=redis_config,
             influxdb_config=influxdb_config,
-        )
-
-        # Initialize chart data service (OHLCV bars for ChartModule)
-        self.chart_data_service = ChartDataService(
-            redis_config=redis_config,
-            session_id=self.session_id,
         )
 
         # Chart settings (persistent for session)
@@ -221,12 +222,13 @@ class GridTraderBFF:
         self._state_task = None
         self._static_task = None
         self._article_task = None  # New - article stream listener
+        self._news_processor_results_task = None  # News processor results listener
 
         # Create FastAPI app with lifespan
         @asynccontextmanager
         async def lifespan(app: FastAPI):
             # Startup
-            logger.info("Starting GridTrader BFF...")
+            logger.info("Starting JerryTrader BFF...")
             self._running = True
 
             # Start background listeners
@@ -236,11 +238,14 @@ class GridTraderBFF:
             self._article_task = asyncio.create_task(
                 self._article_stream_listener()
             )  # New
+            self._news_processor_results_task = asyncio.create_task(
+                self._news_processor_results_listener()
+            )
 
             yield
 
             # Shutdown
-            logger.info("Shutting down GridTrader BFF...")
+            logger.info("Shutting down JerryTrader BFF...")
             self._running = False
             if self._snapshot_task:
                 self._snapshot_task.cancel()
@@ -250,11 +255,13 @@ class GridTraderBFF:
                 self._static_task.cancel()
             if self._article_task:
                 self._article_task.cancel()
+            if self._news_processor_results_task:
+                self._news_processor_results_task.cancel()
             self.cleanup()
 
         self.app = FastAPI(
-            title="GridTrader BFF",
-            description="Backend For Frontend for GridTrader trading application",
+            title="JerryTrader BFF",
+            description="Backend For Frontend for JerryTrader trading application",
             version="1.0.0",
             lifespan=lifespan,
         )
@@ -272,7 +279,7 @@ class GridTraderBFF:
         self._setup_routes()
 
         logger.info(
-            f"GridTraderBFF initialized: backend host={host}, port={port}, "
+            f"JerryTraderBFF initialized: backend host={host}, port={port}, "
             f"session_id={self.session_id}, run_mode={self.run_mode}, "
             f"redis host={redis_host}, redis port={redis_port}, redis db={redis_db}"
             f"influxdb config={influxdb_config}"
@@ -284,7 +291,7 @@ class GridTraderBFF:
         @self.app.get("/")
         async def index():
             return {
-                "service": "GridTrader BFF",
+                "service": "JerryTrader BFF",
                 "status": "running",
                 "version": "1.0.0",
             }
@@ -456,53 +463,6 @@ class GridTraderBFF:
             """API endpoint to get all subscribed tickers."""
             tickers = self.chart_manager.get_subscribed_tickers()
             return {"tickers": tickers, "count": len(tickers)}
-
-        # ============ Chart Bars API (for ChartModule) ============
-
-        @self.app.get("/api/chart/bars/{ticker}")
-        async def get_chart_bars(
-            ticker: str,
-            timeframe: str = "1D",
-            from_date: Optional[str] = None,
-            to_date: Optional[str] = None,
-            limit: int = 5000,
-        ):
-            """Fetch OHLCV bars for the ChartModule.
-
-            Historical bar data for candlestick chart rendering.
-            Real-time bar updates are handled client-side via trade ticks.
-
-            Args:
-                ticker: Stock ticker symbol
-                timeframe: Bar timeframe (1m, 5m, 15m, 30m, 1h, 4h, 1D, 1W, 1M)
-                from_date: Start date YYYY-MM-DD (default: auto from timeframe)
-                to_date: End date YYYY-MM-DD (default: today)
-                limit: Maximum bars to return
-
-            Returns:
-                JSON with bars array formatted for lightweight-charts CandlestickSeries
-            """
-            result = self.chart_data_service.get_bars(
-                ticker=ticker,
-                timeframe=timeframe,
-                from_date=from_date,
-                to_date=to_date,
-                limit=limit,
-            )
-            if result:
-                return result
-            return {
-                "ticker": ticker.upper(),
-                "timeframe": timeframe,
-                "bars": [],
-                "barCount": 0,
-                "error": "No data available",
-            }
-
-        @self.app.get("/api/chart/timeframes")
-        async def get_chart_timeframes():
-            """Return available chart timeframes with metadata."""
-            return {"timeframes": self.chart_data_service.get_timeframes()}
 
         @self.app.get("/api/test-data")
         async def test_data():
@@ -863,7 +823,7 @@ class GridTraderBFF:
         try:
             self.r.xgroup_create(
                 self.SNAPSHOT_STREAM_NAME,
-                "gridtrader_bff_consumers",
+                "JerryTrader_bff_consumers",
                 id="0",
                 mkstream=True,
             )
@@ -871,13 +831,13 @@ class GridTraderBFF:
             if "BUSYGROUP" not in str(e):
                 raise
 
-        consumer_name = f"gridtrader_bff_{datetime.now().timestamp()}"
+        consumer_name = f"JerryTrader_bff_{datetime.now().timestamp()}"
 
         while self._running:
             try:
                 # Use blocking read with timeout
                 messages = self.r.xreadgroup(
-                    "gridtrader_bff_consumers",
+                    "JerryTrader_bff_consumers",
                     consumer_name,
                     {self.SNAPSHOT_STREAM_NAME: ">"},
                     count=1,
@@ -906,7 +866,7 @@ class GridTraderBFF:
                             # Acknowledge the message
                             self.r.xack(
                                 self.SNAPSHOT_STREAM_NAME,
-                                "gridtrader_bff_consumers",
+                                "JerryTrader_bff_consumers",
                                 message_id,
                             )
 
@@ -927,7 +887,7 @@ class GridTraderBFF:
         try:
             self.r.xgroup_create(
                 self.STATE_STREAM_NAME,
-                "gridtrader_bff_state_consumers",
+                "JerryTrader_bff_state_consumers",
                 id="0",
                 mkstream=True,
             )
@@ -935,12 +895,12 @@ class GridTraderBFF:
             if "BUSYGROUP" not in str(e):
                 raise
 
-        consumer_name = f"gridtrader_state_{datetime.now().timestamp()}"
+        consumer_name = f"JerryTrader_state_{datetime.now().timestamp()}"
 
         while self._running:
             try:
                 messages = self.r.xreadgroup(
-                    "gridtrader_bff_state_consumers",
+                    "JerryTrader_bff_state_consumers",
                     consumer_name,
                     {self.STATE_STREAM_NAME: ">"},
                     count=10,
@@ -978,7 +938,7 @@ class GridTraderBFF:
                             # Acknowledge the message
                             self.r.xack(
                                 self.STATE_STREAM_NAME,
-                                "gridtrader_bff_state_consumers",
+                                "JerryTrader_bff_state_consumers",
                                 message_id,
                             )
 
@@ -1018,7 +978,7 @@ class GridTraderBFF:
         try:
             self.r.xgroup_create(
                 self.STATIC_UPDATE_STREAM,
-                "gridtrader_bff_static_consumers",
+                "JerryTrader_bff_static_consumers",
                 id="0",
                 mkstream=True,
             )
@@ -1026,12 +986,12 @@ class GridTraderBFF:
             if "BUSYGROUP" not in str(e):
                 raise
 
-        consumer_name = f"gridtrader_static_{datetime.now().timestamp()}"
+        consumer_name = f"JerryTrader_static_{datetime.now().timestamp()}"
 
         while self._running:
             try:
                 messages = self.r.xreadgroup(
-                    "gridtrader_bff_static_consumers",
+                    "JerryTrader_bff_static_consumers",
                     consumer_name,
                     {self.STATIC_UPDATE_STREAM: ">"},
                     count=10,
@@ -1045,7 +1005,7 @@ class GridTraderBFF:
                             if not symbol:
                                 self.r.xack(
                                     self.STATIC_UPDATE_STREAM,
-                                    "gridtrader_bff_static_consumers",
+                                    "JerryTrader_bff_static_consumers",
                                     message_id,
                                 )
                                 continue
@@ -1111,7 +1071,7 @@ class GridTraderBFF:
                                 # All domains are stale, skip this message
                                 self.r.xack(
                                     self.STATIC_UPDATE_STREAM,
-                                    "gridtrader_bff_static_consumers",
+                                    "JerryTrader_bff_static_consumers",
                                     message_id,
                                 )
                                 continue
@@ -1221,7 +1181,7 @@ class GridTraderBFF:
                             # Acknowledge the message
                             self.r.xack(
                                 self.STATIC_UPDATE_STREAM,
-                                "gridtrader_bff_static_consumers",
+                                "JerryTrader_bff_static_consumers",
                                 message_id,
                             )
 
@@ -1247,7 +1207,7 @@ class GridTraderBFF:
         try:
             self.r.xgroup_create(
                 self.NEWS_ARTICLE_STREAM,
-                "gridtrader_bff_article_consumers",
+                "JerryTrader_bff_article_consumers",
                 id="0",
                 mkstream=True,
             )
@@ -1255,12 +1215,12 @@ class GridTraderBFF:
             if "BUSYGROUP" not in str(e):
                 raise
 
-        consumer_name = f"gridtrader_article_{datetime.now().timestamp()}"
+        consumer_name = f"JerryTrader_article_{datetime.now().timestamp()}"
 
         while self._running:
             try:
                 messages = self.r.xreadgroup(
-                    "gridtrader_bff_article_consumers",
+                    "JerryTrader_bff_article_consumers",
                     consumer_name,
                     {self.NEWS_ARTICLE_STREAM: ">"},
                     count=10,
@@ -1274,7 +1234,7 @@ class GridTraderBFF:
                             if not symbol:
                                 self.r.xack(
                                     self.NEWS_ARTICLE_STREAM,
-                                    "gridtrader_bff_article_consumers",
+                                    "JerryTrader_bff_article_consumers",
                                     message_id,
                                 )
                                 continue
@@ -1314,7 +1274,7 @@ class GridTraderBFF:
                             # Acknowledge
                             self.r.xack(
                                 self.NEWS_ARTICLE_STREAM,
-                                "gridtrader_bff_article_consumers",
+                                "JerryTrader_bff_article_consumers",
                                 message_id,
                             )
 
@@ -1326,10 +1286,118 @@ class GridTraderBFF:
                 logger.error(f"Article stream listener error: {e}")
                 await asyncio.sleep(5)
 
+    async def _news_processor_results_listener(self):
+        """
+        Listen to news_processor_results_stream for LLM classification results.
+
+        Each classification result is broadcast to all connected WebSocket clients
+        for the NewsRoom component to display in real-time.
+        """
+        logger.info("Starting news processor results listener...")
+
+        # Create consumer group
+        try:
+            self.r.xgroup_create(
+                self.NEWS_PROCESSOR_RESULTS_STREAM,
+                "JerryTrader_bff_news_processor_consumers",
+                id="0",
+                mkstream=True,
+            )
+        except redis.exceptions.ResponseError as e:
+            if "BUSYGROUP" not in str(e):
+                raise
+
+        consumer_name = f"JerryTrader_news_proc_{datetime.now().timestamp()}"
+
+        while self._running:
+            try:
+                messages = self.r.xreadgroup(
+                    "JerryTrader_bff_news_processor_consumers",
+                    consumer_name,
+                    {self.NEWS_PROCESSOR_RESULTS_STREAM: ">"},
+                    count=10,
+                    block=1000,
+                )
+
+                if messages:
+                    for stream_name, message_list in messages:
+                        for message_id, message_data in message_list:
+                            symbol = message_data.get("symbol")
+                            if not symbol:
+                                self.r.xack(
+                                    self.NEWS_PROCESSOR_RESULTS_STREAM,
+                                    "JerryTrader_bff_news_processor_consumers",
+                                    message_id,
+                                )
+                                continue
+
+                            # Parse explanation JSON if present
+                            explanation = {}
+                            try:
+                                explanation = json.loads(
+                                    message_data.get("explanation", "{}")
+                                )
+                            except Exception:
+                                explanation = {
+                                    "raw": message_data.get("explanation", "")
+                                }
+
+                            # Build news processor result message
+                            news_result = {
+                                "type": "news_processor_result",
+                                "model": message_data.get("model", ""),
+                                "symbol": symbol,
+                                "is_catalyst": message_data.get("is_catalyst")
+                                == "true",
+                                "classification": message_data.get(
+                                    "classification", "NO"
+                                ),
+                                "score": message_data.get("score", "0/10"),
+                                "title": message_data.get("title", ""),
+                                "published_time": message_data.get(
+                                    "published_time", ""
+                                ),
+                                "current_time": message_data.get("current_time", ""),
+                                "explanation": explanation,
+                                "url": message_data.get("url", ""),
+                                "content_preview": message_data.get(
+                                    "content_preview", ""
+                                ),
+                                "sources": message_data.get("sources", "[]"),
+                                "source_from": message_data.get("source_from", ""),
+                                "timestamp": message_id,  # Use stream ID as timestamp
+                            }
+
+                            logger.debug(
+                                f"Broadcasting news processor result: {symbol} - "
+                                f"{'✅' if news_result['is_catalyst'] else '❌'} {news_result['score']}"
+                            )
+
+                            # Broadcast to all connected clients
+                            for client_id in self.manager.active_connections:
+                                await self.manager.send_personal_message(
+                                    news_result, client_id
+                                )
+
+                            # Acknowledge
+                            self.r.xack(
+                                self.NEWS_PROCESSOR_RESULTS_STREAM,
+                                "JerryTrader_bff_news_processor_consumers",
+                                message_id,
+                            )
+
+                await asyncio.sleep(0.01)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"News processor results listener error: {e}")
+                await asyncio.sleep(5)
+
     def run(self, debug: bool = False):
-        """Run the GridTrader BFF server."""
+        """Run the JerryTrader BFF server."""
         logger.info("=" * 60)
-        logger.info(f"Starting GridTrader BFF on {self.host}:{self.port}")
+        logger.info(f"Starting JerryTrader BFF on {self.host}:{self.port}")
         logger.info("=" * 60)
 
         if self.run_mode == "replay":
@@ -1355,13 +1423,13 @@ class GridTraderBFF:
         """Clean up resources on shutdown."""
         if self.chart_manager:
             self.chart_manager.close()
-        logger.info("GridTrader BFF resources cleaned up")
+        logger.info("JerryTrader BFF resources cleaned up")
 
 
 def main():
-    """Main entry point for GridTrader BFF."""
+    """Main entry point for JerryTrader BFF."""
     parser = argparse.ArgumentParser(
-        description="GridTrader BFF (Backend For Frontend)",
+        description="JerryTrader BFF (Backend For Frontend)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -1409,7 +1477,7 @@ Examples:
     )
 
     # Create and run BFF
-    bff = GridTraderBFF(
+    bff = JerryTraderBFF(
         host=args.host,
         port=args.port,
         session_id=session_id,
@@ -1418,7 +1486,7 @@ Examples:
     try:
         bff.run(debug=args.debug)
     except Exception as e:
-        logger.error(f"GridTrader BFF error: {e}")
+        logger.error(f"JerryTrader BFF error: {e}")
         import traceback
 
         traceback.print_exc()

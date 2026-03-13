@@ -42,7 +42,8 @@ class UnifiedTickManager:
     Supported Providers:
         - polygon: Polygon.io real-time data
         - theta: ThetaData market data
-        - replayer: Historical data replay
+        - replayer: Historical data replay (WebSocket to external binary)
+        - synced-replayer: In-process Rust TickDataReplayer (no WebSocket)
 
     Key Features:
         - Unified subscription format
@@ -51,15 +52,26 @@ class UnifiedTickManager:
         - Single point of configuration
     """
 
-    def __init__(self, provider: Optional[str] = None):
+    def __init__(self, provider: Optional[str] = None, manager: Any = None):
         """
         Initialize unified manager with specified provider.
 
         Args:
-            provider: Data provider type ('polygon', 'theta', 'replayer')
+            provider: Data provider type ('polygon', 'theta', 'replayer',
+                     'synced-replayer').
                      If None, reads from DATA_MANAGER env var (default: polygon)
+            manager: Optional pre-built manager instance. When provided,
+                     skips internal factory logic and wraps *manager*
+                     directly. Used by ``synced-replayer`` where the
+                     caller constructs a ``SyncedReplayerManager`` with
+                     the Rust ``TickDataReplayer``.
         """
         self.provider = provider or os.getenv("DATA_MANAGER", "polygon")
+
+        if manager is not None:
+            # Caller supplied a pre-built manager (e.g. SyncedReplayerManager)
+            self._manager = manager
+            return
 
         # Initialize the appropriate underlying manager
         if self.provider == "polygon":
@@ -71,10 +83,15 @@ class UnifiedTickManager:
         elif self.provider == "replayer":
             replay_url = os.getenv("REPLAY_URL", "ws://127.0.0.1:8765")
             self._manager = ReplayerWebSocketManager(replay_url=replay_url)
+        elif self.provider == "synced-replayer":
+            raise ValueError(
+                "synced-replayer requires a pre-built SyncedReplayerManager — "
+                "pass it via the 'manager' parameter"
+            )
         else:
             raise ValueError(
                 f"Unknown provider: {self.provider}. "
-                f"Supported: polygon, theta, replayer"
+                f"Supported: polygon, theta, replayer, synced-replayer"
             )
 
     @property
@@ -155,7 +172,7 @@ class UnifiedTickManager:
             elif self.provider == "theta":
                 theta_subs = self._to_theta(subscriptions)
                 await self._manager.subscribe(websocket_client, theta_subs)
-            elif self.provider == "replayer":
+            elif self.provider in ("replayer", "synced-replayer"):
                 symbols_list, events_list = self._to_replayer(subscriptions)
                 await self._manager.subscribe(
                     websocket_client, symbols_list, events=events_list
@@ -249,7 +266,7 @@ class UnifiedTickManager:
                 websocket_client, sec_type, req_types, contract
             )
 
-        elif self.provider == "replayer":
+        elif self.provider in ("replayer", "synced-replayer"):
             await self._manager.unsubscribe(websocket_client, symbol, events=events)
 
     # ========================================================================
@@ -310,7 +327,7 @@ class UnifiedTickManager:
                 elif ev == "TRADE":
                     ev = "T"
 
-                if self.provider in ("polygon", "replayer"):
+                if self.provider in ("polygon", "replayer", "synced-replayer"):
                     stream_keys.add(f"{ev}.{symbol}")
 
                 elif self.provider == "theta":
@@ -352,7 +369,7 @@ class UnifiedTickManager:
         Returns:
             Normalized data dict
         """
-        if self.provider in ("polygon", "replayer"):
+        if self.provider in ("polygon", "replayer", "synced-replayer"):
             normalized = data.copy()
             if "timestamp" in normalized:
                 normalized["timestamp"] = self._to_milliseconds(normalized["timestamp"])

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Deploy GridTrader build to GitHub Pages (gh-pages branch on origin)
+# Deploy JerryTrader build to GitHub Pages (gh-pages branch on origin)
 # Usage: ./deploy.sh              (build + deploy)
 #        ./deploy.sh --skip-build (deploy existing build/)
 
@@ -38,7 +38,7 @@ trap "rm -f $GIT_INDEX_FILE" EXIT
 
 git add -A
 TREE=$(git write-tree)
-COMMIT=$(git commit-tree "$TREE" -m "Deploy GridTrader $(date '+%Y-%m-%d %H:%M:%S')")
+COMMIT=$(git commit-tree "$TREE" -m "Deploy JerryTrader $(date '+%Y-%m-%d %H:%M:%S')")
 
 unset GIT_WORK_TREE GIT_INDEX_FILE
 git push origin "$COMMIT":refs/heads/"$BRANCH" --force

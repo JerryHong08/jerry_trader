@@ -32,11 +32,21 @@ databases:
 
   influxdb:
     influxdb-a:
+      org: "jerryhong"
       bucket: "jerrymmm"
       influx_token_env: "WSL2_INFLUXDB_TOKEN"
     influxdb-b:
+      org: "jerryhong"
       bucket: "jerryib_trade"
       influx_token_env: "OLDMAN_INFLUXDB_TOKEN"
+
+  clickhouse:
+    clickhouse-a:
+      host: "localhost"
+      port: 8123
+      user: "default"
+      database: "jerry_trader"
+      password_env: "CLICKHOUSE_PASSWORD"
 
 # =============================================================================
 # Machine Roles Configuration
@@ -48,24 +58,42 @@ machines:
       # StateEngine:
       #   enabled: true
       #   redis: "redis-a"
-        # influxdb: "influxdb-a"
-      GridTraderBFF:
-        enabled: true
-        host: "0.0.0.0"
-        port: 5001
-        debug: false
-        redis: "redis-b"
-        influxdb: "influxdb-b"
+      #   influxdb: "influxdb-a"
+      # ChartDataBFF:
+      #   enabled: true
+      #   host: "0.0.0.0"
+      #   port: 5002
+      #   redis: "redis-a"
+      #   clickhouse: "clickhouse-a"
       TickDataServer:
         enabled: true
         host: "0.0.0.0"
         port: 8000
         redis: "redis-a"
+        # manager_type: "synced-replayer"
+        manager_type: "polygon"
+        # preload_tickers:          # loaded at startup while clock is paused
+        #   - "NIPG"
+        #   - "PRSO"
       # FactorEngine:
       #   enabled: true
-      #   manager_type: "polygon" # choices=["polygon", "theta", "replayer"]
+      #   manager_type: "replayer" # choices=["polygon", "theta", "replayer", "synced-replayer"]
       #   redis: "redis-a"
       #   influxdb: "influxdb-a"
+      BarsBuilder:
+        enabled: true
+        redis: "redis-a"
+        clickhouse: "clickhouse-a"
+        timeframes:
+          - "10s"
+          - "1m"
+          - "5m"
+          - "15m"
+          - "30m"
+          - "1h"
+          - "4h"
+          - "1d"
+          - "1w"
 
   mibuntu:
     limit: "market_open"    # market_open | market_close | null (never stop)
@@ -78,7 +106,7 @@ machines:
         enabled: true
         poll_interval: 1.0
         batch_size: 5
-        news_limit: 5
+        news_limit: 2
         news_recency_hours: 24.0
         sources:
           - momo
@@ -86,6 +114,11 @@ machines:
           - fmp
         redis: "redis-b@OLDMAN"
         postgres: "postgres-b@OLDMAN"
+      AgentBFF:
+        enabled: true
+        host: "0.0.0.0"
+        port: 5003
+        redis: "redis-a"  # or "redis-b@MACHINE_B" for remote
 
   oldman:
     limit: "market_open"    # market_open | market_close | null (never stop)
@@ -127,12 +160,19 @@ machines:
         clear: false
         redis: "redis-b"
         influxdb: "influxdb-b"
+        # clock_redis: points to the clock-master machine's Redis so the
+        # replayer can follow the shared ReplayClock via RemoteClockFollower.
+        # Use the same db-reference format as other redis configs when running
+        # on a separate machine from
+        # the TickDataServer (e.g. mibuntu following wsl2's clock).
+        # clock_redis: "redis-a@WSL2"
 
 # =============================================================================
 # Defaults
 # =============================================================================
 defaults:
-  replay_date: null
+  replay_date: null #YYYYMMDD 20260306
+  replay_time: null #HHMMSS 080015
   suffix_id: null
   load_history: null
   log_level: "DEBUG"

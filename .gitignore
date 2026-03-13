@@ -87,7 +87,6 @@ config.yaml
 # Data / logs / docs (generated)
 data/*
 logs/
-docs/
 discard/
 
 # Data files
@@ -107,3 +106,16 @@ docs/_build/
 
 # Pyenv
 .python-version
+
+# latex
+*.aux
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.nav
+*.snm
+*.vrb
+*.xdv

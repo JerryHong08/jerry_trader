@@ -3,7 +3,6 @@ import os
 from datetime import datetime
 from typing import Optional
 
-import s3fs
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -45,12 +44,22 @@ class DataPathFetcher:
         self.lake = lake
         self.s3 = s3
 
-        self.fs = s3fs.S3FileSystem(
-            key=ACCESS_KEY_ID,
-            secret=SECRET_ACCESS_KEY,
-            endpoint_url="https://files.polygon.io",
-            client_kwargs={"region_name": "us-east-1"},
-        )
+        # Lazy: only create S3 filesystem when actually using S3
+        self._fs = None
+
+    @property
+    def fs(self):
+        """Lazy S3 filesystem — only imported/created on first access."""
+        if self._fs is None:
+            import s3fs
+
+            self._fs = s3fs.S3FileSystem(
+                key=ACCESS_KEY_ID,
+                secret=SECRET_ACCESS_KEY,
+                endpoint_url="https://files.polygon.io",
+                client_kwargs={"region_name": "us-east-1"},
+            )
+        return self._fs
 
     def data_dir_calculate(
         self,

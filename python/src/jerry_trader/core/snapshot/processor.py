@@ -24,6 +24,7 @@ from threading import Thread
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
+import clickhouse_connect
 import influxdb_client
 import polars as pl
 import redis
@@ -79,6 +80,7 @@ class SnapshotProcessor:
         session_id: Optional[str] = None,
         redis_config: Optional[Dict[str, Any]] = None,
         influxdb_config: Optional[Dict[str, Any]] = None,
+        clickhouse_config: Optional[Dict[str, Any]] = None,
     ):
 
         # Unified session id — single source of truth for mode & date
@@ -105,6 +107,34 @@ class SnapshotProcessor:
         )
         self._write_api = self._influx_client.write_api(write_options=SYNCHRONOUS)
         self._query_api = self._influx_client.query_api()
+
+        # ---------- ClickHouse Configuration (gradual migration) ----------
+        self.ch_client = None
+        ch_cfg = clickhouse_config or {}
+        if ch_cfg:
+            ch_host = ch_cfg.get("host", "localhost")
+            ch_port = ch_cfg.get("port", 8123)
+            ch_user = ch_cfg.get("user", "default")
+            ch_db = ch_cfg.get("database", "jerry_trader")
+            password_env = ch_cfg.get("password_env", "CLICKHOUSE_PASSWORD")
+            ch_password = os.getenv(password_env, "")
+            try:
+                self.ch_client = clickhouse_connect.get_client(
+                    host=ch_host,
+                    port=ch_port,
+                    username=ch_user,
+                    password=ch_password,
+                    database=ch_db,
+                )
+                self.ch_client.command("SELECT 1")
+                logger.info(
+                    f"__init__ - ClickHouse connected: {ch_host}:{ch_port}/{ch_db}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"__init__ - ClickHouse unavailable, keeping Influx-only mode: {e}"
+                )
+                self.ch_client = None
 
         # ---------- Redis Configuration ----------
         redis_cfg = redis_config or {}
@@ -146,8 +176,8 @@ class SnapshotProcessor:
         # Volume tracking — delegated to VolumeTracker (compute.py / Rust)
         self._volume_tracker = VolumeTracker()
 
-        # Reload volume history from InfluxDB for recovery
-        self._reload_volume_history_from_influx()
+        # Reload volume history for recovery (prefer ClickHouse, fallback InfluxDB)
+        self._reload_volume_history()
 
         logger.info(
             f"__init__ - SnapshotProcessor initialized: mode={self.run_mode}, "
@@ -575,6 +605,7 @@ class SnapshotProcessor:
         df_dict = {row["ticker"]: row for row in enriched_df.iter_rows(named=True)}
 
         influx_points = []
+        clickhouse_rows = []
         timestamp_iso = timestamp.isoformat()
         stream_tickers_data = []
 
@@ -626,6 +657,34 @@ class SnapshotProcessor:
             point = point.time(timestamp)
             influx_points.append(point)
 
+            # Gradual migration: add ClickHouse row in parallel with Influx write
+            event_time_ms = int(timestamp.timestamp() * 1000)
+            clickhouse_rows.append(
+                [
+                    ticker,
+                    date_tag,
+                    mode_tag,
+                    self.session_id,
+                    event_time_ms,
+                    timestamp,
+                    float(stream_data.get("price", 0.0)),
+                    float(stream_data.get("changePercent", 0.0)),
+                    float(stream_data.get("volume", 0.0)),
+                    float(stream_data.get("prev_close", 0.0)),
+                    float(stream_data.get("prev_volume", 0.0)),
+                    float(stream_data.get("vwap", 0.0)),
+                    float(stream_data.get("bid", 0.0)),
+                    float(stream_data.get("ask", 0.0)),
+                    float(stream_data.get("bid_size", 0.0)),
+                    float(stream_data.get("ask_size", 0.0)),
+                    int(stream_data.get("rank", 0)),
+                    int(stream_data.get("competition_rank", 0)),
+                    float(stream_data.get("change", 0.0)),
+                    float(stream_data.get("relativeVolumeDaily", 0.0)),
+                    float(stream_data.get("relativeVolume5min", 0.0)),
+                ]
+            )
+
         # Write to output stream
         if stream_tickers_data:
             logger.debug(
@@ -646,6 +705,44 @@ class SnapshotProcessor:
                 f"_write_to_output_stream_and_influx - Wrote {len(influx_points)} points"
             )
 
+        # Dual-write supplement: ClickHouse snapshot table
+        if self.ch_client and clickhouse_rows:
+            try:
+                self.ch_client.insert(
+                    table="market_snapshot",
+                    data=clickhouse_rows,
+                    column_names=[
+                        "symbol",
+                        "date",
+                        "mode",
+                        "session_id",
+                        "event_time_ms",
+                        "event_time",
+                        "price",
+                        "changePercent",
+                        "volume",
+                        "prev_close",
+                        "prev_volume",
+                        "vwap",
+                        "bid",
+                        "ask",
+                        "bid_size",
+                        "ask_size",
+                        "rank",
+                        "competition_rank",
+                        "change",
+                        "relativeVolumeDaily",
+                        "relativeVolume5min",
+                    ],
+                )
+                logger.debug(
+                    f"_write_to_output_stream_and_influx - Wrote {len(clickhouse_rows)} rows to ClickHouse"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"_write_to_output_stream_and_influx - ClickHouse write failed (Influx still written): {e}"
+                )
+
         # Set 19-hour TTL on stream
         if self.r.ttl(self.OUTPUT_STREAM_NAME) < 0:
             self.r.expire(self.OUTPUT_STREAM_NAME, 19 * 3600)
@@ -653,6 +750,100 @@ class SnapshotProcessor:
     # =========================================================================
     # RECOVERY SUPPORT
     # =========================================================================
+
+    def _reload_volume_history(self) -> None:
+        """Reload volume history for recovery.
+
+        Preference order:
+        1) ClickHouse (new path)
+        2) InfluxDB fallback (legacy path)
+        """
+        if self.ch_client:
+            loaded = self._reload_volume_history_from_clickhouse()
+            if loaded > 0:
+                return
+            logger.info(
+                "_reload_volume_history - ClickHouse returned no data; falling back to InfluxDB"
+            )
+
+        self._reload_volume_history_from_influx()
+
+    def _reload_volume_history_from_clickhouse(self) -> int:
+        """Reload volume history from ClickHouse for recovery.
+
+        Returns total number of loaded points.
+        """
+        subscribed = self._get_all_subscribed_tickers()
+        if not subscribed or not self.ch_client:
+            return 0
+
+        range_start, range_end = self._get_reload_time_range(lookback_minutes=6)
+        start_ms = int(
+            datetime.fromisoformat(range_start.replace("Z", "+00:00")).timestamp()
+            * 1000
+        )
+        if range_end == "now()":
+            end_ms = int(time.time() * 1000)
+        else:
+            end_ms = int(
+                datetime.fromisoformat(range_end.replace("Z", "+00:00")).timestamp()
+                * 1000
+            )
+
+        logger.info(
+            f"_reload_volume_history_from_clickhouse - Reloading for {len(subscribed)} tickers "
+            f"(ms range: {start_ms} to {end_ms})..."
+        )
+
+        date_tag, mode_tag = session_to_influx_tags(self.session_id)
+        total_loaded = 0
+
+        for ticker in subscribed:
+            try:
+                query = """
+                    SELECT event_time_ms, volume
+                    FROM market_snapshot FINAL
+                    WHERE symbol = {symbol:String}
+                      AND date = {date:String}
+                      AND mode = {mode:String}
+                      AND event_time_ms >= {start_ms:Int64}
+                      AND event_time_ms <= {end_ms:Int64}
+                    ORDER BY event_time_ms ASC
+                """
+                result = self.ch_client.query(
+                    query,
+                    parameters={
+                        "symbol": ticker,
+                        "date": date_tag,
+                        "mode": mode_tag,
+                        "start_ms": start_ms,
+                        "end_ms": end_ms,
+                    },
+                )
+
+                entries = []
+                for event_time_ms, volume in result.result_rows:
+                    ts = datetime.fromtimestamp(
+                        event_time_ms / 1000.0, tz=ZoneInfo("UTC")
+                    )
+                    if volume is not None:
+                        entries.append((ts, float(volume)))
+
+                if entries:
+                    self._volume_tracker.reload_history(ticker, entries)
+                    total_loaded += len(entries)
+            except Exception as e:
+                logger.error(
+                    f"_reload_volume_history_from_clickhouse - Error for {ticker}: {e}"
+                )
+
+        tickers_with_history = sum(
+            1 for v in self._volume_tracker.history.values() if v
+        )
+        logger.info(
+            f"_reload_volume_history_from_clickhouse - Reloaded {total_loaded} points for {tickers_with_history} tickers"
+        )
+        return total_loaded
 
     def _reload_volume_history_from_influx(self) -> None:
         """Reload volume history from InfluxDB for recovery."""
@@ -747,4 +938,9 @@ class SnapshotProcessor:
         """Clean up resources."""
         if self._influx_client:
             self._influx_client.close()
+        if self.ch_client:
+            try:
+                self.ch_client.close()
+            except Exception:
+                pass
         logger.info("close - SnapshotProcessor closed")

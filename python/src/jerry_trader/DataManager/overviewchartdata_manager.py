@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
+import clickhouse_connect
 import influxdb_client
 import redis
 
@@ -68,6 +69,7 @@ class JerryTraderChartDataManager:
         session_id: Optional[str] = None,
         redis_config: Optional[Dict[str, Any]] = None,
         influxdb_config: Optional[Dict[str, Any]] = None,
+        clickhouse_config: Optional[Dict[str, Any]] = None,
     ):
         self._chart_data_dirty = True
         self._cached_chart_data_lw: Optional[Dict] = None
@@ -113,6 +115,34 @@ class JerryTraderChartDataManager:
             url=self.influx_url, token=token, org=self.org
         )
         self._query_api = self._influx_client.query_api()
+
+        # ------- ClickHouse Configuration (gradual migration supplement) -------
+        self.ch_client = None
+        ch_cfg = clickhouse_config or {}
+        if ch_cfg:
+            ch_host = ch_cfg.get("host", "localhost")
+            ch_port = ch_cfg.get("port", 8123)
+            ch_user = ch_cfg.get("user", "default")
+            ch_db = ch_cfg.get("database", "jerry_trader")
+            password_env = ch_cfg.get("password_env", "CLICKHOUSE_PASSWORD")
+            ch_password = os.getenv(password_env, "")
+            try:
+                self.ch_client = clickhouse_connect.get_client(
+                    host=ch_host,
+                    port=ch_port,
+                    username=ch_user,
+                    password=ch_password,
+                    database=ch_db,
+                )
+                self.ch_client.command("SELECT 1")
+                logger.info(
+                    f"__init__ - ClickHouse connected for overview chart: {ch_host}:{ch_port}/{ch_db}"
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"__init__ - ClickHouse unavailable for overview chart, fallback to InfluxDB: {exc}"
+                )
+                self.ch_client = None
 
         logger.info(
             f"__init__ - JerryTraderChartDataManager initialized: mode={self.run_mode}, session_id={self.session_id}"
@@ -197,6 +227,17 @@ class JerryTraderChartDataManager:
         else:
             range_start, range_end = self._get_intraday_time_range()
 
+        # Prefer ClickHouse (new path), keep InfluxDB as fallback.
+        if self.ch_client:
+            ch_results = self._get_ticker_history_clickhouse(
+                ticker=ticker,
+                range_start=range_start,
+                range_end=range_end,
+                limit=limit,
+            )
+            if ch_results:
+                return ch_results
+
         date_tag, mode_tag = session_to_influx_tags(self.session_id)
         query = f"""
         from(bucket: "{self.bucket}")
@@ -226,6 +267,73 @@ class JerryTraderChartDataManager:
             return results
         except Exception as e:
             logger.error(f"Error querying history for {ticker}: {e}")
+            return []
+
+    def _get_ticker_history_clickhouse(
+        self,
+        ticker: str,
+        range_start: str,
+        range_end: str,
+        limit: int,
+    ) -> List[Dict]:
+        """Query historical snapshot data for a ticker from ClickHouse.
+
+        Returns list of {timestamp, changePercent, price, volume, rank}.
+        """
+        if not self.ch_client:
+            return []
+
+        def _to_ms(ts: str) -> int:
+            if ts == "now()":
+                return int(datetime.now(ZoneInfo("UTC")).timestamp() * 1000)
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            return int(dt.timestamp() * 1000)
+
+        start_ms = _to_ms(range_start)
+        end_ms = _to_ms(range_end)
+
+        date_tag, mode_tag = session_to_influx_tags(self.session_id)
+
+        try:
+            query = """
+                SELECT event_time_ms, changePercent, price, volume, rank
+                FROM market_snapshot FINAL
+                WHERE symbol = {symbol:String}
+                  AND date = {date:String}
+                  AND mode = {mode:String}
+                  AND event_time_ms >= {start_ms:Int64}
+                  AND event_time_ms <= {end_ms:Int64}
+                ORDER BY event_time_ms ASC
+                LIMIT {limit:UInt32}
+            """
+            result = self.ch_client.query(
+                query,
+                parameters={
+                    "symbol": ticker,
+                    "date": date_tag,
+                    "mode": mode_tag,
+                    "start_ms": start_ms,
+                    "end_ms": end_ms,
+                    "limit": limit,
+                },
+            )
+
+            rows = []
+            for event_time_ms, change_pct, price, volume, rank in result.result_rows:
+                ts = datetime.fromtimestamp(event_time_ms / 1000.0, tz=ZoneInfo("UTC"))
+                rows.append(
+                    {
+                        "timestamp": ts,
+                        "changePercent": float(change_pct or 0.0),
+                        "price": float(price or 0.0),
+                        "volume": float(volume or 0.0),
+                        "rank": int(rank or 0),
+                    }
+                )
+
+            return rows
+        except Exception as e:
+            logger.error(f"Error querying ClickHouse history for {ticker}: {e}")
             return []
 
     def get_ticker_state_history(self, ticker: str) -> List[Dict]:
@@ -418,4 +526,9 @@ class JerryTraderChartDataManager:
         """Clean up resources."""
         if self._influx_client:
             self._influx_client.close()
+        if self.ch_client:
+            try:
+                self.ch_client.close()
+            except Exception:
+                pass
         logger.info("JerryTraderChartDataManager closed")

@@ -172,7 +172,7 @@ mainly focus on basic modules development and strcuture buidling.
 - ✅ frontend charts seperated.
 - ✅ deep review how current bar_buidler builds the bars in different senarios. 10s bootstrap done.
 - ✅ _needs_historical_backfill logic refine.
-- [ ] Snapshot processor to rust
+- ✅ Snapshot processor to rust
 - [ ] Snapshot data: InfluxDB → ClickHouse
 - [ ] Downstream consumers + InfluxDB→ClickHouse migration
 - [ ] FactorEngine consumes batched bars/data (not raw ticks)

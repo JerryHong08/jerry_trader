@@ -30,10 +30,31 @@ console.log(
   Object.keys(LAYOUT_TEMPLATES).join(', ')
 );
 
+const FALLBACK_DEFAULT_TEMPLATE_ID = "04";
+const envDefaultTemplateId = import.meta.env.VITE_DEFAULT_TEMPLATE_ID?.trim();
+
+const resolveDefaultTemplateId = (): string => {
+  if (envDefaultTemplateId && LAYOUT_TEMPLATES[envDefaultTemplateId]) {
+    return envDefaultTemplateId;
+  }
+
+  if (envDefaultTemplateId && !LAYOUT_TEMPLATES[envDefaultTemplateId]) {
+    console.warn(
+      `[layoutTemplates] VITE_DEFAULT_TEMPLATE_ID='${envDefaultTemplateId}' not found. Falling back.`
+    );
+  }
+
+  if (LAYOUT_TEMPLATES[FALLBACK_DEFAULT_TEMPLATE_ID]) {
+    return FALLBACK_DEFAULT_TEMPLATE_ID;
+  }
+
+  return Object.keys(LAYOUT_TEMPLATES)[0] ?? FALLBACK_DEFAULT_TEMPLATE_ID;
+};
+
 // Get all templates as an array for UI rendering
 export const getAllTemplates = (): LayoutTemplate[] => {
   return Object.values(LAYOUT_TEMPLATES);
 };
 
 // Default template ID
-export const DEFAULT_TEMPLATE_ID = "04";
+export const DEFAULT_TEMPLATE_ID = resolveDefaultTemplateId();

@@ -10,7 +10,7 @@
 # Override via environment variable: UPDATE_MODE=standalone|server|client
 
 update:
-  mode: "client"  # default mode
+  mode: "server"  # default mode
   recent_days: 7      # how many days of data to fetch/convert
 
 # Data directory for this machine

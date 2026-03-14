@@ -27,10 +27,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from jerry_trader.packages.market_data.feeds.synced_replayer_manager import (
+from jerry_trader.services.market_data.feeds.synced_replayer_manager import (
     SyncedReplayerManager,
 )
-from jerry_trader.packages.market_data.feeds.unified_tick_manager import (
+from jerry_trader.services.market_data.feeds.unified_tick_manager import (
     UnifiedTickManager,
 )
 

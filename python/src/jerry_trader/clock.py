@@ -39,7 +39,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from jerry_trader._rust import ReplayClock, TickDataReplayer
-from jerry_trader.shared.utils.logger import setup_logger
+from jerry_trader.shared.logging.logger import setup_logger
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
 

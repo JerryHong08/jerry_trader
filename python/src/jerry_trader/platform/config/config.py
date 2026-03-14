@@ -5,7 +5,7 @@ from pathlib import Path
 import polars as pl
 import yaml
 
-from jerry_trader.shared.utils.logger import setup_logger
+from jerry_trader.shared.logging.logger import setup_logger
 from jerry_trader.shared.utils.paths import PROJECT_ROOT
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.WARNING)

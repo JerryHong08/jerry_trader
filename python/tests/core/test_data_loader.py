@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 import polars as pl
 import pytest
 
-from jerry_trader.data_supply.bootstrap_data_supply.localdata_loader.data_loader import (
+from jerry_trader.services.market_data.bootstrap.data_loader import (
     LoaderConfig,
     OHLCVResampler,
     StockDataLoader,

@@ -123,6 +123,91 @@ poetry run black python/
 poetry run isort python/
 ```
 
+The proposed layout follows a **layered architecture** with strict dependency rules:
+
+```bash
+┌──────────────────────────────────────────┐
+│           apps/  +  runtime/             │  ← Entry points, HTTP/WS, CLI
+├──────────────────────────────────────────┤
+│               services/                  │  ← Stateful workers, use-cases
+├──────────────────────────────────────────┤
+│               domain/                    │  ← Pure value objects, NO I/O
+├───────────────────┬──────────────────────┤
+│    platform/      │       shared/        │  ← Infra clients  |  Utils
+└───────────────────┴──────────────────────┘
+```
+
+## Data Flow
+
+### Live Mode (Machine A)
+
+```bash
+Polygon WebSocket
+      │
+      ▼
+UnifiedTickManager  ──fan-out──►  BarsBuilderService  ──► ClickHouse (OHLCV)
+      │                                  │
+      │                                  └──► Redis A (bar stream)
+      │                                            │
+      ▼                                            ▼
+  ChartBFF  ◄──────────────────────────── Frontend (WebSocket)
+      │
+      └──► Redis A (tick stream)
+```
+
+### Live Mode (Machine B)
+
+```bash
+Polygon REST (snapshot)
+      │
+      ▼
+MarketsnapshotCollector ──► Redis B (raw snapshot)
+                                  │
+                                  ▼
+                         SnapshotProcessor (Rust VolumeTracker)
+                                  │
+                     ┌────────────┴────────────┐
+                     ▼                         ▼
+              ClickHouse (snapshot)      Redis B (processed)
+                                               │
+                                               ▼
+                                       JerryTraderBFF ──► Frontend
+```
+
+### Replay Mode
+
+```bash
+Parquet Lake (Machine A)
+      │
+      ▼
+TickDataReplayer (Rust)          ReplayClock (Rust)
+      │                                │
+      │                                └──► Redis A heartbeat (100ms)
+      ▼                                            │
+UnifiedTickManager                                 ▼
+   (SyncedReplayerManager)               Machine B: RemoteClockFollower
+      │                                            │
+      └──► same as live from here ──►    MarketSnapshotReplayer
+```
+
+### News Pipeline (Machine C)
+
+```bash
+NewsWorker (poll: momo/benzinga/fmp)
+      │
+      ▼
+Redis B (raw news queue)  ──► Postgres (articles)
+      │
+      ▼
+NewsProcessor (LLM: DeepSeek / Kimi)
+      │
+      ▼
+Postgres (classified results)  ──► Redis B (news events)
+      │
+      ▼
+AgentBFF ──► Frontend / [Stage4] AgentRuntime
+```
+
 ## Roadmap
 
 ### Stage 1 & Initial Start
@@ -230,6 +315,17 @@ frontend:
   - [ ] txt to tool-calling validation
 - [ ] strategy pipeline agent validation
 - [ ] ml pipeline validation
+
+```bash
+apps/agent_app/          ← AgentBFF HTTP + WebSocket interface
+services/agent/          ← (new) agent loop, tool dispatch, memory
+    ├── agent.py         ← core agent loop
+    ├── tools.py         ← tool registry (wraps existing services)
+    ├── memory.py        ← short + long-term memory store
+    └── planner.py       ← [future] planning module
+platform/messaging/rpc/  ← Redis-based RPC for cross-service tool calls
+skills/                  ← Markdown skill instruction files (already at root)
+```
 
 ### optional features
 

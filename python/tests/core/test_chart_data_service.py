@@ -21,7 +21,7 @@ import polars as pl
 import pytest
 
 from jerry_trader import clock
-from jerry_trader.packages.bar_builder.chart_data_service import (
+from jerry_trader.services.bar_builder.chart_data_service import (
     CACHE_TTL,
     DEFAULT_LOOKBACK,
     REPLAY_LOOKBACK,
@@ -720,9 +720,7 @@ class TestFetchFromLocalConfig:
         original_LoaderConfig = None
 
         # Import and capture
-        from jerry_trader.data_supply.bootstrap_data_supply.localdata_loader.data_loader import (
-            LoaderConfig,
-        )
+        from jerry_trader.services.market_data.bootstrap.data_loader import LoaderConfig
 
         service._LoaderConfig = LoaderConfig
 
@@ -741,9 +739,7 @@ class TestFetchFromLocalConfig:
         mock_loader.load.return_value = None
         service._local_loader = mock_loader
 
-        from jerry_trader.data_supply.bootstrap_data_supply.localdata_loader.data_loader import (
-            LoaderConfig,
-        )
+        from jerry_trader.services.market_data.bootstrap.data_loader import LoaderConfig
 
         service._LoaderConfig = LoaderConfig
 
@@ -760,9 +756,7 @@ class TestFetchFromLocalConfig:
         mock_loader.load.return_value = None
         service._local_loader = mock_loader
 
-        from jerry_trader.data_supply.bootstrap_data_supply.localdata_loader.data_loader import (
-            LoaderConfig,
-        )
+        from jerry_trader.services.market_data.bootstrap.data_loader import LoaderConfig
 
         service._LoaderConfig = LoaderConfig
 
@@ -779,9 +773,7 @@ class TestFetchFromLocalConfig:
         mock_loader.load.return_value = None
         service._local_loader = mock_loader
 
-        from jerry_trader.data_supply.bootstrap_data_supply.localdata_loader.data_loader import (
-            LoaderConfig,
-        )
+        from jerry_trader.services.market_data.bootstrap.data_loader import LoaderConfig
 
         service._LoaderConfig = LoaderConfig
 
@@ -798,9 +790,7 @@ class TestFetchFromLocalConfig:
         mock_loader.load.return_value = None
         service._local_loader = mock_loader
 
-        from jerry_trader.data_supply.bootstrap_data_supply.localdata_loader.data_loader import (
-            LoaderConfig,
-        )
+        from jerry_trader.services.market_data.bootstrap.data_loader import LoaderConfig
 
         service._LoaderConfig = LoaderConfig
 
@@ -822,9 +812,7 @@ class TestFetchFromLocalCutoffPropagation:
         mock_loader.load.return_value = None
         service._local_loader = mock_loader
 
-        from jerry_trader.data_supply.bootstrap_data_supply.localdata_loader.data_loader import (
-            LoaderConfig,
-        )
+        from jerry_trader.services.market_data.bootstrap.data_loader import LoaderConfig
 
         service._LoaderConfig = LoaderConfig
 
@@ -849,9 +837,7 @@ class TestFetchFromLocalCutoffPropagation:
         mock_loader.load.return_value = None
         service._local_loader = mock_loader
 
-        from jerry_trader.data_supply.bootstrap_data_supply.localdata_loader.data_loader import (
-            LoaderConfig,
-        )
+        from jerry_trader.services.market_data.bootstrap.data_loader import LoaderConfig
 
         service._LoaderConfig = LoaderConfig
 
@@ -875,9 +861,7 @@ class TestFetchFromLocalCutoffPropagation:
         mock_loader.load.return_value = None
         service._local_loader = mock_loader
 
-        from jerry_trader.data_supply.bootstrap_data_supply.localdata_loader.data_loader import (
-            LoaderConfig,
-        )
+        from jerry_trader.services.market_data.bootstrap.data_loader import LoaderConfig
 
         service._LoaderConfig = LoaderConfig
 

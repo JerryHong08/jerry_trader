@@ -14,9 +14,20 @@
 - **clock**: added `import json`, `import threading` to support heartbeat publisher
 - **replayer**: timing branch split — `remote_clock` path (virtual-time poll) vs local `asyncio.sleep` fallback (backward compatible)
 
-## Unreleased (2026-03-12)
+## 1.3.0 (2026-03-14)
 
+### Refactor
+
+- **core**: Major restructuring and backup of project modules for improved maintainability and clarity.
+- **modules**: Refactored to PEP8-compliant module names.
+- **bar_builder**: Rewrite to use watermark instead of wall-time clock for updating bar state; fixed race condition bugs in `on_trades` and `check_expired`.
+- **tickdata server**: Merged tickdata server and chart BFF, improved backend orchestration.
+- **openclaw/newsbff**: Integrated openclaw client into news BFF endpoint.
 ### Feat
+### Chore
+
+- **docs**: Updated README with installation, multi-machine setup, and architecture diagrams.
+- **backup**: Project backup and restructuring for future development.
 
 - **tickdata/chart architecture**: started merge of `ChartDataBFF` into `TickDataServer` to reduce one backend process and one frontend WebSocket hop (work in progress)
 - **chart bootstrap**: intraday timespan bootstrap and gap-bootstrap flow added/refined. chart bootstrap path now combines custom bar fetch + trades rebuild for meeting-bar continuity.

@@ -21,7 +21,7 @@ import polars as pl
 import pytest
 
 from jerry_trader import clock
-from jerry_trader.data_manager.chart_data_service import (
+from jerry_trader.packages.bar_builder.chart_data_service import (
     CACHE_TTL,
     DEFAULT_LOOKBACK,
     REPLAY_LOOKBACK,

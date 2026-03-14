@@ -12,7 +12,7 @@ from collections import deque
 
 import pytest
 
-from jerry_trader.core.factors.compute import compute_trade_rate, price_accel, z_score
+from jerry_trader._rust import compute_trade_rate, price_accel, z_score
 
 # =========================================================================
 # z_score

@@ -158,13 +158,13 @@ llm:
   models:
     deepseek:
       default_model: "deepseek-chat"
-      system_prompt: "news_processor_prompt_v2.txt"
+      system_prompt: "catalyst_news_judge.md"
       base_url: "https://api.deepseek.com"
       thinking_mode: false
       api_key_env: "DEEPSEEK_API_KEY"
     kimi:
       default_model: "kimi-k2.5"
-      system_prompt: "news_processor_prompt_v2.txt"
+      system_prompt: "catalyst_news_judge.md"
       base_url: "https://api.moonshot.cn/v1"
       thinking_mode: false
       api_key_env: "KIMI_API_KEY"

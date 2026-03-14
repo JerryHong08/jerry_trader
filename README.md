@@ -96,7 +96,7 @@ poetry run python -m jerry_trader.backend_starter --machine wsl2 --dry-run
 poetry run python -m jerry_trader.backend_starter --machine wsl2 --defaults.replay_date 20260115
 
 # ibkr order management backend
-uvicorn python.src.jerry_trader.order_management.main:app --reload --port 8888
+uvicorn python.src.jerry_trader.apps.order_runtime.main:app --reload --port 8888
 ```
 
 ### 6. Start the Frontend
@@ -174,11 +174,7 @@ mainly focus on basic modules development and strcuture buidling.
 - ✅ _needs_historical_backfill logic refine.
 - ✅ Snapshot processor to rust
 - ✅ Snapshot data: InfluxDB → ClickHouse
-- [ ] Downstream consumers + InfluxDB→ClickHouse migration
-- [ ] FactorEngine consumes batched bars/data (not raw ticks)
-- [ ] Foundation for v3.0 stream bus architecture
-
-In this stage we introduce rust based global clock to maintain acuuracy among the whole project running time. In replay mode, The **tickdataSever machine** is the clock domain master (also runs`local_tickdata_replayer` in-process). Remote machines (running
+In this stage we introduce rust based global clock to maintain acuuracy among the whole project running time. In replay mode, The **chartdata machine** is the clock domain master (also runs`local_tickdata_replayer` in-process). Remote machines (running
 `MarketSnapshotReplayer`) follow via Redis heartbeat.
 
 - ✅ add replay global clock in rust to maintain time accuracy in replay mode.
@@ -187,6 +183,10 @@ In this stage we introduce rust based global clock to maintain acuuracy among th
 - ✅ `RemoteClockFollower` class (monotonic interpolation between heartbeats)
 - ✅ Modify `MarketSnapshotReplayer` to poll `RemoteClockFollower.now_ns()` instead of `asyncio.sleep`
 - ✅ Test cross-machine sync (same network + Tailscale)
+
+- [ ] Downstream consumers + InfluxDB→ClickHouse migration
+- [ ] FactorEngine consumes batched bars/data (not raw ticks)
+- [ ] Foundation for v3.0 stream bus architecture
 
 ### Stage3
 
@@ -219,6 +219,17 @@ frontend:
 - [ ] better UX
   - ✅ keyboard shortcut
   - [ ] frame group
+
+### Stage 4
+
+- [ ] AI Agent powered Event-Driven System
+  - [ ] redis streams to event_bus
+  - [ ] rpc
+  - [ ] basic tools build up, cli & skills instruction
+  - [ ] memory system
+  - [ ] txt to tool-calling validation
+- [ ] strategy pipeline agent validation
+- [ ] ml pipeline validation
 
 ### optional features
 

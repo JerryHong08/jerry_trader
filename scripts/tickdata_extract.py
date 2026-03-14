@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "python" / "src"))
 import duckdb
 from tqdm import tqdm
 
-from jerry_trader.config import lake_data_dir
+from jerry_trader.platform.config.config import lake_data_dir
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"

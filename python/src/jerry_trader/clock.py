@@ -39,7 +39,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from jerry_trader._rust import ReplayClock, TickDataReplayer
-from jerry_trader.utils.logger import setup_logger
+from jerry_trader.shared.utils.logger import setup_logger
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
 
@@ -228,7 +228,7 @@ def start_heartbeat_publisher(
     Returns:
         The background daemon ``Thread`` (already started).
     """
-    from jerry_trader.utils.redis_keys import clock_heartbeat_channel
+    from jerry_trader.shared.ids.redis_keys import clock_heartbeat_channel
 
     channel = clock_heartbeat_channel(session_id)
     interval_s = interval_ms / 1000.0

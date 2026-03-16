@@ -45,7 +45,7 @@ from jerry_trader.platform.config.session import (
     parse_session_id,
     session_to_influx_tags,
 )
-from jerry_trader.schema import enforce_snapshot_schema
+from jerry_trader.platform.storage.polars_schemas import enforce_snapshot_schema
 from jerry_trader.shared.ids.redis_keys import (
     market_snapshot_processed,
     market_snapshot_stream,

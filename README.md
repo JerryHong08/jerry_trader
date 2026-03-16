@@ -280,7 +280,7 @@ mainly focus on strategy computation,execution,replay backtest. and the optimiza
 strategy:
 
 - [ ] rewrite stateEngine in rust.
-  - [ ] Factor output: InfluxDB → ClickHouse
+  - ✅ Factor output: InfluxDB → ClickHouse
 - [ ] rewrite factorEegine in Rust.
 - [ ] real-time risk management engine/trigger.
   - [ ] risk manage rule.

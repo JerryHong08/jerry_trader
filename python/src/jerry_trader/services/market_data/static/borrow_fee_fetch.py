@@ -15,7 +15,7 @@ from urllib.parse import urljoin
 import pandas as pd
 import requests
 
-from jerry_trader.schema import BorrowFee
+# TODO: Create BorrowFee domain model when needed
 
 
 class BorrowFeeProvider:

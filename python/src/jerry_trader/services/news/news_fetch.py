@@ -21,8 +21,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from jerry_trader.schema import NewsArticle, NewsFormatter
+from jerry_trader.domain.news.article import NewsArticle
+from jerry_trader.services.news.adapters import NewsArticleAdapter
 from jerry_trader.shared.logging.logger import setup_logger
+from jerry_trader.shared.utils.formatters import NewsFormatter
 from jerry_trader.shared.utils.momo_token import MoomooQuoteToken
 
 logger = setup_logger(__name__, log_to_file=True)
@@ -513,7 +515,9 @@ class MoomooStockResolver:
                             content = await self._fetch_content_async(article_url)
                         item["text"] = content
 
-                    article = NewsArticle.from_momo_web_response(symbol.upper(), item)
+                    article = NewsArticleAdapter.from_momo_web_response(
+                        symbol.upper(), item
+                    )
                     yield article
 
                 except Exception as e:
@@ -676,7 +680,7 @@ class API_NewsFetchers:
 
             for item in data:
                 try:
-                    article = NewsArticle.from_fmp_api_response(item)
+                    article = NewsArticleAdapter.from_fmp_api_response(item)
                     yield article
                 except Exception as e:
                     logger.error(f"Parse news data error: {e}, raw data: {item}")
@@ -766,7 +770,7 @@ class API_NewsFetchers:
             # Yield each article
             for item in data:
                 try:
-                    article = NewsArticle.from_benzinga_api_response(
+                    article = NewsArticleAdapter.from_benzinga_api_response(
                         symbol.upper(), item
                     )
                     yield article

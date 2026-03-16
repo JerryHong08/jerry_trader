@@ -16,8 +16,8 @@ import polars as pl
 import requests
 from bs4 import BeautifulSoup
 
+from jerry_trader.domain.market.snapshot import FloatShares, FloatSourceData
 from jerry_trader.platform.config.config import float_shares_dir
-from jerry_trader.schema import FloatShares, FloatSourceData
 from jerry_trader.shared.logging.logger import setup_logger
 from jerry_trader.shared.utils.parse import _parse_number, _parse_percent
 

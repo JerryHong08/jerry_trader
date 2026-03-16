@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 
 from jerry_trader.platform.config.config import cache_dir
 from jerry_trader.platform.config.session import make_session_id
-from jerry_trader.schema import MASSIVE_SNAPSHOT_SCHEMA
+from jerry_trader.platform.storage.polars_schemas import MASSIVE_SNAPSHOT_SCHEMA
 from jerry_trader.shared.ids.redis_keys import market_snapshot_stream
 from jerry_trader.shared.logging.logger import setup_logger
 

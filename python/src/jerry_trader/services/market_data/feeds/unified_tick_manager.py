@@ -29,7 +29,7 @@ from jerry_trader.services.market_data.feeds.replayer_manager import (
 )
 from jerry_trader.services.market_data.feeds.thetadata_manager import ThetaDataManager
 
-load_dotenv()
+load_dotenv(override=True)
 
 
 class UnifiedTickManager:

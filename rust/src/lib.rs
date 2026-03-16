@@ -27,6 +27,37 @@ mod _rust {
         factors::price_accel(recent, older)
     }
 
+    // ── Bar-based factor functions ───────────────────────────────────
+    #[pyfunction]
+    #[pyo3(name = "momentum")]
+    fn py_momentum(closes: Vec<f64>, window: usize) -> f64 {
+        factors::momentum(closes, window)
+    }
+
+    #[pyfunction]
+    #[pyo3(name = "volatility")]
+    fn py_volatility(closes: Vec<f64>, window: usize) -> f64 {
+        factors::volatility(closes, window)
+    }
+
+    #[pyfunction]
+    #[pyo3(name = "rsi")]
+    fn py_rsi(closes: Vec<f64>, window: usize) -> f64 {
+        factors::rsi(closes, window)
+    }
+
+    #[pyfunction]
+    #[pyo3(name = "vwap_deviation")]
+    fn py_vwap_deviation(bars: Vec<(f64, i64)>, window: usize) -> f64 {
+        factors::vwap_deviation(bars, window)
+    }
+
+    #[pyfunction]
+    #[pyo3(name = "volume_ratio")]
+    fn py_volume_ratio(volumes: Vec<i64>, window: usize) -> f64 {
+        factors::volume_ratio(volumes, window)
+    }
+
     // ── Bar builder ─────────────────────────────────────────────────
     #[pymodule_export]
     use super::bars::BarBuilder;

@@ -44,7 +44,7 @@ class PolygonWebSocketManager:
             # send authentication request
             await self.ws.send(json.dumps({"action": "auth", "params": self.api_key}))
 
-            print("✅ Authenticated to Polygon")
+            print(f"✅ Authenticated to Polygon{self.api_key}")
             if self.subscribed_streams:
                 # re-subscribe to existing streams
                 for stream_key in self.subscribed_streams:

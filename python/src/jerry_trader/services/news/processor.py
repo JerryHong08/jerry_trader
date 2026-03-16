@@ -21,9 +21,9 @@ import redis
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from jerry_trader.domain.news.article import NewsArticle
 from jerry_trader.platform.config.config import load_prompt
 from jerry_trader.platform.config.session import make_session_id
-from jerry_trader.schema import NewsArticle
 from jerry_trader.shared.ids.redis_keys import (
     news_article_stream,
     news_item_prefix,

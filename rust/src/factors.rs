@@ -91,6 +91,144 @@ fn return_rate(trades: &[(i64, f64)]) -> f64 {
     ((last_price / first_price) - 1.0) / dt_sec
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Bar-Based Factor Functions
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Compute price momentum over N bars.
+///
+/// momentum = (close_now - close_N_bars_ago) / close_N_bars_ago
+///
+/// Python signature: momentum(closes: list[float], window: int) -> float
+#[pyfunction]
+pub fn momentum(closes: Vec<f64>, window: usize) -> f64 {
+    if closes.len() < window + 1 || window == 0 {
+        return 0.0;
+    }
+    let recent = closes[closes.len() - 1];
+    let old = closes[closes.len() - 1 - window];
+    if old <= 0.0 {
+        return 0.0;
+    }
+    (recent - old) / old
+}
+
+/// Compute volatility (standard deviation of returns).
+///
+/// Python signature: volatility(closes: list[float], window: int) -> float
+#[pyfunction]
+pub fn volatility(closes: Vec<f64>, window: usize) -> f64 {
+    if closes.len() < window + 1 || window < 2 {
+        return 0.0;
+    }
+
+    let recent_closes: Vec<f64> = closes.iter().rev().take(window + 1).copied().collect();
+    let returns: Vec<f64> = (1..recent_closes.len())
+        .map(|i| {
+            let prev = recent_closes[i - 1];
+            let curr = recent_closes[i];
+            if prev > 0.0 {
+                (curr - prev) / prev
+            } else {
+                0.0
+            }
+        })
+        .collect();
+
+    if returns.is_empty() {
+        return 0.0;
+    }
+
+    let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+    let variance = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / returns.len() as f64;
+    variance.sqrt()
+}
+
+/// Compute Relative Strength Index (RSI).
+///
+/// RSI = 100 - (100 / (1 + RS)) where RS = avg_gain / avg_loss
+///
+/// Python signature: rsi(closes: list[float], window: int) -> float
+#[pyfunction]
+pub fn rsi(closes: Vec<f64>, window: usize) -> f64 {
+    if closes.len() < window + 1 || window < 2 {
+        return 50.0; // Neutral RSI
+    }
+
+    let recent_closes: Vec<f64> = closes.iter().rev().take(window + 1).copied().collect();
+    let mut gains = 0.0;
+    let mut losses = 0.0;
+
+    for i in 1..recent_closes.len() {
+        let change = recent_closes[i] - recent_closes[i - 1];
+        if change > 0.0 {
+            gains += change;
+        } else {
+            losses += -change;
+        }
+    }
+
+    let avg_gain = gains / window as f64;
+    let avg_loss = losses / window as f64;
+
+    if avg_loss == 0.0 {
+        return if avg_gain > 0.0 { 100.0 } else { 50.0 };
+    }
+
+    let rs = avg_gain / avg_loss;
+    100.0 - (100.0 / (1.0 + rs))
+}
+
+/// Compute VWAP deviation: (price - vwap) / vwap.
+///
+/// bars: Vec<(price, volume)>
+///
+/// Python signature: vwap_deviation(bars: list[tuple[float, int]], window: int) -> float
+#[pyfunction]
+pub fn vwap_deviation(bars: Vec<(f64, i64)>, window: usize) -> f64 {
+    if bars.len() < window || window == 0 {
+        return 0.0;
+    }
+
+    let recent_bars: Vec<(f64, i64)> = bars.iter().rev().take(window).copied().collect();
+    let total_volume: i64 = recent_bars.iter().map(|(_, v)| v).sum();
+
+    if total_volume == 0 {
+        return 0.0;
+    }
+
+    let vwap = recent_bars.iter()
+        .map(|(p, v)| p * (*v as f64))
+        .sum::<f64>() / total_volume as f64;
+
+    let current_price = recent_bars[0].0;
+    (current_price - vwap) / vwap
+}
+
+/// Compute volume ratio: current_volume / average_volume.
+///
+/// Python signature: volume_ratio(volumes: list[int], window: int) -> float
+#[pyfunction]
+pub fn volume_ratio(volumes: Vec<i64>, window: usize) -> f64 {
+    if volumes.is_empty() || window == 0 {
+        return 1.0;
+    }
+
+    let recent_volumes: Vec<i64> = volumes.iter().rev().take(window + 1).copied().collect();
+    if recent_volumes.is_empty() {
+        return 1.0;
+    }
+
+    let current_vol = recent_volumes[0] as f64;
+    let avg_vol = recent_volumes.iter().skip(1).map(|&v| v as f64).sum::<f64>() / window as f64;
+
+    if avg_vol <= 0.0 {
+        return 1.0;
+    }
+
+    current_vol / avg_vol
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -88,11 +88,13 @@ machines:
       #   enabled: true
       #   redis: "redis-a"
       #   influxdb: "influxdb-a"
-      # FactorEngine:
-      #   enabled: true
-      #   manager_type: "replayer" # choices=["polygon", "theta", "replayer", "synced-replayer"]
-      #   redis: "redis-a"
-      #   influxdb: "influxdb-a"
+      FactorEngine:
+        enabled: true
+        # manager_type: "replayer" # choices=["polygon", "theta", "replayer", "synced-replayer"]
+        redis: "redis-a"
+        clickhouse: "clickhouse-a"
+        timeframe: "1m"
+        # influxdb: "influxdb-a"
 
   mibuntu:
     limit: "market_open"    # market_open | market_close | null (never stop)

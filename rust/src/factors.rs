@@ -229,6 +229,38 @@ pub fn volume_ratio(volumes: Vec<i64>, window: usize) -> f64 {
     current_vol / avg_vol
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Tick-Based Indicator Functions
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Compute trade rate (trades per second) from timestamps.
+///
+/// Counts trades within [current_ms - window_ms, current_ms] and divides by window seconds.
+/// Returns None if fewer than min_trades in window.
+///
+/// Python signature: trade_rate(timestamps: list[int], current_ms: int, window_ms: int, min_trades: int) -> float | None
+#[pyfunction]
+#[pyo3(signature = (timestamps, current_ms, window_ms, min_trades = 5))]
+pub fn trade_rate(
+    timestamps: Vec<i64>,
+    current_ms: i64,
+    window_ms: i64,
+    min_trades: usize,
+) -> Option<f64> {
+    if window_ms <= 0 {
+        return None;
+    }
+
+    let cutoff = current_ms - window_ms;
+    let count = timestamps.iter().filter(|&&ts| ts >= cutoff && ts <= current_ms).count();
+
+    if count < min_trades {
+        return None;
+    }
+
+    Some(count as f64 / (window_ms as f64 / 1000.0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

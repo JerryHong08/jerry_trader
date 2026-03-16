@@ -30,7 +30,7 @@ from jerry_trader.shared.logging.logger import setup_logger
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
 
-load_dotenv()
+load_dotenv(override=True)
 
 api_key = os.getenv("POLYGON_API_KEY")
 

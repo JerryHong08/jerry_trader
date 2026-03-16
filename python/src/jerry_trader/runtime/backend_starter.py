@@ -445,44 +445,27 @@ class JerryTraderBackendStarter:
             self.chart_bff = None
 
         if "FactorEngine" in self.roles:
-            from jerry_trader.services.factor.factor_engine import FactorManager
-            from jerry_trader.services.factor.factor_engine_v2 import FactorEngine
+            from jerry_trader.services.factor.factor_engine import FactorEngine
 
             role_cfg = self.roles["FactorEngine"]
 
-            # # If ChartBFF is also enabled, share the UnifiedTickManager
-            # if self.chart_bff is not None:
-            #     self.factor_engine = FactorManager(
-            #         session_id=self.session_id,
-            #         redis_config=role_cfg.get("redis"),
-            #         influxdb_config=role_cfg.get("influxdb"),
-            #         ws_manager=self.chart_bff.manager,
-            #         ws_loop=self._shared_ws_loop,
-            #     )
-            # else:
-            #     # Standalone FactorEngine with its own manager
-            #     self.factor_engine = FactorManager(
-            #         session_id=self.session_id,
-            #         manager_type=role_cfg.get("manager_type"),
-            #         redis_config=role_cfg.get("redis"),
-            #         influxdb_config=role_cfg.get("influxdb"),
-            #     )
-            # If ChartBFF is also enabled, share the UnifiedTickManager
+            # FactorEngine needs ws_manager for tick-based indicators (trade_rate)
+            # Share with ChartBFF if co-located
             if self.chart_bff is not None:
                 self.factor_engine = FactorEngine(
                     session_id=self.session_id,
                     redis_config=role_cfg.get("redis"),
-                    influxdb_config=role_cfg.get("influxdb"),
-                    ws_manager=self.chart_bff.manager,
+                    ws_manager=self._shared_ws_manager,
                     ws_loop=self._shared_ws_loop,
+                    timeframe=role_cfg.get("timeframe", "1m"),
                 )
             else:
                 # Standalone FactorEngine with its own manager
                 self.factor_engine = FactorEngine(
                     session_id=self.session_id,
-                    manager_type=role_cfg.get("manager_type"),
                     redis_config=role_cfg.get("redis"),
-                    clickhouse_config=role_cfg.get("clickhouse"),
+                    manager_type=role_cfg.get("manager_type"),
+                    timeframe=role_cfg.get("timeframe", "1m"),
                 )
 
             self._services.append(("FactorEngine", self.factor_engine))

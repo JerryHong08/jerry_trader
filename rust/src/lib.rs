@@ -58,6 +58,19 @@ mod _rust {
         factors::volume_ratio(volumes, window)
     }
 
+    // ── Tick-based indicator functions ────────────────────────────────
+    #[pyfunction]
+    #[pyo3(name = "trade_rate")]
+    #[pyo3(signature = (timestamps, current_ms, window_ms, min_trades = 5))]
+    fn py_trade_rate(
+        timestamps: Vec<i64>,
+        current_ms: i64,
+        window_ms: i64,
+        min_trades: usize,
+    ) -> Option<f64> {
+        factors::trade_rate(timestamps, current_ms, window_ms, min_trades)
+    }
+
     // ── Bar builder ─────────────────────────────────────────────────
     #[pymodule_export]
     use super::bars::BarBuilder;

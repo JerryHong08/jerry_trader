@@ -35,7 +35,7 @@ import type {
   HistogramData,
   Time,
 } from 'lightweight-charts';
-import { Wifi, WifiOff, BarChart3, TrendingUp, Loader2 } from 'lucide-react';
+import { Wifi, WifiOff, BarChart3, TrendingUp, Loader2, RefreshCw } from 'lucide-react';
 import type { ModuleProps, ChartTimeframe } from '../types';
 import { useTickDataStore, type Trade, type Quote } from '../stores/tickDataStore';
 import { useChartDataStore, chartStoreKey } from '../stores/chartDataStore';
@@ -69,6 +69,7 @@ export function ChartModule({
   const connected = useTickDataStore((s) => s.connected);
   const addSymbols = useTickDataStore((s) => s.addSymbols);
   const removeSymbolFromStore = useTickDataStore((s) => s.removeSymbol);
+  const reconnect = useTickDataStore((s) => s.reconnect);
   const symbolData = useTickDataStore((s) => s.symbolData);
 
   // Chart data store (OHLCV bars)
@@ -571,6 +572,14 @@ export function ChartModule({
           ) : (
             <WifiOff className="w-3.5 h-3.5 text-red-500 flex-shrink-0" />
           )}
+
+          <button
+            onClick={reconnect}
+            className="p-0.5 hover:bg-zinc-800 transition-colors rounded"
+            title="Reconnect WebSocket"
+          >
+            <RefreshCw className="w-3.5 h-3.5 text-gray-400" />
+          </button>
 
           {symbols.map((s) => (
             <button

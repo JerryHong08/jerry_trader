@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback, memo } from 'react';
-import { TrendingUp, TrendingDown, ArrowUpDown, ArrowUp, ArrowDown, Settings, X, Newspaper, Wifi, WifiOff, Eye, EyeOff, Loader2 } from 'lucide-react';
+import { TrendingUp, TrendingDown, ArrowUpDown, ArrowUp, ArrowDown, Settings, X, Newspaper, Wifi, WifiOff, Eye, EyeOff, Loader2, RefreshCw } from 'lucide-react';
 import type { ModuleProps, RankItem, TickerState, RankListSortColumn, RankListSortDirection } from '../types';
 import { useBackendTimestamp, timestampStore, parseTimestamp } from '../hooks/useBackendTimestamps';
-import { useRankListData, useWebSocketConnection, useTickerVisibility } from '../hooks/useWebSocket';
+import { useRankListData, useWebSocketConnection, useTickerVisibility, reconnectMainWebSocket } from '../hooks/useWebSocket';
 
 // Default column configuration
 const DEFAULT_COLUMNS: RankListSortColumn[] = [
@@ -556,13 +556,22 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
         </div>
         <div className="flex items-center gap-2">
           {!useMockData && (
-            <button
-              onClick={refresh}
-              className="p-1 hover:bg-zinc-800 transition-colors rounded text-xs text-gray-400"
-              title="Refresh data"
-            >
-              ↻
-            </button>
+            <>
+              <button
+                onClick={refresh}
+                className="p-1 hover:bg-zinc-800 transition-colors rounded text-xs text-gray-400"
+                title="Refresh data"
+              >
+                ↻
+              </button>
+              <button
+                onClick={reconnectMainWebSocket}
+                className="p-1 hover:bg-zinc-800 transition-colors rounded"
+                title="Reconnect WebSocket"
+              >
+                <RefreshCw className="w-4 h-4 text-gray-400" />
+              </button>
+            </>
           )}
           <button
             onClick={() => setShowColumnSettings(!showColumnSettings)}

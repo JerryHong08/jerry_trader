@@ -12,10 +12,10 @@
 
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { createChart, IChartApi, ISeriesApi, LineSeries, LineData, Time, ColorType, CrosshairMode, LineStyle, PriceScaleMode } from 'lightweight-charts';
-import { Filter, Focus, TrendingUp, Wifi, WifiOff, ZoomIn, ZoomOut, Maximize2, RotateCcw } from 'lucide-react';
+import { Filter, Focus, TrendingUp, Wifi, WifiOff, ZoomIn, ZoomOut, Maximize2, RotateCcw, RefreshCw } from 'lucide-react';
 import type { ModuleProps, RankItem, TickerState } from '../types';
 import { useBackendTimestamp, timestampStore, parseTimestamp } from '../hooks/useBackendTimestamps';
-import { useOverviewChartData, useWebSocketConnection, useTickerVisibility, setTopN as sendSetTopN, type TickerDataWithHistory } from '../hooks/useWebSocket';
+import { useOverviewChartData, useWebSocketConnection, useTickerVisibility, setTopN as sendSetTopN, reconnectMainWebSocket, type TickerDataWithHistory } from '../hooks/useWebSocket';
 import { GridItem } from './GridItem';
 
 // ============================================================================
@@ -1099,6 +1099,15 @@ export function OverviewChartModule({
               className="px-2 py-1 text-xs bg-zinc-700 hover:bg-zinc-600 rounded"
             >
               Refresh
+            </button>
+
+            {/* WebSocket Reconnect Button */}
+            <button
+              onClick={reconnectMainWebSocket}
+              className="p-1 hover:bg-zinc-700 transition-colors rounded"
+              title="Reconnect WebSocket"
+            >
+              <RefreshCw className="w-4 h-4 text-gray-400" />
             </button>
           </div>
         </div>

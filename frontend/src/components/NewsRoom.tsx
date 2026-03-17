@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Newspaper, Filter, ExternalLink, TrendingUp, TrendingDown, Search, X } from 'lucide-react';
+import { Newspaper, Filter, ExternalLink, TrendingUp, TrendingDown, Search, X, RefreshCw } from 'lucide-react';
 import type { ModuleProps, NewsProcessorResult } from '../types';
-import { subscribeNewsProcessorResults } from '../hooks/useWebSocket';
+import { subscribeNewsProcessorResults, reconnectAgentWebSocket } from '../hooks/useWebSocket';
 
 interface NewsRoomFilters {
   model: string;
@@ -138,13 +138,22 @@ export default function NewsRoom({ moduleId }: ModuleProps) {
               ({stats.total} results, {stats.catalysts} catalysts)
             </span>
           </div>
-          <button
-            onClick={() => setShowFilters(!showFilters)}
-            className="flex items-center gap-1 px-2.5 py-1.5 text-xs bg-zinc-800 hover:bg-zinc-700 rounded transition-colors text-gray-400 hover:text-white"
-          >
-            <Filter className="w-3.5 h-3.5" />
-            {showFilters ? 'Hide' : 'Filters'}
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={reconnectAgentWebSocket}
+              className="p-1 hover:bg-zinc-700 transition-colors rounded"
+              title="Reconnect WebSocket"
+            >
+              <RefreshCw className="w-4 h-4 text-gray-400" />
+            </button>
+            <button
+              onClick={() => setShowFilters(!showFilters)}
+              className="flex items-center gap-1 px-2.5 py-1.5 text-xs bg-zinc-800 hover:bg-zinc-700 rounded transition-colors text-gray-400 hover:text-white"
+            >
+              <Filter className="w-3.5 h-3.5" />
+              {showFilters ? 'Hide' : 'Filters'}
+            </button>
+          </div>
         </div>
       </div>
 

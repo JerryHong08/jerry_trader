@@ -1133,3 +1133,55 @@ export function disconnectSocket() {
   useMarketDataStore.getState().reset();
   messageQueue = [];
 }
+
+/**
+ * Reconnect main BFF WebSocket
+ * Closes existing connection and creates a new one
+ */
+export function reconnectMainWebSocket() {
+  console.log('[WebSocket] Manual reconnect requested');
+
+  // Clear any pending reconnect timeout
+  if (reconnectTimeout) {
+    clearTimeout(reconnectTimeout);
+    reconnectTimeout = null;
+  }
+
+  // Close existing connection
+  if (wsInstance) {
+    wsInstance.close();
+    wsInstance = null;
+  }
+
+  // Reset reconnect attempts
+  reconnectAttempts = 0;
+
+  // Create new connection
+  getWebSocket();
+}
+
+/**
+ * Reconnect AgentBFF WebSocket
+ * Closes existing connection and creates a new one
+ */
+export function reconnectAgentWebSocket() {
+  console.log('[AgentBFF WebSocket] Manual reconnect requested');
+
+  // Clear any pending reconnect timeout
+  if (agentReconnectTimeout) {
+    clearTimeout(agentReconnectTimeout);
+    agentReconnectTimeout = null;
+  }
+
+  // Close existing connection
+  if (agentWsInstance) {
+    agentWsInstance.close();
+    agentWsInstance = null;
+  }
+
+  // Reset reconnect attempts
+  agentReconnectAttempts = 0;
+
+  // Create new connection
+  getAgentWebSocket();
+}

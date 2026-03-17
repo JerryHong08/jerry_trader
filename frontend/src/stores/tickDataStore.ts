@@ -56,6 +56,7 @@ type TickDataState = {
   // Actions
   init: () => void;
   dispose: () => void;
+  reconnect: () => void;
   addSymbols: (newSyms: string[], events: string[]) => void;
   removeSymbol: (symbol: string) => void;
 };
@@ -199,6 +200,13 @@ export const useTickDataStore = create<TickDataState>()((set, get) => ({
     ws?.close();
     ws = null;
     set({ connected: false });
+  },
+
+  reconnect: () => {
+    console.log('[TickData] Manual reconnect requested');
+    ws?.close();
+    ws = null;
+    get().init();
   },
 
   addSymbols: (newSyms, events) => {

@@ -510,6 +510,16 @@ class JerryTraderBackendStarter:
         # if self.chart_bff is not None and self.bars_builder is not None:
         #     self.chart_bff._bars_builder = self.bars_builder
 
+        # Wire FactorEngine ↔ BarsBuilder for trade observer bootstrap
+        if self.factor_engine and self.bars_builder:
+            self.factor_engine.set_bars_builder(self.bars_builder)
+            logger.info("Wired FactorEngine ↔ BarsBuilder (trade observer)")
+
+        # Pass factor_engine to ChartBFF for bootstrap wait
+        if self.chart_bff and self.factor_engine:
+            self.chart_bff.set_factor_engine(self.factor_engine)
+            logger.info("Wired ChartBFF ← FactorEngine (bootstrap wait)")
+
         if "AgentBFF" in self.roles:
             from jerry_trader.apps.news_app.server import AgentBFF
 

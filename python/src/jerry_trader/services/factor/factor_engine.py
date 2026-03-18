@@ -20,11 +20,15 @@ import redis
 import jerry_trader.clock as clock_mod
 from jerry_trader.domain.factor import FactorSnapshot
 from jerry_trader.domain.market import Bar
-from jerry_trader.platform.storage.clickhouse import get_clickhouse_client
+from jerry_trader.platform.storage.clickhouse import (
+    get_clickhouse_client,
+    query_ohlcv_bars,
+)
 from jerry_trader.services.factor.factor_storage import FactorStorage
 from jerry_trader.services.factor.indicators import (
     EMA,
     BarIndicator,
+    QuoteIndicator,
     TickIndicator,
     TradeRate,
 )
@@ -46,12 +50,15 @@ class TickerState:
     symbol: str
     bar_indicators: list[BarIndicator] = field(default_factory=list)
     tick_indicators: list[TickIndicator] = field(default_factory=list)
+    quote_indicators: list[QuoteIndicator] = field(default_factory=list)
 
     def reset(self) -> None:
         """Reset all indicators."""
         for ind in self.bar_indicators:
             ind.reset()
         for ind in self.tick_indicators:
+            ind.reset()
+        for ind in self.quote_indicators:
             ind.reset()
 
 
@@ -74,7 +81,6 @@ class FactorEngine:
         clickhouse_config: dict[str, Any] | None = None,
         # Unused params for backend_starter compatibility
         manager_type: str | None = None,
-        influxdb_config: dict | None = None,
     ):
         """Initialize the factor engine.
 
@@ -128,6 +134,12 @@ class FactorEngine:
         self._tasks_thread: threading.Thread | None = None
         self._compute_thread: threading.Thread | None = None
 
+        # Bootstrap state
+        self._bootstrap_events: dict[str, threading.Event] = {}
+        self._bootstrap_done: set[str] = set()
+        self._bars_builder = None  # set by backend_starter via set_bars_builder()
+        self._ch_client = ch_client  # raw ClickHouse client for bar queries
+
         logger.info(
             f"FactorEngine initialized: session={session_id}, timeframe={timeframe}, "
             f"shared_manager={not self._owns_manager}, storage={'enabled' if self.storage else 'disabled'}"
@@ -164,16 +176,31 @@ class FactorEngine:
             # Create indicator instances
             state = TickerState(
                 symbol=symbol,
-                bar_indicators=[EMA(period=1)],
+                bar_indicators=[EMA(period=20)],
                 tick_indicators=[TradeRate(window_ms=20_000, min_trades=5)],
+                quote_indicators=[],
             )
             self.ticker_states[symbol] = state
+
+        # Create bootstrap Event
+        if symbol not in self._bootstrap_events:
+            self._bootstrap_events[symbol] = threading.Event()
 
         # Subscribe to bar pub/sub channel
         self._subscribe_bars(symbol)
 
         # Subscribe to tick stream
         self._subscribe_ticks(symbol)
+
+        # Start bootstrap in background thread
+        if self._bars_builder is not None:
+            t = threading.Thread(
+                target=self._run_bootstrap,
+                args=(symbol,),
+                daemon=True,
+                name=f"FactorEngine-Bootstrap-{symbol}",
+            )
+            t.start()
 
         logger.info(f"FactorEngine: tracking {symbol}")
 
@@ -196,6 +223,193 @@ class FactorEngine:
         self._unsubscribe_ticks(symbol)
 
         logger.info(f"FactorEngine: stopped tracking {symbol}")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Bootstrap
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def set_bars_builder(self, bars_builder) -> None:
+        """Wire BarsBuilder for trade observer bootstrap."""
+        self._bars_builder = bars_builder
+        bars_builder.register_trade_observer(self._on_bootstrap_trades)
+
+    def _on_bootstrap_trades(self, symbol: str, trades: list[tuple]) -> None:
+        """Callback from BarsBuilder.trades_backfill with historical trades (UTC).
+
+        Feeds trades to tick indicators and simulates 1s compute intervals
+        to generate historical tick-based factor snapshots.
+        """
+        # Wait up to 2s for TickerState to exist (BarsBuilder may process
+        # "add" before FactorEngine)
+        state = None
+        for _ in range(20):
+            state = self.ticker_states.get(symbol)
+            if state:
+                break
+            time.sleep(0.1)
+
+        if not state:
+            logger.warning(
+                f"_on_bootstrap_trades - {symbol}: TickerState not found after 2s, skipping"
+            )
+            return
+
+        logger.info(
+            f"_on_bootstrap_trades - {symbol}: feeding {len(trades)} trades to tick indicators"
+        )
+
+        # Feed trades and simulate 1s compute intervals
+        snapshots: list[FactorSnapshot] = []
+        last_compute_ms = 0
+
+        for ts_ms, price, size in trades:
+            ts_ms = int(ts_ms)
+            for ind in state.tick_indicators:
+                ind.on_tick(ts_ms, float(price), int(size))
+
+            # Compute every 1000ms
+            if last_compute_ms == 0:
+                last_compute_ms = ts_ms
+            elif ts_ms - last_compute_ms >= 1000:
+                factors: dict[str, float] = {}
+                for ind in state.tick_indicators:
+                    value = ind.compute(ts_ms)
+                    if value is not None:
+                        factors[ind.name] = value
+                if factors:
+                    snapshots.append(
+                        FactorSnapshot(
+                            symbol=symbol,
+                            timestamp_ns=ts_ms * 1_000_000,
+                            factors=factors,
+                        )
+                    )
+                last_compute_ms = ts_ms
+
+        # Batch write tick-based factor snapshots to ClickHouse
+        if snapshots and self.storage:
+            count = self.storage.write_batch(snapshots)
+            logger.info(
+                f"_on_bootstrap_trades - {symbol}: wrote {count} tick factor rows "
+                f"from {len(snapshots)} snapshots"
+            )
+
+    def _bootstrap_bars(self, symbol: str) -> None:
+        """Warm up bar-based indicators (EMA) from today's completed bars in ClickHouse."""
+        if not self._ch_client:
+            logger.warning(
+                f"_bootstrap_bars - {symbol}: no ClickHouse client, skipping"
+            )
+            return
+
+        state = self.ticker_states.get(symbol)
+        if not state:
+            return
+
+        # Query today's bars from ClickHouse
+        now_ms = clock_mod.now_ms()
+        # Go back 24h to cover pre-market
+        start_ms = now_ms - 86_400_000
+        result = query_ohlcv_bars(
+            self._ch_client, symbol, self.timeframe, start_ms, now_ms
+        )
+
+        if not result or not result.get("bars"):
+            logger.info(f"_bootstrap_bars - {symbol}: no bars found for warmup")
+            return
+
+        bars = result["bars"]
+        logger.info(
+            f"_bootstrap_bars - {symbol}: feeding {len(bars)} bars to bar indicators"
+        )
+
+        snapshots: list[FactorSnapshot] = []
+        for bar_dict in bars:
+            bar = Bar(
+                symbol=symbol,
+                timestamp_ns=bar_dict["bar_start"] * 1_000_000,
+                timespan=self.timeframe,
+                open=bar_dict["open"],
+                high=bar_dict["high"],
+                low=bar_dict["low"],
+                close=bar_dict["close"],
+                volume=int(bar_dict.get("volume", 0)),
+                vwap=bar_dict.get("vwap"),
+                trade_count=bar_dict.get("trade_count"),
+            )
+
+            factors: dict[str, float] = {}
+            for ind in state.bar_indicators:
+                value = ind.update(bar)
+                if value is not None:
+                    factors[ind.name] = value
+
+            if factors:
+                snapshots.append(
+                    FactorSnapshot(
+                        symbol=symbol,
+                        timestamp_ns=bar.timestamp_ns,
+                        factors=factors,
+                    )
+                )
+
+        # Batch write bar-based factor snapshots
+        if snapshots and self.storage:
+            count = self.storage.write_batch(snapshots)
+            logger.info(
+                f"_bootstrap_bars - {symbol}: wrote {count} bar factor rows "
+                f"from {len(snapshots)} snapshots"
+            )
+
+    def _run_bootstrap(self, symbol: str) -> None:
+        """Orchestrate factor bootstrap for a ticker."""
+        try:
+            # 1. Wait for BarsBuilder bootstrap to complete (bars in ClickHouse)
+            if self._bars_builder is not None:
+                logger.info(
+                    f"_run_bootstrap - {symbol}: waiting for bars_builder bootstrap"
+                )
+                ok = self._bars_builder.wait_for_bootstrap(symbol, timeout=30.0)
+                if not ok:
+                    logger.warning(
+                        f"_run_bootstrap - {symbol}: bars_builder bootstrap timed out"
+                    )
+
+            # 2. Bar-based indicator warmup from ClickHouse bars
+            self._bootstrap_bars(symbol)
+
+            # 3. Tick bootstrap already happened via _on_bootstrap_trades callback
+
+            logger.info(f"_run_bootstrap - {symbol}: bootstrap complete")
+        except Exception as e:
+            logger.error(f"_run_bootstrap - {symbol}: error - {e}")
+        finally:
+            self._bootstrap_done.add(symbol)
+            evt = self._bootstrap_events.get(symbol)
+            if evt:
+                evt.set()
+
+    def pre_register_bootstrap(self, symbol: str) -> None:
+        """Pre-create a bootstrap Event for this ticker.
+
+        Called by ChartBFF BEFORE the Redis XADD so that any concurrent
+        REST request will block on wait_for_bootstrap.
+        """
+        if symbol not in self._bootstrap_events:
+            self._bootstrap_events[symbol] = threading.Event()
+            logger.debug(f"pre_register_bootstrap - {symbol}: Event pre-created")
+
+    def wait_for_bootstrap(self, symbol: str, timeout: float = 10.0) -> bool:
+        """Wait until factor bootstrap completes for this ticker.
+
+        Returns True if bootstrap completed, False if timed out.
+        """
+        if symbol in self._bootstrap_done:
+            return True
+        evt = self._bootstrap_events.get(symbol)
+        if evt is None:
+            return True
+        return evt.wait(timeout=timeout)
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Bar Subscription (Redis pub/sub)
@@ -292,19 +506,19 @@ class FactorEngine:
         if not self.ws_manager or not self.ws_loop:
             return
 
-        # Subscribe to trades only (not quotes)
+        # Subscribe to trades and quotes
         asyncio.run_coroutine_threadsafe(
             self.ws_manager.subscribe(
                 websocket_client="factor_engine",
                 symbols=[symbol],
-                events=["T"],
+                events=["T", "Q"],
             ),
             self.ws_loop,
         )
 
         # Start consumer for this stream
         stream_keys = self.ws_manager.generate_stream_keys(
-            symbols=[symbol], events=["T"]
+            symbols=[symbol], events=["T", "Q"]
         )
         for stream_key in stream_keys:
             future = asyncio.run_coroutine_threadsafe(
@@ -325,13 +539,13 @@ class FactorEngine:
             self.ws_manager.unsubscribe(
                 websocket_client="factor_engine",
                 symbol=symbol,
-                events=["T"],
+                events=["T", "Q"],
             ),
             self.ws_loop,
         )
 
         stream_keys = self.ws_manager.generate_stream_keys(
-            symbols=[symbol], events=["T"]
+            symbols=[symbol], events=["T", "Q"]
         )
         for stream_key in stream_keys:
             future = self._tick_consumers.pop(stream_key, None)
@@ -345,11 +559,16 @@ class FactorEngine:
             logger.warning(f"FactorEngine: No queue for {stream_key}")
             return
 
+        is_quote = ".Q." in stream_key or stream_key.endswith(".Q")
+
         while True:
             try:
                 data = await q.get()
                 normalized = self.ws_manager.normalize_data(data)
-                self._on_tick(normalized)
+                if is_quote:
+                    self._on_quote(normalized)
+                else:
+                    self._on_tick(normalized)
             except asyncio.CancelledError:
                 logger.debug(f"FactorEngine: tick consumer cancelled for {stream_key}")
                 break
@@ -379,6 +598,28 @@ class FactorEngine:
         for ind in state.tick_indicators:
             ind.on_tick(int(ts_ms), float(price), int(size))
 
+    def _on_quote(self, data: dict) -> None:
+        """Handle a quote tick."""
+        symbol = data.get("symbol")
+        state = self.ticker_states.get(symbol) if symbol else None
+        if not state or not state.quote_indicators:
+            return
+
+        ts_ms = data.get("timestamp")
+        bid = data.get("bid_price") or data.get("bid")
+        ask = data.get("ask_price") or data.get("ask")
+        if ts_ms is None or bid is None or ask is None:
+            return
+
+        for ind in state.quote_indicators:
+            ind.on_quote(
+                int(ts_ms),
+                float(bid),
+                float(ask),
+                int(data.get("bid_size", 0)),
+                int(data.get("ask_size", 0)),
+            )
+
     # ═══════════════════════════════════════════════════════════════════════════
     # Tick Indicator Compute Loop (every 1s)
     # ═══════════════════════════════════════════════════════════════════════════
@@ -397,6 +638,11 @@ class FactorEngine:
                 try:
                     factors: dict[str, float] = {}
                     for ind in state.tick_indicators:
+                        value = ind.compute(ts_ms)
+                        if value is not None:
+                            factors[ind.name] = value
+
+                    for ind in state.quote_indicators:
                         value = ind.compute(ts_ms)
                         if value is not None:
                             factors[ind.name] = value

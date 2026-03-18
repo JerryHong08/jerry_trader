@@ -233,6 +233,9 @@ class BarsBuilderService:
         self._bootstrap_done: Dict[str, set] = {}
         self._bootstrap_events: Dict[str, Event] = {}
 
+        # ── Trade observers (e.g., FactorEngine bootstrap) ────────
+        self._trade_observers: list = []
+
     # ════════════════════════════════════════════════════════════════════
     # Lifecycle
     # ════════════════════════════════════════════════════════════════════
@@ -653,6 +656,15 @@ class BarsBuilderService:
                 logger.info(f"trades_backfill - {symbol}: no trades before WS start")
                 return
 
+            # Notify trade observers (e.g., FactorEngine bootstrap)
+            for observer in self._trade_observers:
+                try:
+                    observer(symbol, trades)
+                except Exception as e:
+                    logger.error(
+                        f"trades_backfill - {symbol}: trade observer error - {e}"
+                    )
+
             # ── Convert UTC → ET for Rust BarBuilder ─────────────────
             # Rust expects timestamps in US/Eastern time (handles session boundaries correctly)
             trades_et = [(self._utc_ms_to_et_ms(t), p, s) for t, p, s in trades]
@@ -805,6 +817,13 @@ class BarsBuilderService:
         if evt is None:
             return True  # no bootstrap in progress
         return evt.wait(timeout=timeout)
+
+    def register_trade_observer(self, callback) -> None:
+        """Register callback to receive historical trades during bootstrap.
+
+        callback(symbol, trades) where trades = [(ts_ms_utc, price, size), ...]
+        """
+        self._trade_observers.append(callback)
 
     def _try_merge_meeting_bar(self, bar: dict) -> dict:
         """If this completed bar is a meeting bar with a stored REST partial,

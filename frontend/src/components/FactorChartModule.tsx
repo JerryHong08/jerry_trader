@@ -14,7 +14,7 @@
  */
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { createChart, IChartApi, ISeriesApi, ColorType, CrosshairMode } from 'lightweight-charts';
+import { createChart, IChartApi, ISeriesApi, LineSeries, ColorType, CrosshairMode } from 'lightweight-charts';
 import { Eye, EyeOff, TrendingUp } from 'lucide-react';
 import { useFactorDataStore, factorStoreKey } from '../stores/factorDataStore';
 import { useTickDataStore } from '../stores/tickDataStore';
@@ -176,7 +176,7 @@ export function FactorChartModule({
       if (points.length === 0) return;
 
       try {
-        const series = chart.addLineSeries({
+        const series = chart.addSeries(LineSeries, {
           color: config.color,
           lineWidth: 2,
           priceScaleId: config.priceScaleId,

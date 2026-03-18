@@ -2,8 +2,13 @@
 
 this file has my trading system module summary and the roadmap from very early experimental stage to planned.
 
-<!-- Details in [Jerry_Trader.pdf](docs/jerry_trader.pdf) -->
-Details in [ARCHITECTURE.md](ARCHITECTURE.md)
+Architecture in [ARCHITECTURE.md](ARCHITECTURE.md)
+
+Detailed Document in [Jerry_Trader.pdf](docs/jerry_trader.pdf) (not refactored yet.)
+
+Roadmap in [ROADMAP.md](ROADMAP.md)
+
+Changelod in [CHANGELOG.md](CHANGELOG.md)
 
 ## Installation & Quick Start
 

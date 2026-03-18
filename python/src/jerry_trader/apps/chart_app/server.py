@@ -194,6 +194,14 @@ class ChartBFF:
             else None
         )
 
+        # Optional reference to FactorEngine (same process).
+        # Used to wait for factor bootstrap before serving factor REST responses.
+        self._factor_engine = None
+
+    def set_factor_engine(self, engine) -> None:
+        """Set FactorEngine reference for bootstrap wait."""
+        self._factor_engine = engine
+
     def _setup_routes(self):
         """Setup FastAPI routes and WebSocket endpoints."""
 
@@ -392,6 +400,10 @@ class ChartBFF:
                     {"error": "FactorStorage not available", "ticker": ticker_upper},
                     status_code=503,
                 )
+
+            # Wait for factor bootstrap before querying
+            if self._factor_engine is not None:
+                self._factor_engine.wait_for_bootstrap(ticker_upper, timeout=10.0)
 
             # Default: last 1 hour
             import time as time_module

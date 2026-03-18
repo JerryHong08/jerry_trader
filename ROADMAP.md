@@ -71,9 +71,12 @@ strategy:
 
 - ✅ rewrite factorEegine in Rust.
   - ✅ factor output: InfluxDB → ClickHouse
-  - [ ] currently in frontend, factor chart module behaves as a sub follower chart as main chart, the connection works but the line series render has not succeeded yet.
+  - [ ] factor chart module behaves as a sub follower chart as main chart.
+    - [ ] real-time update not done yet.
   - [ ] factor bootstrap sync to the trades_bootstrap.(quotes_bootstrap needed in the future for factors like spread etc.)
-  - [ ] delete the deprecated factor_manager.py code.
+    - [ ] it triggers trades_backfill every time main bar chart switch the timeframe, need to be decoupled and fixed.
+  - [ ] configurable timeframe switch and bootstrap computation
+  - ✅ delete the deprecated factor_manager.py code.
 - [ ] rewrite stateEngine in rust.
 - [ ] real-time risk management engine/trigger.
   - [ ] risk manage rule.
@@ -91,8 +94,6 @@ ochesration:
 
 frontend:
 
-- [ ] simple indicators visualization
-- [ ] visualization of factors in chart module.
 - [ ] abstract all the search box into one.
 - [ ] better UX
   - ✅ keyboard shortcut

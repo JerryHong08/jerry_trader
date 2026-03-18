@@ -18,7 +18,10 @@ from typing import Any
 import redis
 
 import jerry_trader.clock as clock_mod
+from jerry_trader.domain.factor import FactorSnapshot
 from jerry_trader.domain.market import Bar
+from jerry_trader.platform.storage.clickhouse import get_clickhouse_client
+from jerry_trader.services.factor.factor_storage import FactorStorage
 from jerry_trader.services.factor.indicators import (
     EMA,
     BarIndicator,
@@ -58,7 +61,7 @@ class FactorEngine:
     Architecture:
         UnifiedTickManager → ticks → TickIndicators (trade_rate)
         BarsBuilder → Redis pub/sub → BarIndicators (EMA)
-        FactorEngine → factors:{symbol} Redis pub/sub → SignalsEngine + ChartBFF
+        FactorEngine → ClickHouse (via FactorStorage)
     """
 
     def __init__(
@@ -68,9 +71,9 @@ class FactorEngine:
         ws_manager: UnifiedTickManager | None = None,
         ws_loop: asyncio.AbstractEventLoop | None = None,
         timeframe: str = "1m",
+        clickhouse_config: dict[str, Any] | None = None,
         # Unused params for backend_starter compatibility
         manager_type: str | None = None,
-        clickhouse_config: dict | None = None,
         influxdb_config: dict | None = None,
     ):
         """Initialize the factor engine.
@@ -81,6 +84,7 @@ class FactorEngine:
             ws_manager: Shared UnifiedTickManager for tick data
             ws_loop: Event loop for async tick consumption
             timeframe: Bar timeframe to subscribe to (default: 1m)
+            clickhouse_config: ClickHouse connection config
         """
         self.session_id = session_id
         self.timeframe = timeframe
@@ -93,6 +97,10 @@ class FactorEngine:
             db=redis_config.get("db", 0),
             decode_responses=True,
         )
+
+        # ClickHouse storage
+        ch_client = get_clickhouse_client(clickhouse_config)
+        self.storage = FactorStorage(ch_client, session_id) if ch_client else None
 
         # Tick manager (shared with ChartBFF/BarsBuilder)
         self.ws_manager = ws_manager
@@ -122,7 +130,7 @@ class FactorEngine:
 
         logger.info(
             f"FactorEngine initialized: session={session_id}, timeframe={timeframe}, "
-            f"shared_manager={not self._owns_manager}"
+            f"shared_manager={not self._owns_manager}, storage={'enabled' if self.storage else 'disabled'}"
         )
 
     def _run_ws_loop(self) -> None:
@@ -156,7 +164,7 @@ class FactorEngine:
             # Create indicator instances
             state = TickerState(
                 symbol=symbol,
-                bar_indicators=[EMA(period=20)],
+                bar_indicators=[EMA(period=1)],
                 tick_indicators=[TradeRate(window_ms=20_000, min_trades=5)],
             )
             self.ticker_states[symbol] = state
@@ -239,6 +247,9 @@ class FactorEngine:
         if not state:
             return
 
+        logger.debug(
+            f"_on_bar: received bar for {symbol} at {bar_dict.get('bar_start')}"
+        )
         # Convert to Bar domain model
         bar = Bar(
             symbol=symbol,
@@ -256,13 +267,21 @@ class FactorEngine:
         # Update bar indicators
         factors: dict[str, float] = {}
         for ind in state.bar_indicators:
+            logger.debug(
+                f"_on_bar: calculate {symbol} {ind.name} with bar at {bar_dict.get('bar_start')}"
+            )
             value = ind.update(bar)
+
+            logger.debug(
+                f"_on_bar: calculated {symbol} {ind.name} = {value} with bar at {bar_dict.get('bar_start')}"
+            )
+
             if value is not None:
                 factors[ind.name] = value
 
-        # Publish bar-based factors
+        # Write bar-based factors to ClickHouse
         if factors:
-            self._publish_factors(symbol, bar.timestamp_ns, factors, source="bar")
+            self._write_factors(symbol, bar.timestamp_ns, factors)
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Tick Subscription (UnifiedTickManager)
@@ -383,11 +402,10 @@ class FactorEngine:
                             factors[ind.name] = value
 
                     if factors:
-                        self._publish_factors(
+                        self._write_factors(
                             state.symbol,
                             ts_ms * 1_000_000,  # ms to ns
                             factors,
-                            source="tick",
                         )
                 except Exception as e:
                     logger.error(
@@ -399,35 +417,59 @@ class FactorEngine:
         logger.info("FactorEngine: compute loop stopped")
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # Factor Publishing (Redis pub/sub)
+    # Factor Storage (ClickHouse)
     # ═══════════════════════════════════════════════════════════════════════════
 
-    def _publish_factors(
+    def _write_factors(
         self,
         symbol: str,
         timestamp_ns: int,
         factors: dict[str, float],
-        source: str = "unknown",
     ) -> None:
-        """Publish factors to Redis pub/sub.
+        """Write factors to ClickHouse via FactorStorage and publish to Redis pub/sub.
 
-        Channel: factors:{symbol}
+        Args:
+            symbol: Ticker symbol
+            timestamp_ns: Timestamp in nanoseconds
+            factors: Dict of factor_name -> value
         """
-        channel = f"factors:{symbol}"
-        payload = {
-            "symbol": symbol,
-            "timestamp_ns": timestamp_ns,
-            "factors": {k: round(v, 6) for k, v in factors.items()},
-            "source": source,
-        }
+        if not self.storage:
+            return
+
+        snapshot = FactorSnapshot(
+            symbol=symbol,
+            timestamp_ns=timestamp_ns,
+            factors=factors,
+        )
 
         try:
-            self.redis_client.publish(channel, json.dumps(payload))
-            logger.debug(
-                f"FactorEngine: published {list(factors.keys())} for {symbol} ({source})"
-            )
+            count = self.storage.write_factor_snapshot(snapshot)
+            if count > 0:
+                logger.debug(
+                    f"FactorEngine: wrote {count} factors for {symbol} "
+                    f"({list(factors.keys())})"
+                )
+
+                # Publish to Redis pub/sub for real-time streaming
+                try:
+                    channel = f"factors:{symbol}"
+                    message = json.dumps(
+                        {
+                            "symbol": symbol,
+                            "timestamp_ns": timestamp_ns,
+                            "timestamp_ms": timestamp_ns // 1_000_000,
+                            "factors": factors,
+                        }
+                    )
+                    self.redis_client.publish(channel, message)
+                    logger.debug(
+                        f"FactorEngine: published {len(factors)} factors to {channel}"
+                    )
+                except Exception as e:
+                    logger.error(f"FactorEngine: Redis publish failed - {e}")
+
         except Exception as e:
-            logger.error(f"FactorEngine: publish failed - {e}")
+            logger.error(f"FactorEngine: write failed for {symbol} - {e}")
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Tasks Listener (Redis stream for add/remove ticker)

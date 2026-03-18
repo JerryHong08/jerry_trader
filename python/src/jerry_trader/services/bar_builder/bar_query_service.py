@@ -107,6 +107,10 @@ class ClickHouseClient:
         real-time trade-tick stream.
         """
         if not self._bars_builder:
+            logger.warning(
+                f"_append_partial_bar - {ticker}/{builder_tf}: "
+                f"BarsBuilder not available, skipping pending/partial bar append"
+            )
             return
 
         bars = result.get("bars", [])
@@ -174,6 +178,7 @@ class ClickHouseClient:
                     logger.debug(
                         f"_append_partial_bar - {ticker}/{builder_tf}: "
                         f"skipping flat partial bar (time={'new' if partial_time > last_time else 'same'}, "
+                        f"partial time is {self._ms_to_readable(partial_time)}, "
                         f"trades={partial_trades}, O={partial['open']:.2f}, "
                         f"H={partial['high']:.2f}, L={partial['low']:.2f}, C={partial['close']:.2f})"
                     )

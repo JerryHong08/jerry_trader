@@ -18,6 +18,7 @@ import {
   type ConnectionStatus,
 } from '../stores/marketDataStore';
 import { useChartDataStore } from '../stores/chartDataStore';
+import { useFactorDataStore } from '../stores/factorDataStore';
 import { IS_DEMO } from '../data/mockData';
 
 // Configuration - use Vite env variable or default
@@ -423,6 +424,29 @@ export function unsubscribeBarUpdates(ticker: string, timeframe: string) {
   });
 }
 
+/**
+ * Subscribe to real-time factor updates for one or more tickers.
+ * The ChartBFF will relay factor updates from FactorEngine via Redis pub/sub.
+ */
+export function subscribeFactorUpdates(symbols: string | string[]) {
+  const symbolArray = Array.isArray(symbols) ? symbols : [symbols];
+  sendMessage({
+    action: 'subscribe_factors',
+    symbols: symbolArray.map(s => s.toUpperCase()),
+  });
+}
+
+/**
+ * Unsubscribe from real-time factor updates for one or more tickers.
+ */
+export function unsubscribeFactorUpdates(symbols: string | string[]) {
+  const symbolArray = Array.isArray(symbols) ? symbols : [symbols];
+  sendMessage({
+    action: 'unsubscribe_factors',
+    symbols: symbolArray.map(s => s.toUpperCase()),
+  });
+}
+
 function registerStockDetailHandler(
   ticker: string,
   handlers: { onDetail: (data: any) => void; onError: (data: any) => void }
@@ -661,6 +685,21 @@ function handleMessage(message: WebSocketMessage) {
       const { ticker, timeframe, bar } = message;
       if (ticker && timeframe && bar) {
         useChartDataStore.getState().broadcastBarUpdate(ticker, timeframe, bar);
+      }
+      break;
+    }
+
+    case 'factor_update': {
+      // Factor update from FactorEngine via ChartBFF Redis pub/sub
+      // message.data: {symbol, timestamp_ns, timestamp_ms, factors: {ema_20: 150.5, trade_rate: 25.3}}
+      const factorStore = useFactorDataStore.getState();
+      const { symbol, timestamp_ns, factors } = message.data || {};
+
+      if (symbol && timestamp_ns && factors) {
+        // Update all factors for this symbol
+        // Note: This updates the 'default' module - components can use their own moduleId
+        factorStore.updateFactors('default', symbol, timestamp_ns, factors);
+        console.debug(`[WebSocket] Factor update for ${symbol}:`, Object.keys(factors));
       }
       break;
     }

@@ -156,6 +156,8 @@ In the next Chapter, I will break down the details of each module in the above t
     \item module design
 \end{itemize}
 
+\pagebreak
+
 \section{Backend Architecture}
 
 \emph{not start to rewind yet. below is just lagacy llm-generated notes\&summary}
@@ -228,6 +230,8 @@ except ImportError:
 \end{itemize}
 \par}
 
+\pagebreak
+
 \subsection{Rust Migration Roadmap}
 \label{sec:rust-roadmap}
 The migration from Python \texttt{compute.py} modules to Rust follows a three-step progression, ordered from simplest to most complex:
@@ -255,6 +259,8 @@ it will remain Python-only for the foreseeable future.
 \noindent\textbf{Status:} Step~1 completed. \texttt{z\_score} achieved 3.6--10.7$\times$ speedup,
 \texttt{price\_accel} achieved 8.9--12.1$\times$ speedup over Python.
 Steps~2--3 are deferred in favour of the Bars Builder pipeline below.
+
+\pagebreak
 
 \subsection{Stage 2.5 --- Bars Builder Pipeline}
 \label{sec:bars-builder}
@@ -455,6 +461,8 @@ The Rust \texttt{ingest\_trades\_batch()} processes all trades in a single FFI c
 completed bars at the end.  Benchmark: \textbf{4.2$\times$ faster} than per-trade
 \texttt{ingest\_trade()} calls (39\,ms vs.\ 164\,ms for 441\,K trades).
 
+\pagebreak
+
 \paragraph{End-to-end flow.}
 
 \begin{verbatim}
@@ -551,6 +559,9 @@ dicts.  The merge logic itself is already correct for any timeframe.
 Data volume is identical (same trades, different bar windows), so performance
 impact is negligible --- \texttt{ingest\_trades\_batch} already processes all
 configured timeframes in the inner loop.
+
+
+\pagebreak
 
 
 \subsubsection{UTC/ET Timezone Conversion --- DST-Aware Session Boundaries}
@@ -659,6 +670,243 @@ Polygon/IB (UTC)
     \item \textbf{Standard practice:} storing data in UTC, converting to local time
           only for display or business-logic calculations.
 \end{itemize}
+
+\pagebreak
+
+
+
+\subsubsection{Double-Write Race Condition --- \texttt{last\_closed\_end} Guard}
+\label{sec:double-write-fix}
+
+\paragraph{Problem.}
+Under concurrent operation, a completed bar could be overwritten in ClickHouse
+with a partial bar containing only late-arriving trades.  The symptom: a bar
+that originally had, say, 200 trades would be replaced by a bar with 3 trades
+for the same \texttt{(ticker, timeframe, bar\_start)}.
+
+\paragraph{Root cause (two-thread race).}
+The Rust \texttt{BarBuilder} is accessed from two threads:
+
+\begin{enumerate}[nosep]
+    \item \textbf{Flush thread} --- calls \texttt{advance()} (watermark-based
+          expiry).  When a bar expires, \texttt{advance()} removes it from
+          \texttt{ticker\_bars.bars} via \texttt{HashMap::remove(\&tf)} and
+          emits a \texttt{CompletedBar}.
+    \item \textbf{WS thread} --- calls \texttt{ingest\_trade()} for each
+          incoming tick.  When the \texttt{bars} map has no entry for a
+          timeframe (\texttt{None} branch), it creates a fresh
+          \texttt{BarState} for the current bar window.
+\end{enumerate}
+
+\noindent The race sequence:
+
+\begin{verbatim}
+  t0  advance() closes bar [09:30:00, 09:31:00) for AAPL/1m
+      -> bars.remove(&1m)  -- bar gone from active map
+      -> CompletedBar emitted (200 trades)
+
+  t1  ingest_trade("AAPL", ts=09:30:58, ...)
+      -> bars.get_mut(&1m) => None  (removed at t0)
+      -> None branch: creates NEW BarState [09:30:00, 09:31:00)
+         with only this single late trade
+
+  t2  advance() closes the new bar [09:30:00, 09:31:00)
+      -> CompletedBar emitted (1 trade)
+      -> ClickHouse ReplacingMergeTree: newer row wins
+      -> Original 200-trade bar OVERWRITTEN by 1-trade bar
+\end{verbatim}
+
+\noindent The watermark controls \emph{when} advance fires, but does not
+prevent the \texttt{None} branch from re-creating a bar for an
+already-closed period.
+
+\paragraph{Fix: \texttt{last\_closed\_end} per (ticker, timeframe).}
+A new field \texttt{last\_closed\_end: HashMap<Timeframe, i64>} is added to
+\texttt{TickerBars}.  It records the \texttt{bar\_end} timestamp of the most
+recently closed bar for each timeframe.
+
+\begin{enumerate}[nosep]
+    \item \textbf{Record on close.}  Whenever a bar is closed --- whether by
+          \texttt{advance()} (watermark expiry) or by \texttt{ingest\_trade()}
+          / \texttt{ingest\_trades\_batch()} (rollover when
+          \texttt{ts >= bar\_end}) --- the bar's \texttt{bar\_end} is inserted
+          into \texttt{last\_closed\_end}:
+          \begin{verbatim}
+  ticker_bars.last_closed_end.insert(tf, bar.bar_end);
+          \end{verbatim}
+
+    \item \textbf{Guard on create.}  The \texttt{None} branch in both
+          \texttt{ingest\_trade()} and \texttt{ingest\_trades\_batch()} checks
+          before creating a new bar:
+          \begin{verbatim}
+  None => {
+      if bar_end_ts <= *ticker_bars
+          .last_closed_end.get(&tf).unwrap_or(&0) {
+          continue;  // already closed, skip
+      }
+      // ... create new BarState
+  }
+          \end{verbatim}
+          If the computed \texttt{bar\_end\_ts} for the incoming trade is
+          $\leq$ the last closed end, the trade belongs to an already-emitted
+          bar and is silently dropped.
+\end{enumerate}
+
+\noindent The guard is $O(1)$ per trade (single hash lookup) and adds no
+overhead to the normal path where the bar already exists in the map.
+
+\paragraph{Cleanup.}
+\texttt{last\_closed\_end} is stored inside \texttt{TickerBars}, so it is
+automatically dropped when \texttt{remove\_ticker()} or \texttt{flush()}
+removes the ticker entry.  No explicit cleanup is needed.
+
+\paragraph{Files modified.}
+All changes are in \texttt{rust/src/bars.rs}:
+\begin{itemize}[nosep]
+    \item \texttt{TickerBars} struct --- added \texttt{last\_closed\_end} field
+    \item \texttt{advance()} --- record \texttt{bar\_end} on watermark close
+    \item \texttt{ingest\_trade()} --- record on rollover, guard on \texttt{None}
+    \item \texttt{ingest\_trades\_batch()} --- same two changes
+\end{itemize}
+
+\pagebreak
+
+
+
+\subsubsection{End-to-End Bar Delivery Pipeline}
+\label{sec:bar-delivery-pipeline}
+
+This section describes how a completed bar flows from the Rust BarBuilder
+through the Python backend, ChartBFF, and into the React frontend.
+
+\paragraph{Overview.}
+
+\begin{verbatim}
+  Polygon / ThetaData / Replayer ticks
+           |
+           v
+  UnifiedTickManager (asyncio queue fan-out)
+           |
+     +-----+------------------+
+     |                        |
+     v                        v
+  BarsBuilderService        ChartBFF (server.py)
+  ._on_trade()              ._on_tick()
+    -> UTC-to-ET              -> real-time bar_update
+    -> bar_builder              via WebSocket push
+       .ingest_trade()
+           |
+     +-----+------+
+     |             |
+     v             v
+  _flush_loop()  _check_expired_loop()
+  (10ms poll)    (advance() watermark)
+     |             |
+     +------+------+
+            |
+            v
+  drain_completed()
+    -> ET-to-UTC conversion
+    -> _pending_bars buffer
+            |
+            v
+       ClickHouse
+       (persist, ReplacingMergeTree)
+            |
+            v
+       ChartBFF REST API
+       GET /api/chart/bars/{ticker}
+            |
+            v
+       Frontend chartDataStore
+       -> ChartModule (TradingView candlestick)
+\end{verbatim}
+
+\paragraph{BarsBuilderService (Python).}
+The service (\texttt{bars\_builder\_service.py}) is the orchestration layer
+around the Rust \texttt{BarBuilder}.  Key responsibilities:
+
+\begin{itemize}[nosep]
+    \item \textbf{Tick ingestion:} receives trades from
+          \texttt{UnifiedTickManager} via asyncio queue, converts UTC
+          timestamps to ET, calls \texttt{bar\_builder.ingest\_trade()}.
+    \item \textbf{Flush loop:} a daemon thread polling every 10\,ms.  Calls
+          \texttt{drain\_completed()} to collect bars closed by both rollover
+          and watermark expiry.  Converts bars back to UTC, attempts meeting
+          bar merge (see \S\ref{sec:10s-bootstrap}), then appends to
+          \texttt{\_pending\_bars} for ClickHouse persistence.
+    \item \textbf{Expired check loop:} periodically calls
+          \texttt{advance(now\_et\_ms)} to trigger watermark-based bar
+          closure for idle tickers (no new trades arriving).
+    \item \textbf{Persistence:} completed bars are batch-inserted into
+          ClickHouse (\texttt{ReplacingMergeTree}, partitioned by date).
+          This is the single source of truth for historical bars.
+\end{itemize}
+
+\paragraph{ChartBFF (server.py).}
+The Chart Backend-for-Frontend is a FastAPI application running on the
+same machine as BarsBuilderService.  It subscribes to the same
+\texttt{UnifiedTickManager} tick stream for real-time updates, and queries
+ClickHouse for historical data:
+
+\begin{itemize}[nosep]
+    \item \textbf{REST API:} \texttt{GET /api/chart/bars/\{ticker\}} ---
+          queries ClickHouse for historical bars, with optional Polygon
+          backfill.  Returns OHLCV arrays for the requested timeframe.
+          Also appends the current partial bar from the live tick stream
+          when available.
+    \item \textbf{WebSocket:} \texttt{/ws/tickdata} --- persistent connection
+          per frontend client.  ChartBFF receives raw ticks from
+          \texttt{UnifiedTickManager} and pushes real-time
+          \texttt{bar\_update} messages to subscribed clients.  This path
+          provides low-latency updates for the in-progress (unclosed) bar.
+    \item \textbf{Factor relay:} subscribes to Redis pub/sub
+          \texttt{factors:\{symbol\}} channels and forwards factor updates
+          to WebSocket clients for the FactorChartModule overlay.
+\end{itemize}
+
+\paragraph{Frontend (React + TypeScript).}
+The frontend consumes bars through two paths:
+
+\begin{itemize}[nosep]
+    \item \textbf{Bootstrap (REST):} on mount, \texttt{ChartModule} calls
+          \texttt{chartDataStore.fetchBars(ticker, timeframe)} which issues
+          a GET request to ChartBFF.  Historical bars populate the
+          TradingView Lightweight Charts candlestick series.
+    \item \textbf{Real-time (WebSocket):} \texttt{useWebSocket.ts} handles
+          incoming \texttt{bar\_update} messages and calls
+          \texttt{chartDataStore.broadcastBarUpdate(ticker, tf, bar)}.
+          This updates all \texttt{ChartModule} instances displaying that
+          ticker/timeframe combination.
+    \item \textbf{State management:} \texttt{chartDataStore.ts} (Zustand)
+          maintains per-symbol bar arrays keyed by
+          \texttt{moduleId::TICKER}.  \texttt{applyBarUpdate()} either
+          updates the last bar in-place (if \texttt{bar\_start} matches)
+          or appends a new bar.
+\end{itemize}
+
+\paragraph{Data format.}
+A completed bar flowing through the pipeline carries:
+
+\begin{center}
+\footnotesize
+\begin{tabular}{ll}
+    \textbf{Field} & \textbf{Description} \\
+    \hline
+    \texttt{ticker}       & Symbol (e.g.\ \texttt{"AAPL"}) \\
+    \texttt{timeframe}    & \texttt{"10s"}, \texttt{"1m"}, \ldots, \texttt{"1w"} \\
+    \texttt{bar\_start}   & Epoch ms (UTC after ET$\to$UTC conversion) \\
+    \texttt{bar\_end}     & Epoch ms (UTC) \\
+    \texttt{open}         & First trade price in the bar \\
+    \texttt{high}         & Highest trade price \\
+    \texttt{low}          & Lowest trade price \\
+    \texttt{close}        & Last trade price \\
+    \texttt{volume}       & Total share volume \\
+    \texttt{trade\_count} & Number of trades \\
+    \texttt{vwap}         & Volume-weighted average price \\
+    \texttt{session}      & \texttt{"pre"}, \texttt{"regular"}, \texttt{"after"} \\
+\end{tabular}
+\end{center}
 
 
 \section{Roadmap}

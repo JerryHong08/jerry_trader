@@ -339,7 +339,7 @@ class JerryTraderBackendStarter:
             self.replayer = None
 
         # ============================================================================
-        # ChartBFF + FactorEngine — shared UnifiedTickManager when co-located
+        # ChartBFF + Bar_Builder + Factor_Engine — shared UnifiedTickManager when co-located
         # ============================================================================
         # Initialize ChartBFF first (if enabled) so its manager can be shared
         # with FactorEngine. When both run on the same machine, they share a single
@@ -347,24 +347,30 @@ class JerryTraderBackendStarter:
         self._shared_ws_manager = None
         self._shared_ws_loop = None
 
-        if "ChartBFF" in self.roles:
-            from jerry_trader.apps.chart_app.server import ChartBFF
+        if "BarsBuilder" in self.roles:
+            from jerry_trader.services.bar_builder.bars_builder_service import (
+                BarsBuilderService,
+            )
             from jerry_trader.services.market_data.feeds.unified_tick_manager import (
                 UnifiedTickManager,
             )
 
-            role_cfg = self.roles["ChartBFF"]
+            role_cfg = self.roles["BarsBuilder"]
 
             # Determine manager type: ChartBFF config takes precedence,
             # fallback to FactorEngine config if co-located
             manager_type = role_cfg.get("manager_type")
-            if not manager_type and "FactorEngine" in self.roles:
-                manager_type = self.roles["FactorEngine"].get("manager_type")
+            # if not manager_type and "FactorEngine" in self.roles:
+            #     manager_type = self.roles["FactorEngine"].get("manager_type")
+            if not manager_type:
+                logger.error(
+                    "_init_services - manager_type not specified for BarsBuilder in config"
+                )
 
             valid_manager_types = {"polygon", "theta", "replayer", "synced-replayer"}
             if manager_type and manager_type not in valid_manager_types:
                 raise ValueError(
-                    f"Invalid manager_type={manager_type!r} for ChartBFF. "
+                    f"Invalid manager_type={manager_type!r} for BarsBuilder. "
                     f"Valid choices: {sorted(valid_manager_types)}"
                 )
 
@@ -430,17 +436,46 @@ class JerryTraderBackendStarter:
             if self._preload_list and self._tick_replayer is not None:
                 self._preload_tickers(self._preload_list)
 
-            self.chart_bff = ChartBFF(
-                host=role_cfg.get("host", "0.0.0.0"),
-                port=role_cfg.get("port", 8000),
+            self.bars_builder = BarsBuilderService(
                 session_id=self.session_id,
-                ws_manager=self._shared_ws_manager,
                 redis_config=role_cfg.get("redis"),
+                clickhouse_config=role_cfg.get("clickhouse"),
+                timeframes=role_cfg.get("timeframes"),
+                late_arrival_ms=role_cfg.get("late_arrival_ms", 100),
+                idle_close_ms=role_cfg.get("idle_close_ms", 2000),
+                bootstrap_late_arrival_ms=role_cfg.get("bootstrap_late_arrival_ms", 0),
+                bootstrap_idle_close_ms=role_cfg.get("bootstrap_idle_close_ms", 1),
+                ws_manager=self._shared_ws_manager,
+                ws_loop=self._shared_ws_loop,
             )
-            self._services.append(("ChartBFF", self.chart_bff))
+            self._services.append(("BarsBuilder", self.bars_builder))
             logger.info(
-                f"ChartBFF initialized with shared {self._shared_ws_manager.provider.upper()} manager"
+                f"BarsBuilder initialized with shared {self._shared_ws_manager.provider.upper()} manager"
             )
+        else:
+            self.bars_builder = None
+
+        if "ChartBFF" in self.roles:
+            from jerry_trader.apps.chart_app.server import ChartBFF
+
+            role_cfg = self.roles["ChartBFF"]
+
+            # If ChartBFF is also enabled, share the UnifiedTickManager
+            if self.bars_builder is not None:
+                self.chart_bff = ChartBFF(
+                    host=role_cfg.get("host", "0.0.0.0"),
+                    port=role_cfg.get("port", 8000),
+                    session_id=self.session_id,
+                    ws_manager=self._shared_ws_manager,
+                    redis_config=role_cfg.get("redis"),
+                    bars_builder=self.bars_builder,
+                )
+            else:
+                logger.error(
+                    "ChartBFF requires a ws_manager for real-time tick subscription, but BarsBuilder is not enabled. "
+                    "ChartBFF will not be initialized."
+                )
+            self._services.append(("ChartBFF", self.chart_bff))
         else:
             self.chart_bff = None
 
@@ -450,75 +485,30 @@ class JerryTraderBackendStarter:
             role_cfg = self.roles["FactorEngine"]
 
             # FactorEngine needs ws_manager for tick-based indicators (trade_rate)
-            # Share with ChartBFF if co-located
-            if self.chart_bff is not None:
+            # Must shared with bars_builder
+            if self.bars_builder is not None:
                 self.factor_engine = FactorEngine(
                     session_id=self.session_id,
                     redis_config=role_cfg.get("redis"),
+                    clickhouse_config=role_cfg.get("clickhouse"),
                     ws_manager=self._shared_ws_manager,
                     ws_loop=self._shared_ws_loop,
                     timeframe=role_cfg.get("timeframe", "1m"),
                 )
             else:
-                # Standalone FactorEngine with its own manager
-                self.factor_engine = FactorEngine(
-                    session_id=self.session_id,
-                    redis_config=role_cfg.get("redis"),
-                    manager_type=role_cfg.get("manager_type"),
-                    timeframe=role_cfg.get("timeframe", "1m"),
+                logger.error(
+                    "FactorEngine requires a ws_manager for tick-based indicators, but BarsBuilder is not enabled. "
+                    "FactorEngine will not be initialized."
                 )
-
             self._services.append(("FactorEngine", self.factor_engine))
 
         else:
             self.factor_engine = None
 
-        if "BarsBuilder" in self.roles:
-            from jerry_trader.services.bar_builder.bars_builder_service import (
-                BarsBuilderService,
-            )
-
-            role_cfg = self.roles["BarsBuilder"]
-
-            # If ChartBFF is also enabled, share the UnifiedTickManager
-            if self.chart_bff is not None:
-                self.bars_builder = BarsBuilderService(
-                    session_id=self.session_id,
-                    redis_config=role_cfg.get("redis"),
-                    clickhouse_config=role_cfg.get("clickhouse"),
-                    timeframes=role_cfg.get("timeframes"),
-                    late_arrival_ms=role_cfg.get("late_arrival_ms", 100),
-                    idle_close_ms=role_cfg.get("idle_close_ms", 2000),
-                    bootstrap_late_arrival_ms=role_cfg.get(
-                        "bootstrap_late_arrival_ms", 0
-                    ),
-                    bootstrap_idle_close_ms=role_cfg.get("bootstrap_idle_close_ms", 1),
-                    ws_manager=self.chart_bff.manager,
-                    ws_loop=self._shared_ws_loop,
-                )
-            else:
-                # Standalone BarsBuilder with its own manager
-                self.bars_builder = BarsBuilderService(
-                    session_id=self.session_id,
-                    manager_type=role_cfg.get("manager_type"),
-                    redis_config=role_cfg.get("redis"),
-                    clickhouse_config=role_cfg.get("clickhouse"),
-                    timeframes=role_cfg.get("timeframes"),
-                    late_arrival_ms=role_cfg.get("late_arrival_ms", 100),
-                    idle_close_ms=role_cfg.get("idle_close_ms", 2000),
-                    bootstrap_late_arrival_ms=role_cfg.get(
-                        "bootstrap_late_arrival_ms", 0
-                    ),
-                    bootstrap_idle_close_ms=role_cfg.get("bootstrap_idle_close_ms", 1),
-                )
-            self._services.append(("BarsBuilder", self.bars_builder))
-        else:
-            self.bars_builder = None
-
         # Wire BarsBuilder reference into ChartBFF so it can wait
         # for trades_backfill completion before serving bar REST responses.
-        if self.chart_bff is not None and self.bars_builder is not None:
-            self.chart_bff._bars_builder = self.bars_builder
+        # if self.chart_bff is not None and self.bars_builder is not None:
+        #     self.chart_bff._bars_builder = self.bars_builder
 
         if "AgentBFF" in self.roles:
             from jerry_trader.apps.news_app.server import AgentBFF

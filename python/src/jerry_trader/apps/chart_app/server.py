@@ -150,6 +150,7 @@ class ChartBFF:
             session_id=self.session_id,
             redis_config=redis_config,
             clickhouse_config=clickhouse_config,
+            bars_builder=bars_builder,
         )
 
         # Bootstrap _backfill_done from ClickHouse: tickers already backfilled
@@ -179,6 +180,18 @@ class ChartBFF:
             f"ChartBFF initialized: host={host}, port={port}, "
             f"session_id={self.session_id}, provider={self.manager.provider}, "
             f"shared_manager={not self._owns_manager}"
+        )
+
+        # ── FactorStorage (for factor queries) ───────────────────────────
+        from jerry_trader.services.factor.factor_storage import FactorStorage
+
+        self.factor_storage = (
+            FactorStorage(
+                ch_client=self.ch_client.ch_client,
+                session_id=self.session_id,
+            )
+            if self.ch_client and self.ch_client.ch_client
+            else None
         )
 
     def _setup_routes(self):
@@ -354,13 +367,89 @@ class ChartBFF:
                 **({"requestId": request_id} if request_id else {}),
             }
 
+        @self.app.get("/api/factors/{ticker}")
+        async def get_factors(
+            ticker: str,
+            from_ms: Optional[int] = None,
+            to_ms: Optional[int] = None,
+            factors: Optional[str] = None,
+        ):
+            """Fetch historical factors for bootstrap.
+
+            Args:
+                ticker: Stock ticker symbol
+                from_ms: Start timestamp in milliseconds (default: 1 hour ago)
+                to_ms: End timestamp in milliseconds (default: now)
+                factors: Comma-separated factor names to filter (default: all)
+
+            Returns:
+                JSON with factors dict: {factor_name: [{time, value}, ...]}
+            """
+            ticker_upper = ticker.upper()
+
+            if not self.factor_storage:
+                return JSONResponse(
+                    {"error": "FactorStorage not available", "ticker": ticker_upper},
+                    status_code=503,
+                )
+
+            # Default: last 1 hour
+            import time as time_module
+
+            to_ms = to_ms or int(time_module.time() * 1000)
+            from_ms = from_ms or (to_ms - 3600000)
+
+            factor_names = factors.split(",") if factors else None
+
+            try:
+                results = self.factor_storage.query_factors(
+                    ticker=ticker_upper,
+                    start_ns=from_ms * 1_000_000,
+                    end_ns=to_ms * 1_000_000,
+                    factor_names=factor_names,
+                )
+
+                # Transform to frontend format: {factor_name: [{time, value}, ...]}
+                factors_dict = {}
+                for row in results:
+                    name = row["factor_name"]
+                    if name not in factors_dict:
+                        factors_dict[name] = []
+                    factors_dict[name].append(
+                        {
+                            "time": row["timestamp_ns"] // 1_000_000_000,  # seconds
+                            "value": row["factor_value"],
+                        }
+                    )
+
+                return {
+                    "ticker": ticker_upper,
+                    "from_ms": from_ms,
+                    "to_ms": to_ms,
+                    "factors": factors_dict,
+                    "count": len(results),
+                }
+
+            except Exception as e:
+                logger.error(f"get_factors - {ticker_upper}: {e}")
+                return JSONResponse(
+                    {"error": str(e), "ticker": ticker_upper},
+                    status_code=500,
+                )
+
         # --- Main WebSocket endpoint ---
 
         @self.app.websocket("/ws/tickdata")
         async def websocket_endpoint(websocket: WebSocket):
+            """WebSocket endpoint for real-time tick data streaming.
+
+            Handles subscribe/unsubscribe messages and manages consumer tasks
+            for each stream. Notifies FactorEngine via Redis streams.
+            """
             await websocket.accept()
             consumer_tasks = {}
             current_streams: Set[str] = set()
+            factor_subscriptions: Set[str] = set()  # Track factor subscriptions
 
             try:
                 while True:
@@ -368,134 +457,38 @@ class ChartBFF:
                     try:
                         data = json.loads(msg)
 
-                        # ==================================================
-                        # UNSUBSCRIBE HANDLING
-                        # ==================================================
+                        # Route message to appropriate handler
                         if data.get("action") == "unsubscribe":
-                            subscriptions = data.get("subscriptions", [])
-
-                            # Backward compatibility: single symbol unsubscribe
-                            if not subscriptions and "symbol" in data:
-                                subscriptions = [
-                                    {
-                                        "symbol": data.get("symbol"),
-                                        "events": data.get("events", ["Q"]),
-                                        "sec_type": data.get("sec_type", "STOCK"),
-                                        "contract": data.get("contract", {}),
-                                    }
-                                ]
-
-                            logger.info(f"📤 Unsubscribe request: {subscriptions}")
-
-                            # Unsubscribe using unified interface
-                            await manager.unsubscribe(
-                                websocket, subscriptions=subscriptions
+                            await self._handle_unsubscribe(
+                                websocket,
+                                data,
+                                manager,
+                                consumer_tasks,
+                                current_streams,
                             )
-
-                            # Cancel consumer tasks for unsubscribed streams
-                            unsubscribed_keys = manager.generate_stream_keys(
-                                subscriptions=subscriptions
+                        elif data.get("action") == "subscribe_factors":
+                            await self._handle_factor_subscribe(
+                                websocket,
+                                data,
+                                consumer_tasks,
+                                factor_subscriptions,
                             )
-                            for stream_key in unsubscribed_keys:
-                                if stream_key in current_streams:
-                                    consumer_tasks[stream_key].cancel()
-                                    del consumer_tasks[stream_key]
-                                    current_streams.discard(stream_key)
-
-                            # Notify FactorEngine via Redis stream and update subscribed_tickers
-                            for sub in subscriptions:
-                                sym = sub.get("symbol", "").upper()
-                                if sym:
-                                    # Remove from subscribed tickers set.
-                                    # Keep _backfill_done and _backfill_attempted
-                                    # so re-subscribe skips redundant Polygon/local
-                                    # data fetch (data hasn't changed).
-                                    self.subscribed_tickers.discard(sym)
-                                    try:
-                                        r.xadd(
-                                            FACTOR_TASKS_STREAM,
-                                            {"action": "remove", "ticker": sym},
-                                        )
-                                        logger.debug(
-                                            f"📤 XADD factor_tasks: remove {sym}"
-                                        )
-                                    except Exception as e:
-                                        logger.warning(
-                                            f"⚠️ Failed to XADD remove {sym}: {e}"
-                                        )
-
-                            continue
-
-                        # ==================================================
-                        # SUBSCRIBE HANDLING
-                        # ==================================================
-                        subscriptions = data.get("subscriptions", [])
-
-                        # Backward compatibility: legacy polygon format
-                        if not subscriptions:
-                            symbols = data.get("symbols", [])
-                            events = data.get("events", ["Q"])
-                            if isinstance(symbols, str):
-                                symbols = [s.strip() for s in symbols.split(",")]
-
-                            subscriptions = [
-                                {"symbol": sym, "events": events, "sec_type": "STOCK"}
-                                for sym in symbols
-                                if sym
-                            ]
-
-                        if not subscriptions:
-                            logger.warning("⚠️ No subscriptions found in message")
-                            continue
-
-                        logger.info(f"📥 Subscribe request: {subscriptions}")
-
-                        # Subscribe using unified interface
-                        await manager.subscribe(websocket, subscriptions=subscriptions)
-
-                        # Generate stream keys and create consumer tasks
-                        new_streams = manager.generate_stream_keys(
-                            subscriptions=subscriptions
-                        )
-                        to_add = new_streams - current_streams
-
-                        for sk in to_add:
-                            task = asyncio.create_task(
-                                _consume_stream(websocket, sk, manager)
+                        elif data.get("action") == "unsubscribe_factors":
+                            await self._handle_factor_unsubscribe(
+                                websocket,
+                                data,
+                                consumer_tasks,
+                                factor_subscriptions,
                             )
-                            consumer_tasks[sk] = task
-                            logger.debug(f"📡 Created consumer task for {sk}")
-
-                        current_streams.update(to_add)
-
-                        # Notify FactorEngine via Redis stream, update subscribed_tickers,
-                        # and trigger custom_bar_backfill for ALL TFs on first subscription
-                        for sub in subscriptions:
-                            sym = sub.get("symbol", "").upper()
-                            if sym:
-                                # Add to subscribed tickers set
-                                self.subscribed_tickers.add(sym)
-
-                                # Pre-register bootstrap Event so that REST
-                                # requests arriving before bars_builder picks
-                                # up the Redis message will block on
-                                # wait_for_bootstrap instead of serving stale data.
-                                if self._bars_builder is not None:
-                                    self._bars_builder.pre_register_bootstrap(sym)
-
-                                try:
-                                    r.xadd(
-                                        FACTOR_TASKS_STREAM,
-                                        {"action": "add", "ticker": sym},
-                                    )
-                                    logger.debug(f"📥 XADD factor_tasks: add {sym}")
-                                except Exception as e:
-                                    logger.warning(f"⚠️ Failed to XADD add {sym}: {e}")
-
-                                # Trigger custom_bar_backfill for ALL TFs (except 10s)
-                                # on first subscription — warm up ClickHouse for fast
-                                # chart rendering. Deduped per ticker.
-                                self._trigger_custom_bar_backfill(sym)
+                        else:
+                            # Default to subscribe for backward compatibility
+                            await self._handle_subscribe(
+                                websocket,
+                                data,
+                                manager,
+                                consumer_tasks,
+                                current_streams,
+                            )
 
                     except json.JSONDecodeError as e:
                         logger.error(f"⚠️ JSON decode error: {e}")
@@ -505,6 +498,276 @@ class ChartBFF:
                 await manager.disconnect(websocket)
                 for task in consumer_tasks.values():
                     task.cancel()
+
+    # ════════════════════════════════════════════════════════════════════════
+    # WebSocket message handlers
+    # ════════════════════════════════════════════════════════════════════════
+
+    async def _handle_unsubscribe(
+        self,
+        websocket: WebSocket,
+        data: dict,
+        manager: UnifiedTickManager,
+        consumer_tasks: dict,
+        current_streams: Set[str],
+    ) -> None:
+        """Handle unsubscribe requests from WebSocket clients.
+
+        Args:
+            websocket: WebSocket connection
+            data: Parsed JSON message from client
+            manager: UnifiedTickManager instance
+            consumer_tasks: Dict of stream_key -> asyncio.Task
+            current_streams: Set of currently active stream keys
+        """
+        subscriptions = data.get("subscriptions", [])
+
+        # Backward compatibility: single symbol unsubscribe
+        if not subscriptions and "symbol" in data:
+            subscriptions = [
+                {
+                    "symbol": data.get("symbol"),
+                    "events": data.get("events", ["Q"]),
+                    "sec_type": data.get("sec_type", "STOCK"),
+                    "contract": data.get("contract", {}),
+                }
+            ]
+
+        logger.info(f"📤 Unsubscribe request: {subscriptions}")
+
+        # Unsubscribe using unified interface
+        await manager.unsubscribe(websocket, subscriptions=subscriptions)
+
+        # Cancel consumer tasks for unsubscribed streams
+        unsubscribed_keys = manager.generate_stream_keys(subscriptions=subscriptions)
+        for stream_key in unsubscribed_keys:
+            if stream_key in current_streams:
+                consumer_tasks[stream_key].cancel()
+                del consumer_tasks[stream_key]
+                current_streams.discard(stream_key)
+
+        # Notify FactorEngine via Redis stream and update subscribed_tickers
+        for sub in subscriptions:
+            sym = sub.get("symbol", "").upper()
+            if sym:
+                # Remove from subscribed tickers set.
+                # Keep _backfill_done and _backfill_attempted
+                # so re-subscribe skips redundant Polygon/local
+                # data fetch (data hasn't changed).
+                self.subscribed_tickers.discard(sym)
+                try:
+                    self.r.xadd(
+                        self.FACTOR_TASKS_STREAM,
+                        {"action": "remove", "ticker": sym},
+                    )
+                    logger.debug(f"📤 XADD factor_tasks: remove {sym}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to XADD remove {sym}: {e}")
+
+    async def _handle_subscribe(
+        self,
+        websocket: WebSocket,
+        data: dict,
+        manager: UnifiedTickManager,
+        consumer_tasks: dict,
+        current_streams: Set[str],
+    ) -> None:
+        """Handle subscribe requests from WebSocket clients.
+
+        Args:
+            websocket: WebSocket connection
+            data: Parsed JSON message from client
+            manager: UnifiedTickManager instance
+            consumer_tasks: Dict of stream_key -> asyncio.Task
+            current_streams: Set of currently active stream keys
+        """
+        subscriptions = data.get("subscriptions", [])
+
+        # Backward compatibility: legacy polygon format
+        if not subscriptions:
+            symbols = data.get("symbols", [])
+            events = data.get("events", ["Q"])
+            if isinstance(symbols, str):
+                symbols = [s.strip() for s in symbols.split(",")]
+
+            subscriptions = [
+                {"symbol": sym, "events": events, "sec_type": "STOCK"}
+                for sym in symbols
+                if sym
+            ]
+
+        if not subscriptions:
+            logger.warning("⚠️ No subscriptions found in message")
+            return
+
+        logger.info(f"📥 Subscribe request: {subscriptions}")
+
+        # Subscribe using unified interface
+        await manager.subscribe(websocket, subscriptions=subscriptions)
+
+        # Generate stream keys and create consumer tasks
+        new_streams = manager.generate_stream_keys(subscriptions=subscriptions)
+        to_add = new_streams - current_streams
+
+        for sk in to_add:
+            task = asyncio.create_task(_consume_stream(websocket, sk, manager))
+            consumer_tasks[sk] = task
+            logger.debug(f"📡 Created consumer task for {sk}")
+
+        current_streams.update(to_add)
+
+        # Notify FactorEngine via Redis stream, update subscribed_tickers,
+        # and trigger custom_bar_backfill for ALL TFs on first subscription
+        for sub in subscriptions:
+            sym = sub.get("symbol", "").upper()
+            if sym:
+                # Add to subscribed tickers set
+                self.subscribed_tickers.add(sym)
+
+                # Pre-register bootstrap Event so that REST
+                # requests arriving before bars_builder picks
+                # up the Redis message will block on
+                # wait_for_bootstrap instead of serving stale data.
+                if self._bars_builder is not None:
+                    self._bars_builder.pre_register_bootstrap(sym)
+
+                try:
+                    self.r.xadd(
+                        self.FACTOR_TASKS_STREAM,
+                        {"action": "add", "ticker": sym},
+                    )
+                    logger.debug(f"📥 XADD factor_tasks: add {sym}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to XADD add {sym}: {e}")
+
+                # Trigger custom_bar_backfill for ALL TFs (except 10s)
+                # on first subscription — warm up ClickHouse for fast
+                # chart rendering. Deduped per ticker.
+                self._trigger_custom_bar_backfill(sym)
+
+    async def _handle_factor_subscribe(
+        self,
+        websocket: WebSocket,
+        data: dict,
+        consumer_tasks: dict,
+        factor_subscriptions: Set[str],
+    ) -> None:
+        """Handle factor subscription requests.
+
+        Args:
+            websocket: WebSocket connection
+            data: Parsed JSON message {"action": "subscribe_factors", "symbols": ["AAPL", "TSLA"]}
+            consumer_tasks: Dict of task_key -> asyncio.Task
+            factor_subscriptions: Set of currently subscribed symbols
+        """
+        symbols = data.get("symbols", [])
+        if isinstance(symbols, str):
+            symbols = [s.strip().upper() for s in symbols.split(",")]
+        else:
+            symbols = [s.upper() for s in symbols if s]
+
+        if not symbols:
+            logger.warning("⚠️ No symbols in factor subscribe request")
+            return
+
+        logger.info(f"📊 Factor subscribe request: {symbols}")
+
+        for symbol in symbols:
+            if symbol in factor_subscriptions:
+                logger.debug(f"📊 Already subscribed to factors for {symbol}")
+                continue
+
+            # Create Redis pub/sub consumer task
+            task_key = f"factors:{symbol}"
+            task = asyncio.create_task(self._consume_factor_stream(websocket, symbol))
+            consumer_tasks[task_key] = task
+            factor_subscriptions.add(symbol)
+            logger.info(f"📊 Subscribed to factors for {symbol}")
+
+    async def _handle_factor_unsubscribe(
+        self,
+        websocket: WebSocket,
+        data: dict,
+        consumer_tasks: dict,
+        factor_subscriptions: Set[str],
+    ) -> None:
+        """Handle factor unsubscription requests.
+
+        Args:
+            websocket: WebSocket connection
+            data: Parsed JSON message {"action": "unsubscribe_factors", "symbols": ["AAPL"]}
+            consumer_tasks: Dict of task_key -> asyncio.Task
+            factor_subscriptions: Set of currently subscribed symbols
+        """
+        symbols = data.get("symbols", [])
+        if isinstance(symbols, str):
+            symbols = [s.strip().upper() for s in symbols.split(",")]
+        else:
+            symbols = [s.upper() for s in symbols if s]
+
+        if not symbols:
+            logger.warning("⚠️ No symbols in factor unsubscribe request")
+            return
+
+        logger.info(f"📊 Factor unsubscribe request: {symbols}")
+
+        for symbol in symbols:
+            if symbol not in factor_subscriptions:
+                continue
+
+            task_key = f"factors:{symbol}"
+            if task_key in consumer_tasks:
+                consumer_tasks[task_key].cancel()
+                del consumer_tasks[task_key]
+            factor_subscriptions.discard(symbol)
+            logger.info(f"📊 Unsubscribed from factors for {symbol}")
+
+    async def _consume_factor_stream(
+        self,
+        websocket: WebSocket,
+        symbol: str,
+    ) -> None:
+        """Consume factor updates from Redis pub/sub and forward to WebSocket.
+
+        Args:
+            websocket: WebSocket connection
+            symbol: Ticker symbol
+        """
+        channel = f"factors:{symbol}"
+        pubsub = self.r.pubsub()
+
+        try:
+            pubsub.subscribe(channel)
+            logger.info(f"📊 Listening to Redis channel: {channel}")
+
+            while True:
+                message = pubsub.get_message(timeout=1.0)
+                if message and message["type"] == "message":
+                    try:
+                        factor_data = json.loads(message["data"])
+                        # Forward to WebSocket with message type
+                        await websocket.send_json(
+                            {"type": "factor_update", "data": factor_data}
+                        )
+                        logger.debug(f"📊 Forwarded factor update for {symbol}")
+                    except json.JSONDecodeError as e:
+                        logger.error(f"📊 Invalid JSON in factor message: {e}")
+                    except Exception as e:
+                        logger.error(f"📊 Error forwarding factor: {e}")
+                        break
+
+                await asyncio.sleep(0.01)  # Small delay to prevent busy loop
+
+        except asyncio.CancelledError:
+            logger.info(f"📊 Factor consumer cancelled for {symbol}")
+        except Exception as e:
+            logger.error(f"📊 Factor consumer error for {symbol}: {e}")
+        finally:
+            try:
+                pubsub.unsubscribe(channel)
+                pubsub.close()
+            except Exception:
+                pass
 
     # ════════════════════════════════════════════════════════════════════════
     # Historical backfill: Polygon → ClickHouse

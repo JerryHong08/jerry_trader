@@ -172,8 +172,27 @@ export const useTickDataStore = create<TickDataState>()((set, get) => ({
 
     socket.onmessage = (event) => {
       const data = JSON.parse(event.data);
+
+      // Handle factor updates
+      if (data.type === 'factor_update') {
+        // Forward to factorDataStore
+        import('./factorDataStore').then(({ useFactorDataStore }) => {
+          const factorStore = useFactorDataStore.getState();
+          const { symbol, timestamp_ns, factors } = data.data || {};
+
+          if (symbol && timestamp_ns && factors) {
+            factorStore.updateFactors('default', symbol, timestamp_ns, factors);
+            console.debug(`[TickData] Factor update forwarded for ${symbol}`);
+          }
+        });
+        return;
+      }
+
+      // Handle tick data (Q/T events)
       const ev = data.event_type as 'Q' | 'T';
       const sym = data.symbol as string;
+
+      if (!ev || !sym) return;
 
       set((s) => {
         const prevSym = s.symbolData[sym] || {};
@@ -252,5 +271,33 @@ export const useTickDataStore = create<TickDataState>()((set, get) => ({
     });
     saveSymbols(updated);
     savePerSymbolEvents(newPer);
+  },
+
+  // ========================================================================
+  // Factor Subscriptions (for FactorChartModule)
+  // ========================================================================
+
+  subscribeFactors: (symbols: string | string[]) => {
+    const symbolArray = Array.isArray(symbols) ? symbols : [symbols];
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        action: 'subscribe_factors',
+        symbols: symbolArray.map(s => s.toUpperCase()),
+      }));
+      console.log('[TickData] Subscribed to factors:', symbolArray);
+    } else {
+      console.warn('[TickData] Cannot subscribe to factors - WebSocket not connected');
+    }
+  },
+
+  unsubscribeFactors: (symbols: string | string[]) => {
+    const symbolArray = Array.isArray(symbols) ? symbols : [symbols];
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        action: 'unsubscribe_factors',
+        symbols: symbolArray.map(s => s.toUpperCase()),
+      }));
+      console.log('[TickData] Unsubscribed from factors:', symbolArray);
+    }
   },
 }));

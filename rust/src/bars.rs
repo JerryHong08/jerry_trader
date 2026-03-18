@@ -378,6 +378,9 @@ struct TickerBars {
     /// Active bar per timeframe.  `None` = no bar in progress.
     bars: HashMap<Timeframe, BarState>,
     max_event_ts: i64,
+    /// Tracks the `bar_end` of the last closed bar per timeframe.
+    /// Used to prevent late-arriving trades from re-creating an already-closed bar.
+    last_closed_end: HashMap<Timeframe, i64>,
 }
 
 impl TickerBars {
@@ -385,6 +388,7 @@ impl TickerBars {
         Self {
             bars: HashMap::with_capacity(8),
             max_event_ts: 0,
+            last_closed_end: HashMap::with_capacity(8),
         }
     }
 }
@@ -529,6 +533,7 @@ impl BarBuilder {
                         let cb = bar.to_completed(ticker, tf);
                         self.completed_queue.push_back(cb.clone());
                         completed.push(cb.to_py_dict(py)?);
+                        ticker_bars.last_closed_end.insert(tf, bar.bar_end);
 
                         // Start a new bar.
                         let seq = self.next_seq;
@@ -553,6 +558,10 @@ impl BarBuilder {
                     }
                 }
                 None => {
+                    // Don't re-create a bar for an already-closed period.
+                    if bar_end_ts <= *ticker_bars.last_closed_end.get(&tf).unwrap_or(&0) {
+                        continue;
+                    }
                     // First trade for this ticker+timeframe.
                     let seq = self.next_seq;
                     self.next_seq += 1;
@@ -631,6 +640,7 @@ impl BarBuilder {
                             let cb = bar.to_completed(ticker, tf);
                             self.completed_queue.push_back(cb.clone());
                             completed_bars.push(cb);
+                            ticker_bars.last_closed_end.insert(tf, bar.bar_end);
                             let seq = self.next_seq;
                             self.next_seq += 1;
                             *bar = BarState::new(
@@ -652,6 +662,10 @@ impl BarBuilder {
                         }
                     }
                     None => {
+                        // Don't re-create a bar for an already-closed period.
+                        if bar_end_ts <= *ticker_bars.last_closed_end.get(&tf).unwrap_or(&0) {
+                            continue;
+                        }
                         let seq = self.next_seq;
                         self.next_seq += 1;
                         ticker_bars.bars.insert(
@@ -760,6 +774,7 @@ impl BarBuilder {
             }
 
             if let Some(bar) = ticker_bars.bars.remove(&entry.tf) {
+                ticker_bars.last_closed_end.insert(entry.tf, bar.bar_end);
                 let cb = bar.to_completed(&entry.ticker, entry.tf);
                 self.completed_queue.push_back(cb.clone());
                 completed.push(cb.to_py_dict(py)?);

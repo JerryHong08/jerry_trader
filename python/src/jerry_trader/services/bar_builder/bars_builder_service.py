@@ -271,9 +271,9 @@ class BarsBuilderService:
         if remaining:
             # Convert ET → UTC before storing
             remaining = [self._convert_bar_et_to_utc(bar) for bar in remaining]
-            self._enqueue_bars(remaining)
+            self._enqueue_bars(remaining, source="stop")
             self._stats["bars_completed"] += len(remaining)
-        self._flush_to_clickhouse()
+        self._flush_to_clickhouse(caller="stop")
 
         # Stop ws loop if we own it
         if self._owns_manager and self.ws_loop and self.ws_loop.is_running():
@@ -493,7 +493,7 @@ class BarsBuilderService:
         if completed:
             # Convert ET → UTC before storing
             completed = [self._convert_bar_et_to_utc(bar) for bar in completed]
-            self._enqueue_bars(completed)
+            self._enqueue_bars(completed, source="remove_ticker")
             self._stats["bars_completed"] += len(completed)
 
         # Flush any unmerged REST meeting bar partials before clearing state.
@@ -502,7 +502,7 @@ class BarsBuilderService:
         rest_partials = self._rest_meeting_bars.pop(symbol, {})
         if rest_partials:
             for tf, rest_bar in rest_partials.items():
-                self._enqueue_bars([rest_bar])
+                self._enqueue_bars([rest_bar], source="remove_ticker/rest_partial")
                 logger.info(
                     f"_remove_ticker - {symbol}/{tf}: flushing unmerged "
                     f"REST meeting bar partial"
@@ -723,7 +723,7 @@ class BarsBuilderService:
                     )
 
             # Write clean bars (no overlap with WS)
-            self._enqueue_bars(clean_bars)
+            self._enqueue_bars(clean_bars, source="trades_backfill/clean")
 
             # ── Store REST meeting bar partials for deferred merge ────
             # The WS meeting bars haven't completed yet (the bar's time
@@ -757,10 +757,7 @@ class BarsBuilderService:
             # (via evt.set()) and queries ClickHouse before the 50 ms
             # _flush_loop has a chance to drain _pending_bars, resulting
             # in stale / missing data served to the frontend.
-            self._flush_to_clickhouse()
-
-        except Exception as e:
-            logger.error(f"trades_backfill - {symbol}: {e}", exc_info=True)
+            self._flush_to_clickhouse(caller="trades_backfill")
         finally:
             # Signal that bootstrap is complete (success or failure)
             # so tickdata_server REST handler can stop waiting.
@@ -1059,22 +1056,33 @@ class BarsBuilderService:
                 completed = [self._convert_bar_et_to_utc(bar) for bar in completed]
                 self._stats["bars_completed"] += len(completed)
                 merged = [self._try_merge_meeting_bar(bar) for bar in completed]
-                self._enqueue_bars(merged)
-                # self._publish_bar(bar)
+                self._enqueue_bars(merged, source="flush_loop/drain_completed")
+                # Publish completed bars to Redis pub/sub
+                for bar in merged:
+                    self._publish_bar(bar)
 
             # Flush to ClickHouse immediately when bars are pending.
             if self._has_pending_bars():
-                self._flush_to_clickhouse()
+                self._flush_to_clickhouse(caller="flush_loop")
 
         # Final flush on shutdown
-        self._flush_to_clickhouse()
+        self._flush_to_clickhouse(caller="flush_loop/shutdown")
         logger.info("Flush loop stopped")
 
-    def _flush_to_clickhouse(self) -> None:
+    def _flush_to_clickhouse(self, caller: str = "unknown") -> None:
         """Insert pending bars into ClickHouse via the shared ohlcv_writer."""
         bars = self._drain_pending_bars()
         if not bars:
             return
+
+        for bar in bars:
+            logger.debug(
+                f"_flush_to_clickhouse [{caller}]: writing "
+                f"{bar.get('ticker')}/{bar.get('timeframe')} "
+                f"bar_start={self._ms_to_et(bar.get('bar_start', 0))} "
+                f"bar_end={self._ms_to_et(bar.get('bar_end', 0))} "
+                f"trades={bar.get('trade_count')}"
+            )
 
         try:
             n = write_bars(
@@ -1093,11 +1101,18 @@ class BarsBuilderService:
                 f"_flush_to_clickhouse: failed to insert {len(bars)} bars - {e}"
             )
             # Re-queue failed bars for retry
-            self._enqueue_bars(bars)
+            self._enqueue_bars(bars, source="flush_to_clickhouse/retry")
 
-    def _enqueue_bars(self, bars: List[Dict]) -> None:
+    def _enqueue_bars(self, bars: List[Dict], source: str = "unknown") -> None:
         if not bars:
             return
+        for bar in bars:
+            logger.debug(
+                f"_enqueue_bars [{source}]: {bar.get('ticker')}/{bar.get('timeframe')} "
+                f"bar_start={self._ms_to_et(bar.get('bar_start', 0))} "
+                f"bar_end={self._ms_to_et(bar.get('bar_end', 0))} "
+                f"trades={bar.get('trade_count')}"
+            )
         with self._pending_lock:
             self._pending_bars.extend(bars)
 
@@ -1169,8 +1184,11 @@ class BarsBuilderService:
         return [dict(zip(columns, row)) for row in result.result_rows]
 
     def get_partial_bar(self, ticker: str, timeframe: str) -> Optional[Dict]:
-        """Get the current in-progress bar from the Rust BarBuilder."""
-        return self.bar_builder.get_current_bar(ticker, timeframe)
+        """Get the current in-progress bar from the Rust BarBuilder (UTC)."""
+        bar = self.bar_builder.get_current_bar(ticker, timeframe)
+        if bar is not None:
+            bar = self._convert_bar_et_to_utc(bar)
+        return bar
 
     def get_pending_bars(self, ticker: str, timeframe: str) -> List[Dict]:
         """Return completed bars not yet flushed to ClickHouse.

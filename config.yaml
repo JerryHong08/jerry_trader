@@ -55,14 +55,6 @@ machines:
   wsl2:
     limit: "null"    # market_open | market_close | null (never stop)
     roles:
-      ChartBFF:
-        enabled: true
-        host: "0.0.0.0"
-        port: 8000
-        redis: "redis-a"
-        heartbeat_redis: "redis-a"
-        # manager_type: "synced-replayer" # choices=["polygon", "theta", "replayer", "synced-replayer"]
-        manager_type: "polygon"
       BarsBuilder:
         enabled: true
         redis: "redis-a"
@@ -74,26 +66,34 @@ machines:
         # Bootstrap policy (trades_backfill): strict boundary close.
         bootstrap_late_arrival_ms: 0
         bootstrap_idle_close_ms: 1
-        timeframes:
-          - "10s"
-          - "1m"
-          - "5m"
-          - "15m"
-          - "30m"
-          - "1h"
-          - "4h"
-          - "1d"
-          - "1w"
+        timeframes: ["10s", "1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"] # supported bar timeframes
+        manager_type: "polygon" # choices=["polygon", "theta", "replayer", "synced-replayer"]
+          # - "10s"
+          # - "1m"
+          # - "5m"
+          # - "15m"
+          # - "30m"
+          # - "1h"
+          # - "4h"
+          # - "1d"
+          # - "1w"
+      ChartBFF:
+        enabled: true
+        host: "0.0.0.0"
+        port: 8000
+        redis: "redis-a"
+        heartbeat_redis: "redis-a"
+        # manager_type: "synced-replayer" # choices=["polygon", "theta", "replayer", "synced-replayer"]
       # StateEngine:
       #   enabled: true
       #   redis: "redis-a"
       #   influxdb: "influxdb-a"
-      FactorEngine:
-        enabled: true
-        # manager_type: "replayer" # choices=["polygon", "theta", "replayer", "synced-replayer"]
-        redis: "redis-a"
-        clickhouse: "clickhouse-a"
-        timeframe: "1m"
+      # FactorEngine:
+      #   enabled: true
+      #   # manager_type: "replayer" # choices=["polygon", "theta", "replayer", "synced-replayer"]
+      #   redis: "redis-a"
+      #   clickhouse: "clickhouse-a"
+      #   timeframe: "1m"
         # influxdb: "influxdb-a"
 
   mibuntu:

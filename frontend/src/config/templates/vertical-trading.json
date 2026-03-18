@@ -200,6 +200,19 @@
         "timeframe": "10s"
       }
     }
+  },
+  {
+    "id": "factor-chart-1773761621914",
+    "moduleType": "factor-chart",
+    "position": {
+      "x": 150,
+      "y": 1580
+    },
+    "size": {
+      "width": 990,
+      "height": 600
+    },
+    "syncGroup": "group-2"
   }
 ]
 }

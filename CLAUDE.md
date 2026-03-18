@@ -23,15 +23,6 @@ poetry run maturin develop --release
 poetry run python -c "from jerry_trader._rust import sum_as_string; print(sum_as_string(1, 2))"
 ```
 
-### Database Setup
-```bash
-# Run Alembic migrations (requires DATABASE_URL in .env)
-poetry run alembic upgrade head
-
-# Ensure Redis is running
-redis-server  # or via Docker
-```
-
 ### Running the System
 ```bash
 # Start backend services for a machine profile (defined in config.yaml)
@@ -75,8 +66,6 @@ poetry run black --check python/
 ## Architecture
 
 For detailed architecture documentation, see [ARCHITECTURE.md](ARCHITECTURE.md).
-
-For Stage 3 implementation recommendations, see [STAGE3_RECOMMENDATIONS.md](STAGE3_RECOMMENDATIONS.md).
 
 ### Layered Structure
 
@@ -153,7 +142,6 @@ Machine roles are configured in `config.yaml`. See `config.yaml.example` for the
 ### Testing
 - Unit tests in `python/tests/core/` - pure logic, no I/O
 - Integration tests in `python/tests/integration/` - require live infrastructure (Redis, ClickHouse)
-- Always run tests after significant changes to bar builder or clock logic
 
 ### Code Style
 - Python: Black + isort (line length 88)
@@ -161,16 +149,5 @@ Machine roles are configured in `config.yaml`. See `config.yaml.example` for the
 - Type hints preferred for public APIs
 - Rust: Standard rustfmt conventions
 
-
-## Stage 3 & 4 (Planned)
-
-**Stage 3 - Strategy Engine:**
-- Rewrite StateEngine and FactorEngine in Rust
-- Real-time risk management engine
-- ML pipeline for breakout-compute-analyze context model
-
-**Stage 4 - AI Agent Layer:**
-- Event-driven system with Redis streams
-- Agent loop with tool dispatch and memory
-- RPC for cross-service tool calls
-- Skills defined in `skills/` directory (markdown format)
+## Roadmap
+the detailed roadmap can be found in [ROADMAP.md](ROADMAP.md)

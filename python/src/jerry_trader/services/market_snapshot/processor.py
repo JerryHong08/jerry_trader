@@ -455,8 +455,18 @@ class SnapshotProcessor:
         )
 
         # Step 4: Update subscription set
-        current_top_n = enriched_df.head(self.TOP_N)
-        new_subscriptions = self._update_subscription_set(current_top_n, timestamp)
+        # Only subscribe when at least one ticker is actually up — guards against
+        # initialization snapshots (all zeros) and all-down market days where
+        # there are no gap-up candidates.
+        max_change = enriched_df["changePercent"].max()
+        if max_change is not None and max_change > 0:
+            current_top_n = enriched_df.head(self.TOP_N)
+            new_subscriptions = self._update_subscription_set(current_top_n, timestamp)
+        else:
+            logger.debug(
+                f"_process_snapshot - Skipping subscription: max changePercent={max_change} (no gap-up candidates)"
+            )
+            new_subscriptions = []
 
         # Step 5: Get all subscribed tickers and write to output stream + InfluxDB
         all_subscribed = self._get_all_subscribed_tickers()

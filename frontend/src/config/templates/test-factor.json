@@ -1,0 +1,56 @@
+{
+  "id": "05",
+  "name": "Test-factor",
+  "description": "layout for test factor",
+  "layout": [
+  {
+    "id": "chart-1773117208665",
+    "moduleType": "chart",
+    "position": {
+      "x": -410,
+      "y": 760
+    },
+    "size": {
+      "width": 710,
+      "height": 450
+    },
+    "syncGroup": "group-2",
+    "settings": {
+      "chart": {
+        "timeframe": "10s"
+      }
+    }
+  },
+  {
+    "id": "chart-1773212923947",
+    "moduleType": "chart",
+    "position": {
+      "x": 310,
+      "y": 760
+    },
+    "size": {
+      "width": 920,
+      "height": 930
+    },
+    "syncGroup": "group-2",
+    "settings": {
+      "chart": {
+        "timeframe": "1m"
+      }
+    }
+  },
+  {
+    "id": "factor-chart-1774174916263",
+    "moduleType": "factor-chart",
+    "position": {
+      "x": -410,
+      "y": 1220
+    },
+    "size": {
+      "width": 710,
+      "height": 470
+    },
+    "syncGroup": "group-2"
+  }
+]
+}

@@ -148,17 +148,36 @@ The proposed layout follows a **layered architecture** with strict dependency ru
 ### Live Mode (Machine A)
 
 ```bash
-Polygon WebSocket
-      │
-      ▼
-UnifiedTickManager  ──fan-out──►  BarsBuilderService  ──► ClickHouse (OHLCV)
-      │                                  │
-      │                                  └──► Redis A (bar stream)
-      │                                            │
-      ▼                                            ▼
-  ChartBFF  ◄──────────────────────────── Frontend (WebSocket)
-      │
-      └──► Redis A (tick stream)
+            Theta Data/Polygon/LocalSimulator tickdata WebSocket
+                                    │
+                                    ▼
+                              UnifiedTickManager
+                    ┌───────────────┼───────────────────┐
+                 fan-out         fan-out              fan-out
+                    │               │                    │
+                    ▼               ▼                    ▼
+            BarsBuilderService  FactorEngine          ChartBFF
+         (Single Bar Truth)    (Indicators)        (Orchestration)
+                    │               │                    │
+                    │ trade observer│                    │
+                    │─(bootstrap)──►│                    │
+                    │               │                    │
+                    ▼               │                    │
+              ClickHouse ◄──────────┤              WebSocket + REST
+             (OHLCV bars)           │                    │
+                    │     bar warmup│                    │
+                    │               │──────►ClickHouse   │
+                    │               │     (factors bars) │
+                    │  Redis pub/sub│                    │
+                    │──(bars:*)────►│                    │
+                    │               │──(factors:*)──────►│
+                    │               │                    │
+                    │               │    wait_bootstrap  │
+                    │               │◄──────────────────►│
+                    │                                    │
+                    │                                    ▼
+                    │                                 Frontend
+                                               (Chart + FactorChart)
 ```
 
 ### Live Mode (Machine B)

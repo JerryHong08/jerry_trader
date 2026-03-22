@@ -1094,14 +1094,14 @@ class BarsBuilderService:
         if not bars:
             return
 
-        for bar in bars:
-            logger.debug(
-                f"_flush_to_clickhouse [{caller}]: writing "
-                f"{bar.get('ticker')}/{bar.get('timeframe')} "
-                f"bar_start={self._ms_to_et(bar.get('bar_start', 0))} "
-                f"bar_end={self._ms_to_et(bar.get('bar_end', 0))} "
-                f"trades={bar.get('trade_count')}"
-            )
+        # for bar in bars:
+        #     logger.debug(
+        #         f"_flush_to_clickhouse [{caller}]: writing "
+        #         f"{bar.get('ticker')}/{bar.get('timeframe')} "
+        #         f"bar_start={self._ms_to_et(bar.get('bar_start', 0))} "
+        #         f"bar_end={self._ms_to_et(bar.get('bar_end', 0))} "
+        #         f"trades={bar.get('trade_count')}"
+        #     )
 
         try:
             n = write_bars(

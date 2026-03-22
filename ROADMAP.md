@@ -95,6 +95,7 @@ ochesration:
 frontend:
 
 - [ ] abstract all the search box into one.
+- [ ] bar chart and factor chart style unified.
 - [ ] better UX
   - ✅ keyboard shortcut
   - [ ] frame group
@@ -130,7 +131,7 @@ some other features to make it better.
 - [ ] Add more modules, like Agent module to monitor the global staus also focus on one ticker at the same time.
   - [ ] News engine output from log to json log. route to openclaw/heartbeat llm in the future.
     - ✅ news room
-      - [ ] focus mode
+      - ✅ focus mode(synced with group)
     - [ ] chatbox
 
 ## open issues

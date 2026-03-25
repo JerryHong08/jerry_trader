@@ -1,0 +1,3255 @@
+{
+  "nodes": [
+    {
+      "id": "roadmap/factor-realtime-analysis.md#deep-dive-real-time-tick-data-factor-computation-flow",
+      "type": "section",
+      "source": "markdown",
+      "label": "Deep Dive: Real-Time Tick Data & Factor Computation Flow",
+      "metadata": {
+        "level": 1
+      }
+    },
+    {
+      "id": "roadmap/factor-realtime-analysis.md#architecture-overview",
+      "type": "section",
+      "source": "markdown",
+      "label": "Architecture Overview",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "roadmap/factor-realtime-analysis.md#current-implementation-status",
+      "type": "section",
+      "source": "markdown",
+      "label": "Current Implementation Status",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "roadmap/factor-realtime-analysis.md#working",
+      "type": "section",
+      "source": "markdown",
+      "label": "✅ Working",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "roadmap/factor-realtime-analysis.md#broken-missing",
+      "type": "section",
+      "source": "markdown",
+      "label": "❌ Broken/Missing",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "roadmap/factor-realtime-analysis.md#critical-path-to-working-real-time-factors",
+      "type": "section",
+      "source": "markdown",
+      "label": "Critical Path to Working Real-Time Factors",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "roadmap/factor-realtime-analysis.md#immediate-fixes-high-priority",
+      "type": "section",
+      "source": "markdown",
+      "label": "Immediate Fixes (High Priority)",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "roadmap/factor-realtime-analysis.md#backend-improvements-medium-priority",
+      "type": "section",
+      "source": "markdown",
+      "label": "Backend Improvements (Medium Priority)",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "roadmap/factor-realtime-analysis.md#code-locations",
+      "type": "section",
+      "source": "markdown",
+      "label": "Code Locations",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "roadmap/factor-realtime-analysis.md#backend",
+      "type": "section",
+      "source": "markdown",
+      "label": "Backend",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "roadmap/factor-realtime-analysis.md#frontend",
+      "type": "section",
+      "source": "markdown",
+      "label": "Frontend",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "roadmap/factor-realtime-analysis.md#data-flow-details",
+      "type": "section",
+      "source": "markdown",
+      "label": "Data Flow Details",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "roadmap/factor-realtime-analysis.md#factor-bootstrap-historical",
+      "type": "section",
+      "source": "markdown",
+      "label": "Factor Bootstrap (Historical)",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "roadmap/factor-realtime-analysis.md#factor-real-time-live",
+      "type": "section",
+      "source": "markdown",
+      "label": "Factor Real-Time (Live)",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "roadmap/factor-realtime-analysis.md#testing-checklist",
+      "type": "section",
+      "source": "markdown",
+      "label": "Testing Checklist",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "roadmap/factor-realtime-analysis.md#subscribe-to-aapl-factors-verify-ema20-updates-on-each-bar-close",
+      "type": "task",
+      "source": "markdown",
+      "label": "Subscribe to AAPL factors, verify EMA20 updates on each bar close",
+      "metadata": {
+        "status": "todo"
+      }
+    },
+    {
+      "id": "roadmap/factor-realtime-analysis.md#subscribe-to-aapl-factors-verify-traderate-updates-every-1s",
+      "type": "task",
+      "source": "markdown",
+      "label": "Subscribe to AAPL factors, verify TradeRate updates every 1s",
+      "metadata": {
+        "status": "todo"
+      }
+    },
+    {
+      "id": "roadmap/factor-realtime-analysis.md#switch-main-chart-timeframe-factor-chart-auto-syncs",
+      "type": "task",
+      "source": "markdown",
+      "label": "Switch main chart timeframe, factor chart auto-syncs",
+      "metadata": {
+        "status": "todo"
+      }
+    },
+    {
+      "id": "roadmap/factor-realtime-analysis.md#unsubscribe-aapl-subscribe-tsla-verify-no-aapl-updates-received",
+      "type": "task",
+      "source": "markdown",
+      "label": "Unsubscribe AAPL, subscribe TSLA, verify no AAPL updates received",
+      "metadata": {
+        "status": "todo"
+      }
+    },
+    {
+      "id": "roadmap/factor-realtime-analysis.md#check-browser-devtools-websocket-messages-for-factor-update",
+      "type": "task",
+      "source": "markdown",
+      "label": "Check browser DevTools WebSocket messages for factor_update",
+      "metadata": {
+        "status": "todo"
+      }
+    },
+    {
+      "id": "roadmap/factor-realtime-analysis.md#check-redis-pub-sub-subscribe-factors-aapl",
+      "type": "task",
+      "source": "markdown",
+      "label": "Check Redis pub/sub: SUBSCRIBE factors:AAPL",
+      "metadata": {
+        "status": "todo"
+      }
+    },
+    {
+      "id": "roadmap/factor-realtime-analysis.md#related-tasks",
+      "type": "section",
+      "source": "markdown",
+      "label": "Related Tasks",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "ARCHITECTURE.md#jerry-trader-architecture-documentation",
+      "type": "section",
+      "source": "markdown",
+      "label": "Jerry Trader — Architecture Documentation",
+      "metadata": {
+        "level": 1
+      }
+    },
+    {
+      "id": "ARCHITECTURE.md#table-of-contents",
+      "type": "section",
+      "source": "markdown",
+      "label": "Table of Contents",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "ARCHITECTURE.md#1-project-overview",
+      "type": "section",
+      "source": "markdown",
+      "label": "1. Project Overview",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "ARCHITECTURE.md#2-machine-topology",
+      "type": "section",
+      "source": "markdown",
+      "label": "2. Machine Topology",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "ARCHITECTURE.md#3-current-python-layout",
+      "type": "section",
+      "source": "markdown",
+      "label": "3. Current Python Layout",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "ARCHITECTURE.md#4-layer-definitions",
+      "type": "section",
+      "source": "markdown",
+      "label": "4. Layer Definitions",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "ARCHITECTURE.md#5-rust-extension-layout",
+      "type": "section",
+      "source": "markdown",
+      "label": "5. Rust Extension Layout",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "ARCHITECTURE.md#6-data-flow",
+      "type": "section",
+      "source": "markdown",
+      "label": "6. Data Flow",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "ARCHITECTURE.md#live-mode-machine-a",
+      "type": "section",
+      "source": "markdown",
+      "label": "Live Mode (Machine A)",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "ARCHITECTURE.md#live-mode-machine-b",
+      "type": "section",
+      "source": "markdown",
+      "label": "Live Mode (Machine B)",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "ARCHITECTURE.md#replay-mode",
+      "type": "section",
+      "source": "markdown",
+      "label": "Replay Mode",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "ARCHITECTURE.md#news-pipeline-machine-c",
+      "type": "section",
+      "source": "markdown",
+      "label": "News Pipeline (Machine C)",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "ARCHITECTURE.md#7-stage-3-4-roadmap",
+      "type": "section",
+      "source": "markdown",
+      "label": "7. Stage 3 & 4 Roadmap",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "ARCHITECTURE.md#stage-3-strategy-engine-next",
+      "type": "section",
+      "source": "markdown",
+      "label": "Stage 3 — Strategy Engine (Next)",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "ARCHITECTURE.md#stage-4-ai-agent-layer",
+      "type": "section",
+      "source": "markdown",
+      "label": "Stage 4 — AI Agent Layer",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "ARCHITECTURE.md#8-development-guidelines",
+      "type": "section",
+      "source": "markdown",
+      "label": "8. Development Guidelines",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "ARCHITECTURE.md#adding-new-services",
+      "type": "section",
+      "source": "markdown",
+      "label": "Adding New Services",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "ARCHITECTURE.md#adding-new-apps",
+      "type": "section",
+      "source": "markdown",
+      "label": "Adding New Apps",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "ARCHITECTURE.md#modifying-rust-code",
+      "type": "section",
+      "source": "markdown",
+      "label": "Modifying Rust Code",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "ARCHITECTURE.md#testing",
+      "type": "section",
+      "source": "markdown",
+      "label": "Testing",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "ARCHITECTURE.md#configuration",
+      "type": "section",
+      "source": "markdown",
+      "label": "Configuration",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "ARCHITECTURE.md#known-issues",
+      "type": "section",
+      "source": "markdown",
+      "label": "Known Issues",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "ARCHIVE.md#archive",
+      "type": "section",
+      "source": "markdown",
+      "label": "Archive",
+      "metadata": {
+        "level": 1
+      }
+    },
+    {
+      "id": "ARCHIVE.md#2-rust-core",
+      "type": "section",
+      "source": "markdown",
+      "label": "2. Rust Core",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "ARCHIVE.md#barbuilder-with-watermark-based-close-and-late-arrival-window",
+      "type": "task",
+      "source": "markdown",
+      "label": "BarBuilder with watermark-based close and late-arrival window",
+      "metadata": {
+        "stable_id": "2.1",
+        "status": "done"
+      }
+    },
+    {
+      "id": "ARCHIVE.md#replayclock-with-redis-heartbeat-for-cross-machine-sync",
+      "type": "task",
+      "source": "markdown",
+      "label": "ReplayClock with Redis heartbeat for cross-machine sync",
+      "metadata": {
+        "stable_id": "2.2",
+        "status": "done"
+      }
+    },
+    {
+      "id": "ARCHIVE.md#volumetracker-for-snapshot-processing",
+      "type": "task",
+      "source": "markdown",
+      "label": "VolumeTracker for snapshot processing",
+      "metadata": {
+        "stable_id": "2.3",
+        "status": "done"
+      }
+    },
+    {
+      "id": "ARCHIVE.md#factor-helpers-z-score-price-accel",
+      "type": "task",
+      "source": "markdown",
+      "label": "Factor helpers (z_score, price_accel)",
+      "metadata": {
+        "stable_id": "2.4",
+        "status": "done"
+      }
+    },
+    {
+      "id": "ARCHIVE.md#tickdatareplayer-with-parquet-lake-reader",
+      "type": "task",
+      "source": "markdown",
+      "label": "TickDataReplayer with Parquet lake reader",
+      "metadata": {
+        "stable_id": "2.6",
+        "status": "done"
+      }
+    },
+    {
+      "id": "ARCHIVE.md#3-services-layer",
+      "type": "section",
+      "source": "markdown",
+      "label": "3. Services Layer",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "ARCHIVE.md#preload-parquet-load-method-optimization",
+      "type": "task",
+      "source": "markdown",
+      "label": "Preload parquet load method optimization",
+      "metadata": {
+        "stable_id": "3.9",
+        "status": "done"
+      }
+    },
+    {
+      "id": "ARCHIVE.md#5-frontend",
+      "type": "section",
+      "source": "markdown",
+      "label": "5. Frontend",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "ARCHIVE.md#keyboard-shortcuts",
+      "type": "task",
+      "source": "markdown",
+      "label": "Keyboard shortcuts",
+      "metadata": {
+        "stable_id": "5.3",
+        "status": "done"
+      }
+    },
+    {
+      "id": "ARCHIVE.md#8-optional-features",
+      "type": "section",
+      "source": "markdown",
+      "label": "8. Optional Features",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "ARCHIVE.md#multi-machine-ssh-deployment-configured-in-config-yaml",
+      "type": "task",
+      "source": "markdown",
+      "label": "Multi-machine SSH deployment configured in config.yaml",
+      "metadata": {
+        "stable_id": "8.1",
+        "status": "done"
+      }
+    },
+    {
+      "id": "ROADMAP.md#roadmap",
+      "type": "section",
+      "source": "markdown",
+      "label": "Roadmap",
+      "metadata": {
+        "level": 1
+      }
+    },
+    {
+      "id": "ROADMAP.md#1-domain-layer",
+      "type": "section",
+      "source": "markdown",
+      "label": "1. Domain Layer",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "ROADMAP.md#populate-domain-market-with-tick-bar-snapshot-models",
+      "type": "task",
+      "source": "markdown",
+      "label": "Populate domain/market/ with Tick, Bar, Snapshot models",
+      "metadata": {
+        "stable_id": "1.1",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#populate-domain-order-with-order-fill-contract-models",
+      "type": "task",
+      "source": "markdown",
+      "label": "Populate domain/order/ with Order, Fill, Contract models",
+      "metadata": {
+        "stable_id": "1.2",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#populate-domain-strategy-with-signal-risk-models",
+      "type": "task",
+      "source": "markdown",
+      "label": "Populate domain/strategy/ with Signal, Risk models",
+      "metadata": {
+        "stable_id": "1.3",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#populate-domain-factor-with-factor-value-objects",
+      "type": "task",
+      "source": "markdown",
+      "label": "Populate domain/factor/ with Factor value objects",
+      "metadata": {
+        "stable_id": "1.4",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#2-rust-core",
+      "type": "section",
+      "source": "markdown",
+      "label": "2. Rust Core",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "ROADMAP.md#stateengine-rewrite-in-rust",
+      "type": "task",
+      "source": "markdown",
+      "label": "StateEngine rewrite in Rust",
+      "metadata": {
+        "stable_id": "2.1",
+        "status": "in-progress"
+      }
+    },
+    {
+      "id": "ROADMAP.md#factorengine-rewrite-in-rust",
+      "type": "task",
+      "source": "markdown",
+      "label": "FactorEngine rewrite in Rust",
+      "metadata": {
+        "stable_id": "2.2",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#3-services-layer",
+      "type": "section",
+      "source": "markdown",
+      "label": "3. Services Layer",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "ROADMAP.md#factorengine-python-implementation-hybrid-bar-tick-based",
+      "type": "task",
+      "source": "markdown",
+      "label": "FactorEngine Python implementation (hybrid bar + tick based)",
+      "metadata": {
+        "stable_id": "3.1",
+        "status": "done"
+      }
+    },
+    {
+      "id": "ROADMAP.md#stateengine-python-wrappers-and-integration",
+      "type": "task",
+      "source": "markdown",
+      "label": "StateEngine Python wrappers and integration",
+      "metadata": {
+        "stable_id": "3.2",
+        "status": "in-progress"
+      }
+    },
+    {
+      "id": "ROADMAP.md#real-time-risk-management-engine-with-position-limits",
+      "type": "task",
+      "source": "markdown",
+      "label": "Real-time risk management engine with position limits",
+      "metadata": {
+        "stable_id": "3.3",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#risk-management-rules-and-drawdown-checks",
+      "type": "task",
+      "source": "markdown",
+      "label": "Risk management rules and drawdown checks",
+      "metadata": {
+        "stable_id": "3.4",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#risk-engine-integration-with-order-execution",
+      "type": "task",
+      "source": "markdown",
+      "label": "Risk engine integration with order execution",
+      "metadata": {
+        "stable_id": "3.5",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#4-ml-pipeline",
+      "type": "section",
+      "source": "markdown",
+      "label": "4. ML Pipeline",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "ROADMAP.md#expand-runtime-ml-with-training-evaluation-workflows",
+      "type": "task",
+      "source": "markdown",
+      "label": "Expand runtime/ml/ with training/evaluation workflows",
+      "metadata": {
+        "stable_id": "4.1",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#historical-context-model-for-breakout-detection",
+      "type": "task",
+      "source": "markdown",
+      "label": "Historical context model for breakout detection",
+      "metadata": {
+        "stable_id": "4.2",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#integrate-ml-pipeline-with-factorengine",
+      "type": "task",
+      "source": "markdown",
+      "label": "Integrate ML pipeline with FactorEngine",
+      "metadata": {
+        "stable_id": "4.3",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#simulate-market-snapshot-replay-using-historical-trade-quote-bulk-file",
+      "type": "task",
+      "source": "markdown",
+      "label": "Simulate market_snapshot replay using historical trade&quote bulk file",
+      "metadata": {
+        "stable_id": "4.4",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#5-frontend",
+      "type": "section",
+      "source": "markdown",
+      "label": "5. Frontend",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "ROADMAP.md#fix-factor-real-time-update-moduleid-mismatch-bug",
+      "type": "task",
+      "source": "markdown",
+      "label": "Fix factor real-time update moduleId mismatch bug",
+      "metadata": {
+        "stable_id": "5.1",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#factor-chart-sub-follower-mode-sync-timeframe-with-main-chart",
+      "type": "task",
+      "source": "markdown",
+      "label": "Factor chart sub-follower mode (sync timeframe with main chart)",
+      "metadata": {
+        "stable_id": "5.2",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#abstract-all-search-boxes-into-unified-component",
+      "type": "task",
+      "source": "markdown",
+      "label": "Abstract all search boxes into unified component",
+      "metadata": {
+        "stable_id": "5.3",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#unify-bar-chart-and-factor-chart-styles",
+      "type": "task",
+      "source": "markdown",
+      "label": "Unify bar chart and factor chart styles",
+      "metadata": {
+        "stable_id": "5.4",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#frame-group-feature",
+      "type": "task",
+      "source": "markdown",
+      "label": "Frame group feature",
+      "metadata": {
+        "stable_id": "5.5",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#better-ux-improvements",
+      "type": "task",
+      "source": "markdown",
+      "label": "Better UX improvements",
+      "metadata": {
+        "stable_id": "5.6",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#6-orchestration",
+      "type": "section",
+      "source": "markdown",
+      "label": "6. Orchestration",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "ROADMAP.md#decouple-trades-backfill-from-timeframe-switch-events",
+      "type": "task",
+      "source": "markdown",
+      "label": "Decouple trades_backfill from timeframe switch events",
+      "metadata": {
+        "stable_id": "6.1",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#configurable-timeframe-switch-and-bootstrap-computation",
+      "type": "task",
+      "source": "markdown",
+      "label": "Configurable timeframe switch and bootstrap computation",
+      "metadata": {
+        "stable_id": "6.2",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#factor-bootstrap-sync-to-trades-bootstrap",
+      "type": "task",
+      "source": "markdown",
+      "label": "Factor bootstrap sync to trades_bootstrap",
+      "metadata": {
+        "stable_id": "6.3",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#tickers-pre-location-fitting-strategy-conditions",
+      "type": "task",
+      "source": "markdown",
+      "label": "Tickers pre-location fitting strategy/conditions",
+      "metadata": {
+        "stable_id": "6.4",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#strategy-pre-locate-orchestrator-with-auto-sequenced-jumps",
+      "type": "task",
+      "source": "markdown",
+      "label": "Strategy pre-locate orchestrator with auto-sequenced jumps",
+      "metadata": {
+        "stable_id": "6.5",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#pre-located-tickers-pipeline-backtest-visualization-and-validation",
+      "type": "task",
+      "source": "markdown",
+      "label": "Pre-located tickers pipeline backtest visualization and validation",
+      "metadata": {
+        "stable_id": "6.6",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#7-ai-agent-layer",
+      "type": "section",
+      "source": "markdown",
+      "label": "7. AI Agent Layer",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "ROADMAP.md#redis-streams-to-event-bus-migration",
+      "type": "task",
+      "source": "markdown",
+      "label": "Redis streams to event_bus migration",
+      "metadata": {
+        "stable_id": "7.1",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#redis-based-rpc-for-cross-service-tool-calls",
+      "type": "task",
+      "source": "markdown",
+      "label": "Redis-based RPC for cross-service tool calls",
+      "metadata": {
+        "stable_id": "7.2",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#agentbff-http-websocket-interface",
+      "type": "task",
+      "source": "markdown",
+      "label": "AgentBFF HTTP + WebSocket interface",
+      "metadata": {
+        "stable_id": "7.3",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#agent-core-loop-with-tool-dispatch",
+      "type": "task",
+      "source": "markdown",
+      "label": "Agent core loop with tool dispatch",
+      "metadata": {
+        "stable_id": "7.4",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#tool-registry-wrapping-existing-services",
+      "type": "task",
+      "source": "markdown",
+      "label": "Tool registry wrapping existing services",
+      "metadata": {
+        "stable_id": "7.5",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#short-and-long-term-memory-system",
+      "type": "task",
+      "source": "markdown",
+      "label": "Short and long-term memory system",
+      "metadata": {
+        "stable_id": "7.6",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#txt-to-tool-calling-validation",
+      "type": "task",
+      "source": "markdown",
+      "label": "txt to tool-calling validation",
+      "metadata": {
+        "stable_id": "7.7",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#strategy-pipeline-agent-validation",
+      "type": "task",
+      "source": "markdown",
+      "label": "Strategy pipeline agent validation",
+      "metadata": {
+        "stable_id": "7.8",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#ml-pipeline-agent-validation",
+      "type": "task",
+      "source": "markdown",
+      "label": "ML pipeline agent validation",
+      "metadata": {
+        "stable_id": "7.9",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#basic-cli-tools-and-skills-instruction",
+      "type": "task",
+      "source": "markdown",
+      "label": "Basic CLI tools and skills instruction",
+      "metadata": {
+        "stable_id": "7.10",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#8-optional-features",
+      "type": "section",
+      "source": "markdown",
+      "label": "8. Optional Features",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "ROADMAP.md#historical-orders-analysis-module",
+      "type": "task",
+      "source": "markdown",
+      "label": "Historical orders analysis module",
+      "metadata": {
+        "stable_id": "8.1",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#news-engine-output-from-log-to-json-log",
+      "type": "task",
+      "source": "markdown",
+      "label": "News engine output from log to JSON log",
+      "metadata": {
+        "stable_id": "8.2",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#chatbox-module",
+      "type": "task",
+      "source": "markdown",
+      "label": "Chatbox module",
+      "metadata": {
+        "stable_id": "8.3",
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#design-concerns",
+      "type": "section",
+      "source": "markdown",
+      "label": "Design Concerns",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "ROADMAP.md#config-builder-py-merge-with-config-py-in-platform-config",
+      "type": "task",
+      "source": "markdown",
+      "label": "config_builder.py merge with config.py in platform/config/",
+      "metadata": {
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#event-bus-architecture-for-stage-4",
+      "type": "task",
+      "source": "markdown",
+      "label": "Event bus architecture for Stage 4",
+      "metadata": {
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#domain-layer-empty-placeholders-strategy",
+      "type": "task",
+      "source": "markdown",
+      "label": "Domain layer empty placeholders strategy",
+      "metadata": {
+        "status": "todo"
+      }
+    },
+    {
+      "id": "ROADMAP.md#open-issues",
+      "type": "section",
+      "source": "markdown",
+      "label": "Open Issues",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "ROADMAP.md#frontend-chart-timespan-switch-newest-bar-covers-last-bar-s-open-high-low",
+      "type": "task",
+      "source": "markdown",
+      "label": "Frontend chart timespan switch: newest bar covers last bar's open/high/low",
+      "metadata": {
+        "status": "todo"
+      }
+    },
+    {
+      "id": "README.md#introduction",
+      "type": "section",
+      "source": "markdown",
+      "label": "Introduction",
+      "metadata": {
+        "level": 1
+      }
+    },
+    {
+      "id": "README.md#installation-quick-start",
+      "type": "section",
+      "source": "markdown",
+      "label": "Installation & Quick Start",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "README.md#1-clone-configure",
+      "type": "section",
+      "source": "markdown",
+      "label": "1. Clone & Configure",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "README.md#1-1-basic-config-yaml",
+      "type": "section",
+      "source": "markdown",
+      "label": "1.1 basic_config.yaml",
+      "metadata": {
+        "level": 4
+      }
+    },
+    {
+      "id": "README.md#1-2-env",
+      "type": "section",
+      "source": "markdown",
+      "label": "1.2 .env",
+      "metadata": {
+        "level": 4
+      }
+    },
+    {
+      "id": "README.md#1-3-config-yaml-machine-roles",
+      "type": "section",
+      "source": "markdown",
+      "label": "1.3 config.yaml — Machine Roles",
+      "metadata": {
+        "level": 4
+      }
+    },
+    {
+      "id": "README.md#2-install-python-dependencies",
+      "type": "section",
+      "source": "markdown",
+      "label": "2. Install Python Dependencies",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "README.md#3-build-the-rust-extension",
+      "type": "section",
+      "source": "markdown",
+      "label": "3. Build the Rust Extension",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "README.md#4-database-setup",
+      "type": "section",
+      "source": "markdown",
+      "label": "4. Database Setup",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "README.md#5-start-the-backend",
+      "type": "section",
+      "source": "markdown",
+      "label": "5. Start the Backend",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "README.md#6-start-the-frontend",
+      "type": "section",
+      "source": "markdown",
+      "label": "6. Start the Frontend",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "README.md#7-development-workflow",
+      "type": "section",
+      "source": "markdown",
+      "label": "7. Development Workflow",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "README.md#data-flow",
+      "type": "section",
+      "source": "markdown",
+      "label": "Data Flow",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "README.md#live-mode-machine-a",
+      "type": "section",
+      "source": "markdown",
+      "label": "Live Mode (Machine A)",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "README.md#live-mode-machine-b",
+      "type": "section",
+      "source": "markdown",
+      "label": "Live Mode (Machine B)",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "README.md#replay-mode",
+      "type": "section",
+      "source": "markdown",
+      "label": "Replay Mode",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "README.md#news-pipeline-machine-c",
+      "type": "section",
+      "source": "markdown",
+      "label": "News Pipeline (Machine C)",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "README.md#current-frontend-preview",
+      "type": "section",
+      "source": "markdown",
+      "label": "Current frontend preview",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "README.md#overview-layout-set",
+      "type": "section",
+      "source": "markdown",
+      "label": "Overview Layout Set",
+      "metadata": {
+        "level": 4
+      }
+    },
+    {
+      "id": "README.md#trade-layout-set",
+      "type": "section",
+      "source": "markdown",
+      "label": "Trade Layout Set",
+      "metadata": {
+        "level": 4
+      }
+    },
+    {
+      "id": "CHANGELOG.md#unreleased-2026-03-13",
+      "type": "section",
+      "source": "markdown",
+      "label": "Unreleased (2026-03-13)",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "CHANGELOG.md#feat",
+      "type": "section",
+      "source": "markdown",
+      "label": "Feat",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CHANGELOG.md#refactor",
+      "type": "section",
+      "source": "markdown",
+      "label": "Refactor",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CHANGELOG.md#1-3-0-2026-03-14",
+      "type": "section",
+      "source": "markdown",
+      "label": "1.3.0 (2026-03-14)",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "CHANGELOG.md#refactor-2",
+      "type": "section",
+      "source": "markdown",
+      "label": "Refactor",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CHANGELOG.md#feat-2",
+      "type": "section",
+      "source": "markdown",
+      "label": "Feat",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CHANGELOG.md#chore",
+      "type": "section",
+      "source": "markdown",
+      "label": "Chore",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CHANGELOG.md#fix",
+      "type": "section",
+      "source": "markdown",
+      "label": "Fix",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CHANGELOG.md#chore-2",
+      "type": "section",
+      "source": "markdown",
+      "label": "Chore",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CHANGELOG.md#1-2-0-2026-03-11",
+      "type": "section",
+      "source": "markdown",
+      "label": "1.2.0 (2026-03-11)",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "CHANGELOG.md#feat-3",
+      "type": "section",
+      "source": "markdown",
+      "label": "Feat",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CHANGELOG.md#fix-2",
+      "type": "section",
+      "source": "markdown",
+      "label": "Fix",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CHANGELOG.md#perf",
+      "type": "section",
+      "source": "markdown",
+      "label": "Perf",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CHANGELOG.md#1-1-0-2026-03-09",
+      "type": "section",
+      "source": "markdown",
+      "label": "1.1.0 (2026-03-09)",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "CHANGELOG.md#feat-4",
+      "type": "section",
+      "source": "markdown",
+      "label": "Feat",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CHANGELOG.md#fix-3",
+      "type": "section",
+      "source": "markdown",
+      "label": "Fix",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CHANGELOG.md#perf-2",
+      "type": "section",
+      "source": "markdown",
+      "label": "Perf",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CHANGELOG.md#tests",
+      "type": "section",
+      "source": "markdown",
+      "label": "Tests",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CHANGELOG.md#1-0-0-2026-03-06",
+      "type": "section",
+      "source": "markdown",
+      "label": "1.0.0 (2026-03-06)",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "CHANGELOG.md#breaking-changes",
+      "type": "section",
+      "source": "markdown",
+      "label": "BREAKING CHANGES",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CHANGELOG.md#feat-5",
+      "type": "section",
+      "source": "markdown",
+      "label": "Feat",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CHANGELOG.md#fix-4",
+      "type": "section",
+      "source": "markdown",
+      "label": "Fix",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CHANGELOG.md#refactor-3",
+      "type": "section",
+      "source": "markdown",
+      "label": "Refactor",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CHANGELOG.md#0-2-0-2026-02-28",
+      "type": "section",
+      "source": "markdown",
+      "label": "0.2.0 (2026-02-28)",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "CHANGELOG.md#feat-6",
+      "type": "section",
+      "source": "markdown",
+      "label": "Feat",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CHANGELOG.md#backend",
+      "type": "section",
+      "source": "markdown",
+      "label": "Backend",
+      "metadata": {
+        "level": 4
+      }
+    },
+    {
+      "id": "CHANGELOG.md#frontend-gridtrader",
+      "type": "section",
+      "source": "markdown",
+      "label": "Frontend (GridTrader)",
+      "metadata": {
+        "level": 4
+      }
+    },
+    {
+      "id": "CHANGELOG.md#fix-5",
+      "type": "section",
+      "source": "markdown",
+      "label": "Fix",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CHANGELOG.md#refactor-4",
+      "type": "section",
+      "source": "markdown",
+      "label": "Refactor",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CHANGELOG.md#perf-3",
+      "type": "section",
+      "source": "markdown",
+      "label": "Perf",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CLAUDE.md#claude-md",
+      "type": "section",
+      "source": "markdown",
+      "label": "CLAUDE.md",
+      "metadata": {
+        "level": 1
+      }
+    },
+    {
+      "id": "CLAUDE.md#project-overview",
+      "type": "section",
+      "source": "markdown",
+      "label": "Project Overview",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "CLAUDE.md#development-commands",
+      "type": "section",
+      "source": "markdown",
+      "label": "Development Commands",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "CLAUDE.md#environment-setup",
+      "type": "section",
+      "source": "markdown",
+      "label": "Environment Setup",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CLAUDE.md#running-the-system",
+      "type": "section",
+      "source": "markdown",
+      "label": "Running the System",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CLAUDE.md#testing",
+      "type": "section",
+      "source": "markdown",
+      "label": "Testing",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CLAUDE.md#code-formatting",
+      "type": "section",
+      "source": "markdown",
+      "label": "Code Formatting",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CLAUDE.md#architecture",
+      "type": "section",
+      "source": "markdown",
+      "label": "Architecture",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "CLAUDE.md#layered-structure",
+      "type": "section",
+      "source": "markdown",
+      "label": "Layered Structure",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CLAUDE.md#key-directories",
+      "type": "section",
+      "source": "markdown",
+      "label": "Key Directories",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CLAUDE.md#multi-machine-topology",
+      "type": "section",
+      "source": "markdown",
+      "label": "Multi-Machine Topology",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CLAUDE.md#important-notes",
+      "type": "section",
+      "source": "markdown",
+      "label": "Important Notes",
+      "metadata": {
+        "level": 2
+      }
+    },
+    {
+      "id": "CLAUDE.md#bar-builder",
+      "type": "section",
+      "source": "markdown",
+      "label": "Bar Builder",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CLAUDE.md#clock-synchronization",
+      "type": "section",
+      "source": "markdown",
+      "label": "Clock Synchronization",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CLAUDE.md#testing-2",
+      "type": "section",
+      "source": "markdown",
+      "label": "Testing",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CLAUDE.md#code-style",
+      "type": "section",
+      "source": "markdown",
+      "label": "Code Style",
+      "metadata": {
+        "level": 3
+      }
+    },
+    {
+      "id": "CLAUDE.md#roadmap",
+      "type": "section",
+      "source": "markdown",
+      "label": "Roadmap",
+      "metadata": {
+        "level": 2
+      }
+    }
+  ],
+  "edges": [
+    {
+      "source": "roadmap/factor-realtime-analysis.md",
+      "target": "roadmap/factor-realtime-analysis.md#deep-dive-real-time-tick-data-factor-computation-flow",
+      "type": "contains"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#deep-dive-real-time-tick-data-factor-computation-flow",
+      "target": "roadmap/factor-realtime-analysis.md#architecture-overview",
+      "type": "contains"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#deep-dive-real-time-tick-data-factor-computation-flow",
+      "target": "roadmap/factor-realtime-analysis.md#current-implementation-status",
+      "type": "contains"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#architecture-overview",
+      "target": "roadmap/factor-realtime-analysis.md#current-implementation-status",
+      "type": "sequence"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#current-implementation-status",
+      "target": "roadmap/factor-realtime-analysis.md#working",
+      "type": "contains"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#current-implementation-status",
+      "target": "roadmap/factor-realtime-analysis.md#broken-missing",
+      "type": "contains"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#working",
+      "target": "roadmap/factor-realtime-analysis.md#broken-missing",
+      "type": "sequence"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#deep-dive-real-time-tick-data-factor-computation-flow",
+      "target": "roadmap/factor-realtime-analysis.md#critical-path-to-working-real-time-factors",
+      "type": "contains"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#current-implementation-status",
+      "target": "roadmap/factor-realtime-analysis.md#critical-path-to-working-real-time-factors",
+      "type": "sequence"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#critical-path-to-working-real-time-factors",
+      "target": "roadmap/factor-realtime-analysis.md#immediate-fixes-high-priority",
+      "type": "contains"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#critical-path-to-working-real-time-factors",
+      "target": "roadmap/factor-realtime-analysis.md#backend-improvements-medium-priority",
+      "type": "contains"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#immediate-fixes-high-priority",
+      "target": "roadmap/factor-realtime-analysis.md#backend-improvements-medium-priority",
+      "type": "sequence"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#deep-dive-real-time-tick-data-factor-computation-flow",
+      "target": "roadmap/factor-realtime-analysis.md#code-locations",
+      "type": "contains"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#critical-path-to-working-real-time-factors",
+      "target": "roadmap/factor-realtime-analysis.md#code-locations",
+      "type": "sequence"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#code-locations",
+      "target": "roadmap/factor-realtime-analysis.md#backend",
+      "type": "contains"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#code-locations",
+      "target": "roadmap/factor-realtime-analysis.md#frontend",
+      "type": "contains"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#backend",
+      "target": "roadmap/factor-realtime-analysis.md#frontend",
+      "type": "sequence"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#deep-dive-real-time-tick-data-factor-computation-flow",
+      "target": "roadmap/factor-realtime-analysis.md#data-flow-details",
+      "type": "contains"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#code-locations",
+      "target": "roadmap/factor-realtime-analysis.md#data-flow-details",
+      "type": "sequence"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#data-flow-details",
+      "target": "roadmap/factor-realtime-analysis.md#factor-bootstrap-historical",
+      "type": "contains"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#data-flow-details",
+      "target": "roadmap/factor-realtime-analysis.md#factor-real-time-live",
+      "type": "contains"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#factor-bootstrap-historical",
+      "target": "roadmap/factor-realtime-analysis.md#factor-real-time-live",
+      "type": "sequence"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#deep-dive-real-time-tick-data-factor-computation-flow",
+      "target": "roadmap/factor-realtime-analysis.md#testing-checklist",
+      "type": "contains"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#data-flow-details",
+      "target": "roadmap/factor-realtime-analysis.md#testing-checklist",
+      "type": "sequence"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#testing-checklist",
+      "target": "roadmap/factor-realtime-analysis.md#subscribe-to-aapl-factors-verify-ema20-updates-on-each-bar-close",
+      "type": "contains"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#testing-checklist",
+      "target": "roadmap/factor-realtime-analysis.md#subscribe-to-aapl-factors-verify-traderate-updates-every-1s",
+      "type": "contains"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#subscribe-to-aapl-factors-verify-ema20-updates-on-each-bar-close",
+      "target": "roadmap/factor-realtime-analysis.md#subscribe-to-aapl-factors-verify-traderate-updates-every-1s",
+      "type": "sequence"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#testing-checklist",
+      "target": "roadmap/factor-realtime-analysis.md#switch-main-chart-timeframe-factor-chart-auto-syncs",
+      "type": "contains"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#subscribe-to-aapl-factors-verify-traderate-updates-every-1s",
+      "target": "roadmap/factor-realtime-analysis.md#switch-main-chart-timeframe-factor-chart-auto-syncs",
+      "type": "sequence"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#testing-checklist",
+      "target": "roadmap/factor-realtime-analysis.md#unsubscribe-aapl-subscribe-tsla-verify-no-aapl-updates-received",
+      "type": "contains"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#switch-main-chart-timeframe-factor-chart-auto-syncs",
+      "target": "roadmap/factor-realtime-analysis.md#unsubscribe-aapl-subscribe-tsla-verify-no-aapl-updates-received",
+      "type": "sequence"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#testing-checklist",
+      "target": "roadmap/factor-realtime-analysis.md#check-browser-devtools-websocket-messages-for-factor-update",
+      "type": "contains"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#unsubscribe-aapl-subscribe-tsla-verify-no-aapl-updates-received",
+      "target": "roadmap/factor-realtime-analysis.md#check-browser-devtools-websocket-messages-for-factor-update",
+      "type": "sequence"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#testing-checklist",
+      "target": "roadmap/factor-realtime-analysis.md#check-redis-pub-sub-subscribe-factors-aapl",
+      "type": "contains"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#check-browser-devtools-websocket-messages-for-factor-update",
+      "target": "roadmap/factor-realtime-analysis.md#check-redis-pub-sub-subscribe-factors-aapl",
+      "type": "sequence"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#deep-dive-real-time-tick-data-factor-computation-flow",
+      "target": "roadmap/factor-realtime-analysis.md#related-tasks",
+      "type": "contains"
+    },
+    {
+      "source": "roadmap/factor-realtime-analysis.md#testing-checklist",
+      "target": "roadmap/factor-realtime-analysis.md#related-tasks",
+      "type": "sequence"
+    },
+    {
+      "source": "ARCHITECTURE.md",
+      "target": "ARCHITECTURE.md#jerry-trader-architecture-documentation",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHITECTURE.md#jerry-trader-architecture-documentation",
+      "target": "ARCHITECTURE.md#table-of-contents",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHITECTURE.md#jerry-trader-architecture-documentation",
+      "target": "ARCHITECTURE.md#1-project-overview",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHITECTURE.md#table-of-contents",
+      "target": "ARCHITECTURE.md#1-project-overview",
+      "type": "sequence"
+    },
+    {
+      "source": "ARCHITECTURE.md#jerry-trader-architecture-documentation",
+      "target": "ARCHITECTURE.md#2-machine-topology",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHITECTURE.md#1-project-overview",
+      "target": "ARCHITECTURE.md#2-machine-topology",
+      "type": "sequence"
+    },
+    {
+      "source": "ARCHITECTURE.md#jerry-trader-architecture-documentation",
+      "target": "ARCHITECTURE.md#3-current-python-layout",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHITECTURE.md#2-machine-topology",
+      "target": "ARCHITECTURE.md#3-current-python-layout",
+      "type": "sequence"
+    },
+    {
+      "source": "ARCHITECTURE.md#jerry-trader-architecture-documentation",
+      "target": "ARCHITECTURE.md#4-layer-definitions",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHITECTURE.md#3-current-python-layout",
+      "target": "ARCHITECTURE.md#4-layer-definitions",
+      "type": "sequence"
+    },
+    {
+      "source": "ARCHITECTURE.md#jerry-trader-architecture-documentation",
+      "target": "ARCHITECTURE.md#5-rust-extension-layout",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHITECTURE.md#4-layer-definitions",
+      "target": "ARCHITECTURE.md#5-rust-extension-layout",
+      "type": "sequence"
+    },
+    {
+      "source": "ARCHITECTURE.md#jerry-trader-architecture-documentation",
+      "target": "ARCHITECTURE.md#6-data-flow",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHITECTURE.md#5-rust-extension-layout",
+      "target": "ARCHITECTURE.md#6-data-flow",
+      "type": "sequence"
+    },
+    {
+      "source": "ARCHITECTURE.md#6-data-flow",
+      "target": "ARCHITECTURE.md#live-mode-machine-a",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHITECTURE.md#6-data-flow",
+      "target": "ARCHITECTURE.md#live-mode-machine-b",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHITECTURE.md#live-mode-machine-a",
+      "target": "ARCHITECTURE.md#live-mode-machine-b",
+      "type": "sequence"
+    },
+    {
+      "source": "ARCHITECTURE.md#6-data-flow",
+      "target": "ARCHITECTURE.md#replay-mode",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHITECTURE.md#live-mode-machine-b",
+      "target": "ARCHITECTURE.md#replay-mode",
+      "type": "sequence"
+    },
+    {
+      "source": "ARCHITECTURE.md#6-data-flow",
+      "target": "ARCHITECTURE.md#news-pipeline-machine-c",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHITECTURE.md#replay-mode",
+      "target": "ARCHITECTURE.md#news-pipeline-machine-c",
+      "type": "sequence"
+    },
+    {
+      "source": "ARCHITECTURE.md#jerry-trader-architecture-documentation",
+      "target": "ARCHITECTURE.md#7-stage-3-4-roadmap",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHITECTURE.md#6-data-flow",
+      "target": "ARCHITECTURE.md#7-stage-3-4-roadmap",
+      "type": "sequence"
+    },
+    {
+      "source": "ARCHITECTURE.md#7-stage-3-4-roadmap",
+      "target": "ARCHITECTURE.md#stage-3-strategy-engine-next",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHITECTURE.md#7-stage-3-4-roadmap",
+      "target": "ARCHITECTURE.md#stage-4-ai-agent-layer",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHITECTURE.md#stage-3-strategy-engine-next",
+      "target": "ARCHITECTURE.md#stage-4-ai-agent-layer",
+      "type": "sequence"
+    },
+    {
+      "source": "ARCHITECTURE.md#jerry-trader-architecture-documentation",
+      "target": "ARCHITECTURE.md#8-development-guidelines",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHITECTURE.md#7-stage-3-4-roadmap",
+      "target": "ARCHITECTURE.md#8-development-guidelines",
+      "type": "sequence"
+    },
+    {
+      "source": "ARCHITECTURE.md#8-development-guidelines",
+      "target": "ARCHITECTURE.md#adding-new-services",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHITECTURE.md#8-development-guidelines",
+      "target": "ARCHITECTURE.md#adding-new-apps",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHITECTURE.md#adding-new-services",
+      "target": "ARCHITECTURE.md#adding-new-apps",
+      "type": "sequence"
+    },
+    {
+      "source": "ARCHITECTURE.md#8-development-guidelines",
+      "target": "ARCHITECTURE.md#modifying-rust-code",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHITECTURE.md#adding-new-apps",
+      "target": "ARCHITECTURE.md#modifying-rust-code",
+      "type": "sequence"
+    },
+    {
+      "source": "ARCHITECTURE.md#8-development-guidelines",
+      "target": "ARCHITECTURE.md#testing",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHITECTURE.md#modifying-rust-code",
+      "target": "ARCHITECTURE.md#testing",
+      "type": "sequence"
+    },
+    {
+      "source": "ARCHITECTURE.md#8-development-guidelines",
+      "target": "ARCHITECTURE.md#configuration",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHITECTURE.md#testing",
+      "target": "ARCHITECTURE.md#configuration",
+      "type": "sequence"
+    },
+    {
+      "source": "ARCHITECTURE.md#8-development-guidelines",
+      "target": "ARCHITECTURE.md#known-issues",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHITECTURE.md#configuration",
+      "target": "ARCHITECTURE.md#known-issues",
+      "type": "sequence"
+    },
+    {
+      "source": "ARCHIVE.md",
+      "target": "ARCHIVE.md#archive",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHIVE.md#archive",
+      "target": "ARCHIVE.md#2-rust-core",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHIVE.md#2-rust-core",
+      "target": "ARCHIVE.md#barbuilder-with-watermark-based-close-and-late-arrival-window",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHIVE.md#2-rust-core",
+      "target": "ARCHIVE.md#replayclock-with-redis-heartbeat-for-cross-machine-sync",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHIVE.md#barbuilder-with-watermark-based-close-and-late-arrival-window",
+      "target": "ARCHIVE.md#replayclock-with-redis-heartbeat-for-cross-machine-sync",
+      "type": "sequence"
+    },
+    {
+      "source": "ARCHIVE.md#2-rust-core",
+      "target": "ARCHIVE.md#volumetracker-for-snapshot-processing",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHIVE.md#replayclock-with-redis-heartbeat-for-cross-machine-sync",
+      "target": "ARCHIVE.md#volumetracker-for-snapshot-processing",
+      "type": "sequence"
+    },
+    {
+      "source": "ARCHIVE.md#2-rust-core",
+      "target": "ARCHIVE.md#factor-helpers-z-score-price-accel",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHIVE.md#volumetracker-for-snapshot-processing",
+      "target": "ARCHIVE.md#factor-helpers-z-score-price-accel",
+      "type": "sequence"
+    },
+    {
+      "source": "ARCHIVE.md#2-rust-core",
+      "target": "ARCHIVE.md#tickdatareplayer-with-parquet-lake-reader",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHIVE.md#factor-helpers-z-score-price-accel",
+      "target": "ARCHIVE.md#tickdatareplayer-with-parquet-lake-reader",
+      "type": "sequence"
+    },
+    {
+      "source": "ARCHIVE.md#archive",
+      "target": "ARCHIVE.md#3-services-layer",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHIVE.md#2-rust-core",
+      "target": "ARCHIVE.md#3-services-layer",
+      "type": "sequence"
+    },
+    {
+      "source": "ARCHIVE.md#3-services-layer",
+      "target": "ARCHIVE.md#preload-parquet-load-method-optimization",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHIVE.md#archive",
+      "target": "ARCHIVE.md#5-frontend",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHIVE.md#3-services-layer",
+      "target": "ARCHIVE.md#5-frontend",
+      "type": "sequence"
+    },
+    {
+      "source": "ARCHIVE.md#5-frontend",
+      "target": "ARCHIVE.md#keyboard-shortcuts",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHIVE.md#archive",
+      "target": "ARCHIVE.md#8-optional-features",
+      "type": "contains"
+    },
+    {
+      "source": "ARCHIVE.md#5-frontend",
+      "target": "ARCHIVE.md#8-optional-features",
+      "type": "sequence"
+    },
+    {
+      "source": "ARCHIVE.md#8-optional-features",
+      "target": "ARCHIVE.md#multi-machine-ssh-deployment-configured-in-config-yaml",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md",
+      "target": "ROADMAP.md#roadmap",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#roadmap",
+      "target": "ROADMAP.md#1-domain-layer",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#1-domain-layer",
+      "target": "ROADMAP.md#populate-domain-market-with-tick-bar-snapshot-models",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#1-domain-layer",
+      "target": "ROADMAP.md#populate-domain-order-with-order-fill-contract-models",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#populate-domain-market-with-tick-bar-snapshot-models",
+      "target": "ROADMAP.md#populate-domain-order-with-order-fill-contract-models",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#1-domain-layer",
+      "target": "ROADMAP.md#populate-domain-strategy-with-signal-risk-models",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#populate-domain-order-with-order-fill-contract-models",
+      "target": "ROADMAP.md#populate-domain-strategy-with-signal-risk-models",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#1-domain-layer",
+      "target": "ROADMAP.md#populate-domain-factor-with-factor-value-objects",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#populate-domain-strategy-with-signal-risk-models",
+      "target": "ROADMAP.md#populate-domain-factor-with-factor-value-objects",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#roadmap",
+      "target": "ROADMAP.md#2-rust-core",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#1-domain-layer",
+      "target": "ROADMAP.md#2-rust-core",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#2-rust-core",
+      "target": "ROADMAP.md#stateengine-rewrite-in-rust",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#2-rust-core",
+      "target": "ROADMAP.md#factorengine-rewrite-in-rust",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#stateengine-rewrite-in-rust",
+      "target": "ROADMAP.md#factorengine-rewrite-in-rust",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#roadmap",
+      "target": "ROADMAP.md#3-services-layer",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#2-rust-core",
+      "target": "ROADMAP.md#3-services-layer",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#3-services-layer",
+      "target": "ROADMAP.md#factorengine-python-implementation-hybrid-bar-tick-based",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#3-services-layer",
+      "target": "ROADMAP.md#stateengine-python-wrappers-and-integration",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#factorengine-python-implementation-hybrid-bar-tick-based",
+      "target": "ROADMAP.md#stateengine-python-wrappers-and-integration",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#3-services-layer",
+      "target": "ROADMAP.md#real-time-risk-management-engine-with-position-limits",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#stateengine-python-wrappers-and-integration",
+      "target": "ROADMAP.md#real-time-risk-management-engine-with-position-limits",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#3-services-layer",
+      "target": "ROADMAP.md#risk-management-rules-and-drawdown-checks",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#real-time-risk-management-engine-with-position-limits",
+      "target": "ROADMAP.md#risk-management-rules-and-drawdown-checks",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#3-services-layer",
+      "target": "ROADMAP.md#risk-engine-integration-with-order-execution",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#risk-management-rules-and-drawdown-checks",
+      "target": "ROADMAP.md#risk-engine-integration-with-order-execution",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#roadmap",
+      "target": "ROADMAP.md#4-ml-pipeline",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#3-services-layer",
+      "target": "ROADMAP.md#4-ml-pipeline",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#4-ml-pipeline",
+      "target": "ROADMAP.md#expand-runtime-ml-with-training-evaluation-workflows",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#4-ml-pipeline",
+      "target": "ROADMAP.md#historical-context-model-for-breakout-detection",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#expand-runtime-ml-with-training-evaluation-workflows",
+      "target": "ROADMAP.md#historical-context-model-for-breakout-detection",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#4-ml-pipeline",
+      "target": "ROADMAP.md#integrate-ml-pipeline-with-factorengine",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#historical-context-model-for-breakout-detection",
+      "target": "ROADMAP.md#integrate-ml-pipeline-with-factorengine",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#4-ml-pipeline",
+      "target": "ROADMAP.md#simulate-market-snapshot-replay-using-historical-trade-quote-bulk-file",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#integrate-ml-pipeline-with-factorengine",
+      "target": "ROADMAP.md#simulate-market-snapshot-replay-using-historical-trade-quote-bulk-file",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#roadmap",
+      "target": "ROADMAP.md#5-frontend",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#4-ml-pipeline",
+      "target": "ROADMAP.md#5-frontend",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#5-frontend",
+      "target": "ROADMAP.md#fix-factor-real-time-update-moduleid-mismatch-bug",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#5-frontend",
+      "target": "ROADMAP.md#factor-chart-sub-follower-mode-sync-timeframe-with-main-chart",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#fix-factor-real-time-update-moduleid-mismatch-bug",
+      "target": "ROADMAP.md#factor-chart-sub-follower-mode-sync-timeframe-with-main-chart",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#5-frontend",
+      "target": "ROADMAP.md#abstract-all-search-boxes-into-unified-component",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#factor-chart-sub-follower-mode-sync-timeframe-with-main-chart",
+      "target": "ROADMAP.md#abstract-all-search-boxes-into-unified-component",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#5-frontend",
+      "target": "ROADMAP.md#unify-bar-chart-and-factor-chart-styles",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#abstract-all-search-boxes-into-unified-component",
+      "target": "ROADMAP.md#unify-bar-chart-and-factor-chart-styles",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#5-frontend",
+      "target": "ROADMAP.md#frame-group-feature",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#unify-bar-chart-and-factor-chart-styles",
+      "target": "ROADMAP.md#frame-group-feature",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#5-frontend",
+      "target": "ROADMAP.md#better-ux-improvements",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#frame-group-feature",
+      "target": "ROADMAP.md#better-ux-improvements",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#roadmap",
+      "target": "ROADMAP.md#6-orchestration",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#5-frontend",
+      "target": "ROADMAP.md#6-orchestration",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#6-orchestration",
+      "target": "ROADMAP.md#decouple-trades-backfill-from-timeframe-switch-events",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#6-orchestration",
+      "target": "ROADMAP.md#configurable-timeframe-switch-and-bootstrap-computation",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#decouple-trades-backfill-from-timeframe-switch-events",
+      "target": "ROADMAP.md#configurable-timeframe-switch-and-bootstrap-computation",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#6-orchestration",
+      "target": "ROADMAP.md#factor-bootstrap-sync-to-trades-bootstrap",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#configurable-timeframe-switch-and-bootstrap-computation",
+      "target": "ROADMAP.md#factor-bootstrap-sync-to-trades-bootstrap",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#6-orchestration",
+      "target": "ROADMAP.md#tickers-pre-location-fitting-strategy-conditions",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#factor-bootstrap-sync-to-trades-bootstrap",
+      "target": "ROADMAP.md#tickers-pre-location-fitting-strategy-conditions",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#6-orchestration",
+      "target": "ROADMAP.md#strategy-pre-locate-orchestrator-with-auto-sequenced-jumps",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#tickers-pre-location-fitting-strategy-conditions",
+      "target": "ROADMAP.md#strategy-pre-locate-orchestrator-with-auto-sequenced-jumps",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#6-orchestration",
+      "target": "ROADMAP.md#pre-located-tickers-pipeline-backtest-visualization-and-validation",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#strategy-pre-locate-orchestrator-with-auto-sequenced-jumps",
+      "target": "ROADMAP.md#pre-located-tickers-pipeline-backtest-visualization-and-validation",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#roadmap",
+      "target": "ROADMAP.md#7-ai-agent-layer",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#6-orchestration",
+      "target": "ROADMAP.md#7-ai-agent-layer",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#7-ai-agent-layer",
+      "target": "ROADMAP.md#redis-streams-to-event-bus-migration",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#7-ai-agent-layer",
+      "target": "ROADMAP.md#redis-based-rpc-for-cross-service-tool-calls",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#redis-streams-to-event-bus-migration",
+      "target": "ROADMAP.md#redis-based-rpc-for-cross-service-tool-calls",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#7-ai-agent-layer",
+      "target": "ROADMAP.md#agentbff-http-websocket-interface",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#redis-based-rpc-for-cross-service-tool-calls",
+      "target": "ROADMAP.md#agentbff-http-websocket-interface",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#7-ai-agent-layer",
+      "target": "ROADMAP.md#agent-core-loop-with-tool-dispatch",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#agentbff-http-websocket-interface",
+      "target": "ROADMAP.md#agent-core-loop-with-tool-dispatch",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#7-ai-agent-layer",
+      "target": "ROADMAP.md#tool-registry-wrapping-existing-services",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#agent-core-loop-with-tool-dispatch",
+      "target": "ROADMAP.md#tool-registry-wrapping-existing-services",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#7-ai-agent-layer",
+      "target": "ROADMAP.md#short-and-long-term-memory-system",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#tool-registry-wrapping-existing-services",
+      "target": "ROADMAP.md#short-and-long-term-memory-system",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#7-ai-agent-layer",
+      "target": "ROADMAP.md#txt-to-tool-calling-validation",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#short-and-long-term-memory-system",
+      "target": "ROADMAP.md#txt-to-tool-calling-validation",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#7-ai-agent-layer",
+      "target": "ROADMAP.md#strategy-pipeline-agent-validation",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#txt-to-tool-calling-validation",
+      "target": "ROADMAP.md#strategy-pipeline-agent-validation",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#7-ai-agent-layer",
+      "target": "ROADMAP.md#ml-pipeline-agent-validation",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#strategy-pipeline-agent-validation",
+      "target": "ROADMAP.md#ml-pipeline-agent-validation",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#7-ai-agent-layer",
+      "target": "ROADMAP.md#basic-cli-tools-and-skills-instruction",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#ml-pipeline-agent-validation",
+      "target": "ROADMAP.md#basic-cli-tools-and-skills-instruction",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#roadmap",
+      "target": "ROADMAP.md#8-optional-features",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#7-ai-agent-layer",
+      "target": "ROADMAP.md#8-optional-features",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#8-optional-features",
+      "target": "ROADMAP.md#historical-orders-analysis-module",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#8-optional-features",
+      "target": "ROADMAP.md#news-engine-output-from-log-to-json-log",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#historical-orders-analysis-module",
+      "target": "ROADMAP.md#news-engine-output-from-log-to-json-log",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#8-optional-features",
+      "target": "ROADMAP.md#chatbox-module",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#news-engine-output-from-log-to-json-log",
+      "target": "ROADMAP.md#chatbox-module",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#roadmap",
+      "target": "ROADMAP.md#design-concerns",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#8-optional-features",
+      "target": "ROADMAP.md#design-concerns",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#design-concerns",
+      "target": "ROADMAP.md#config-builder-py-merge-with-config-py-in-platform-config",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#design-concerns",
+      "target": "ROADMAP.md#event-bus-architecture-for-stage-4",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#config-builder-py-merge-with-config-py-in-platform-config",
+      "target": "ROADMAP.md#event-bus-architecture-for-stage-4",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#design-concerns",
+      "target": "ROADMAP.md#domain-layer-empty-placeholders-strategy",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#event-bus-architecture-for-stage-4",
+      "target": "ROADMAP.md#domain-layer-empty-placeholders-strategy",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#roadmap",
+      "target": "ROADMAP.md#open-issues",
+      "type": "contains"
+    },
+    {
+      "source": "ROADMAP.md#design-concerns",
+      "target": "ROADMAP.md#open-issues",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#open-issues",
+      "target": "ROADMAP.md#frontend-chart-timespan-switch-newest-bar-covers-last-bar-s-open-high-low",
+      "type": "contains"
+    },
+    {
+      "source": "README.md",
+      "target": "README.md#introduction",
+      "type": "contains"
+    },
+    {
+      "source": "README.md#introduction",
+      "target": "README.md#installation-quick-start",
+      "type": "contains"
+    },
+    {
+      "source": "README.md#installation-quick-start",
+      "target": "README.md#1-clone-configure",
+      "type": "contains"
+    },
+    {
+      "source": "README.md#1-clone-configure",
+      "target": "README.md#1-1-basic-config-yaml",
+      "type": "contains"
+    },
+    {
+      "source": "README.md#1-clone-configure",
+      "target": "README.md#1-2-env",
+      "type": "contains"
+    },
+    {
+      "source": "README.md#1-1-basic-config-yaml",
+      "target": "README.md#1-2-env",
+      "type": "sequence"
+    },
+    {
+      "source": "README.md#1-clone-configure",
+      "target": "README.md#1-3-config-yaml-machine-roles",
+      "type": "contains"
+    },
+    {
+      "source": "README.md#1-2-env",
+      "target": "README.md#1-3-config-yaml-machine-roles",
+      "type": "sequence"
+    },
+    {
+      "source": "README.md#installation-quick-start",
+      "target": "README.md#2-install-python-dependencies",
+      "type": "contains"
+    },
+    {
+      "source": "README.md#1-clone-configure",
+      "target": "README.md#2-install-python-dependencies",
+      "type": "sequence"
+    },
+    {
+      "source": "README.md#installation-quick-start",
+      "target": "README.md#3-build-the-rust-extension",
+      "type": "contains"
+    },
+    {
+      "source": "README.md#2-install-python-dependencies",
+      "target": "README.md#3-build-the-rust-extension",
+      "type": "sequence"
+    },
+    {
+      "source": "README.md#installation-quick-start",
+      "target": "README.md#4-database-setup",
+      "type": "contains"
+    },
+    {
+      "source": "README.md#3-build-the-rust-extension",
+      "target": "README.md#4-database-setup",
+      "type": "sequence"
+    },
+    {
+      "source": "README.md#installation-quick-start",
+      "target": "README.md#5-start-the-backend",
+      "type": "contains"
+    },
+    {
+      "source": "README.md#4-database-setup",
+      "target": "README.md#5-start-the-backend",
+      "type": "sequence"
+    },
+    {
+      "source": "README.md#installation-quick-start",
+      "target": "README.md#6-start-the-frontend",
+      "type": "contains"
+    },
+    {
+      "source": "README.md#5-start-the-backend",
+      "target": "README.md#6-start-the-frontend",
+      "type": "sequence"
+    },
+    {
+      "source": "README.md#installation-quick-start",
+      "target": "README.md#7-development-workflow",
+      "type": "contains"
+    },
+    {
+      "source": "README.md#6-start-the-frontend",
+      "target": "README.md#7-development-workflow",
+      "type": "sequence"
+    },
+    {
+      "source": "README.md#introduction",
+      "target": "README.md#data-flow",
+      "type": "contains"
+    },
+    {
+      "source": "README.md#installation-quick-start",
+      "target": "README.md#data-flow",
+      "type": "sequence"
+    },
+    {
+      "source": "README.md#data-flow",
+      "target": "README.md#live-mode-machine-a",
+      "type": "contains"
+    },
+    {
+      "source": "README.md#data-flow",
+      "target": "README.md#live-mode-machine-b",
+      "type": "contains"
+    },
+    {
+      "source": "README.md#live-mode-machine-a",
+      "target": "README.md#live-mode-machine-b",
+      "type": "sequence"
+    },
+    {
+      "source": "README.md#data-flow",
+      "target": "README.md#replay-mode",
+      "type": "contains"
+    },
+    {
+      "source": "README.md#live-mode-machine-b",
+      "target": "README.md#replay-mode",
+      "type": "sequence"
+    },
+    {
+      "source": "README.md#data-flow",
+      "target": "README.md#news-pipeline-machine-c",
+      "type": "contains"
+    },
+    {
+      "source": "README.md#replay-mode",
+      "target": "README.md#news-pipeline-machine-c",
+      "type": "sequence"
+    },
+    {
+      "source": "README.md#data-flow",
+      "target": "README.md#current-frontend-preview",
+      "type": "contains"
+    },
+    {
+      "source": "README.md#news-pipeline-machine-c",
+      "target": "README.md#current-frontend-preview",
+      "type": "sequence"
+    },
+    {
+      "source": "README.md#current-frontend-preview",
+      "target": "README.md#overview-layout-set",
+      "type": "contains"
+    },
+    {
+      "source": "README.md#current-frontend-preview",
+      "target": "README.md#trade-layout-set",
+      "type": "contains"
+    },
+    {
+      "source": "README.md#overview-layout-set",
+      "target": "README.md#trade-layout-set",
+      "type": "sequence"
+    },
+    {
+      "source": "CHANGELOG.md",
+      "target": "CHANGELOG.md#unreleased-2026-03-13",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#unreleased-2026-03-13",
+      "target": "CHANGELOG.md#feat",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#unreleased-2026-03-13",
+      "target": "CHANGELOG.md#refactor",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#feat",
+      "target": "CHANGELOG.md#refactor",
+      "type": "sequence"
+    },
+    {
+      "source": "CHANGELOG.md",
+      "target": "CHANGELOG.md#1-3-0-2026-03-14",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#unreleased-2026-03-13",
+      "target": "CHANGELOG.md#1-3-0-2026-03-14",
+      "type": "sequence"
+    },
+    {
+      "source": "CHANGELOG.md#1-3-0-2026-03-14",
+      "target": "CHANGELOG.md#refactor-2",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#1-3-0-2026-03-14",
+      "target": "CHANGELOG.md#feat-2",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#refactor-2",
+      "target": "CHANGELOG.md#feat-2",
+      "type": "sequence"
+    },
+    {
+      "source": "CHANGELOG.md#1-3-0-2026-03-14",
+      "target": "CHANGELOG.md#chore",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#feat-2",
+      "target": "CHANGELOG.md#chore",
+      "type": "sequence"
+    },
+    {
+      "source": "CHANGELOG.md#1-3-0-2026-03-14",
+      "target": "CHANGELOG.md#fix",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#chore",
+      "target": "CHANGELOG.md#fix",
+      "type": "sequence"
+    },
+    {
+      "source": "CHANGELOG.md#1-3-0-2026-03-14",
+      "target": "CHANGELOG.md#chore-2",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#fix",
+      "target": "CHANGELOG.md#chore-2",
+      "type": "sequence"
+    },
+    {
+      "source": "CHANGELOG.md",
+      "target": "CHANGELOG.md#1-2-0-2026-03-11",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#1-3-0-2026-03-14",
+      "target": "CHANGELOG.md#1-2-0-2026-03-11",
+      "type": "sequence"
+    },
+    {
+      "source": "CHANGELOG.md#1-2-0-2026-03-11",
+      "target": "CHANGELOG.md#feat-3",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#1-2-0-2026-03-11",
+      "target": "CHANGELOG.md#fix-2",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#feat-3",
+      "target": "CHANGELOG.md#fix-2",
+      "type": "sequence"
+    },
+    {
+      "source": "CHANGELOG.md#1-2-0-2026-03-11",
+      "target": "CHANGELOG.md#perf",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#fix-2",
+      "target": "CHANGELOG.md#perf",
+      "type": "sequence"
+    },
+    {
+      "source": "CHANGELOG.md",
+      "target": "CHANGELOG.md#1-1-0-2026-03-09",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#1-2-0-2026-03-11",
+      "target": "CHANGELOG.md#1-1-0-2026-03-09",
+      "type": "sequence"
+    },
+    {
+      "source": "CHANGELOG.md#1-1-0-2026-03-09",
+      "target": "CHANGELOG.md#feat-4",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#1-1-0-2026-03-09",
+      "target": "CHANGELOG.md#fix-3",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#feat-4",
+      "target": "CHANGELOG.md#fix-3",
+      "type": "sequence"
+    },
+    {
+      "source": "CHANGELOG.md#1-1-0-2026-03-09",
+      "target": "CHANGELOG.md#perf-2",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#fix-3",
+      "target": "CHANGELOG.md#perf-2",
+      "type": "sequence"
+    },
+    {
+      "source": "CHANGELOG.md#1-1-0-2026-03-09",
+      "target": "CHANGELOG.md#tests",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#perf-2",
+      "target": "CHANGELOG.md#tests",
+      "type": "sequence"
+    },
+    {
+      "source": "CHANGELOG.md",
+      "target": "CHANGELOG.md#1-0-0-2026-03-06",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#1-1-0-2026-03-09",
+      "target": "CHANGELOG.md#1-0-0-2026-03-06",
+      "type": "sequence"
+    },
+    {
+      "source": "CHANGELOG.md#1-0-0-2026-03-06",
+      "target": "CHANGELOG.md#breaking-changes",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#1-0-0-2026-03-06",
+      "target": "CHANGELOG.md#feat-5",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#breaking-changes",
+      "target": "CHANGELOG.md#feat-5",
+      "type": "sequence"
+    },
+    {
+      "source": "CHANGELOG.md#1-0-0-2026-03-06",
+      "target": "CHANGELOG.md#fix-4",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#feat-5",
+      "target": "CHANGELOG.md#fix-4",
+      "type": "sequence"
+    },
+    {
+      "source": "CHANGELOG.md#1-0-0-2026-03-06",
+      "target": "CHANGELOG.md#refactor-3",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#fix-4",
+      "target": "CHANGELOG.md#refactor-3",
+      "type": "sequence"
+    },
+    {
+      "source": "CHANGELOG.md",
+      "target": "CHANGELOG.md#0-2-0-2026-02-28",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#1-0-0-2026-03-06",
+      "target": "CHANGELOG.md#0-2-0-2026-02-28",
+      "type": "sequence"
+    },
+    {
+      "source": "CHANGELOG.md#0-2-0-2026-02-28",
+      "target": "CHANGELOG.md#feat-6",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#feat-6",
+      "target": "CHANGELOG.md#backend",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#feat-6",
+      "target": "CHANGELOG.md#frontend-gridtrader",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#backend",
+      "target": "CHANGELOG.md#frontend-gridtrader",
+      "type": "sequence"
+    },
+    {
+      "source": "CHANGELOG.md#0-2-0-2026-02-28",
+      "target": "CHANGELOG.md#fix-5",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#feat-6",
+      "target": "CHANGELOG.md#fix-5",
+      "type": "sequence"
+    },
+    {
+      "source": "CHANGELOG.md#0-2-0-2026-02-28",
+      "target": "CHANGELOG.md#refactor-4",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#fix-5",
+      "target": "CHANGELOG.md#refactor-4",
+      "type": "sequence"
+    },
+    {
+      "source": "CHANGELOG.md#0-2-0-2026-02-28",
+      "target": "CHANGELOG.md#perf-3",
+      "type": "contains"
+    },
+    {
+      "source": "CHANGELOG.md#refactor-4",
+      "target": "CHANGELOG.md#perf-3",
+      "type": "sequence"
+    },
+    {
+      "source": "CLAUDE.md",
+      "target": "CLAUDE.md#claude-md",
+      "type": "contains"
+    },
+    {
+      "source": "CLAUDE.md#claude-md",
+      "target": "CLAUDE.md#project-overview",
+      "type": "contains"
+    },
+    {
+      "source": "CLAUDE.md#claude-md",
+      "target": "CLAUDE.md#development-commands",
+      "type": "contains"
+    },
+    {
+      "source": "CLAUDE.md#project-overview",
+      "target": "CLAUDE.md#development-commands",
+      "type": "sequence"
+    },
+    {
+      "source": "CLAUDE.md#development-commands",
+      "target": "CLAUDE.md#environment-setup",
+      "type": "contains"
+    },
+    {
+      "source": "CLAUDE.md#development-commands",
+      "target": "CLAUDE.md#running-the-system",
+      "type": "contains"
+    },
+    {
+      "source": "CLAUDE.md#environment-setup",
+      "target": "CLAUDE.md#running-the-system",
+      "type": "sequence"
+    },
+    {
+      "source": "CLAUDE.md#development-commands",
+      "target": "CLAUDE.md#testing",
+      "type": "contains"
+    },
+    {
+      "source": "CLAUDE.md#running-the-system",
+      "target": "CLAUDE.md#testing",
+      "type": "sequence"
+    },
+    {
+      "source": "CLAUDE.md#development-commands",
+      "target": "CLAUDE.md#code-formatting",
+      "type": "contains"
+    },
+    {
+      "source": "CLAUDE.md#testing",
+      "target": "CLAUDE.md#code-formatting",
+      "type": "sequence"
+    },
+    {
+      "source": "CLAUDE.md#claude-md",
+      "target": "CLAUDE.md#architecture",
+      "type": "contains"
+    },
+    {
+      "source": "CLAUDE.md#development-commands",
+      "target": "CLAUDE.md#architecture",
+      "type": "sequence"
+    },
+    {
+      "source": "CLAUDE.md#architecture",
+      "target": "CLAUDE.md#layered-structure",
+      "type": "contains"
+    },
+    {
+      "source": "CLAUDE.md#architecture",
+      "target": "CLAUDE.md#key-directories",
+      "type": "contains"
+    },
+    {
+      "source": "CLAUDE.md#layered-structure",
+      "target": "CLAUDE.md#key-directories",
+      "type": "sequence"
+    },
+    {
+      "source": "CLAUDE.md#architecture",
+      "target": "CLAUDE.md#multi-machine-topology",
+      "type": "contains"
+    },
+    {
+      "source": "CLAUDE.md#key-directories",
+      "target": "CLAUDE.md#multi-machine-topology",
+      "type": "sequence"
+    },
+    {
+      "source": "CLAUDE.md#claude-md",
+      "target": "CLAUDE.md#important-notes",
+      "type": "contains"
+    },
+    {
+      "source": "CLAUDE.md#architecture",
+      "target": "CLAUDE.md#important-notes",
+      "type": "sequence"
+    },
+    {
+      "source": "CLAUDE.md#important-notes",
+      "target": "CLAUDE.md#bar-builder",
+      "type": "contains"
+    },
+    {
+      "source": "CLAUDE.md#important-notes",
+      "target": "CLAUDE.md#clock-synchronization",
+      "type": "contains"
+    },
+    {
+      "source": "CLAUDE.md#bar-builder",
+      "target": "CLAUDE.md#clock-synchronization",
+      "type": "sequence"
+    },
+    {
+      "source": "CLAUDE.md#important-notes",
+      "target": "CLAUDE.md#testing-2",
+      "type": "contains"
+    },
+    {
+      "source": "CLAUDE.md#clock-synchronization",
+      "target": "CLAUDE.md#testing-2",
+      "type": "sequence"
+    },
+    {
+      "source": "CLAUDE.md#important-notes",
+      "target": "CLAUDE.md#code-style",
+      "type": "contains"
+    },
+    {
+      "source": "CLAUDE.md#testing-2",
+      "target": "CLAUDE.md#code-style",
+      "type": "sequence"
+    },
+    {
+      "source": "CLAUDE.md#claude-md",
+      "target": "CLAUDE.md#roadmap",
+      "type": "contains"
+    },
+    {
+      "source": "CLAUDE.md#important-notes",
+      "target": "CLAUDE.md#roadmap",
+      "type": "sequence"
+    },
+    {
+      "source": "ROADMAP.md#fix-factor-real-time-update-moduleid-mismatch-bug",
+      "target": "roadmap/factor-realtime-analysis.md#working",
+      "type": "references"
+    },
+    {
+      "source": "ROADMAP.md#factor-chart-sub-follower-mode-sync-timeframe-with-main-chart",
+      "target": "roadmap/factor-realtime-analysis.md#working",
+      "type": "references"
+    },
+    {
+      "source": "ROADMAP.md#decouple-trades-backfill-from-timeframe-switch-events",
+      "target": "roadmap/factor-realtime-analysis.md#working",
+      "type": "references"
+    },
+    {
+      "source": "ROADMAP.md#factor-bootstrap-sync-to-trades-bootstrap",
+      "target": "roadmap/factor-realtime-analysis.md#working",
+      "type": "references"
+    },
+    {
+      "source": "README.md#introduction",
+      "target": "ARCHITECTURE.md#testing",
+      "type": "references"
+    },
+    {
+      "source": "README.md#introduction",
+      "target": "ROADMAP.md#roadmap",
+      "type": "references"
+    },
+    {
+      "source": "README.md#introduction",
+      "target": "CHANGELOG.md#fix",
+      "type": "references"
+    },
+    {
+      "source": "CLAUDE.md#architecture",
+      "target": "ARCHITECTURE.md#testing",
+      "type": "references"
+    },
+    {
+      "source": "CLAUDE.md#roadmap",
+      "target": "ROADMAP.md#roadmap",
+      "type": "references"
+    }
+  ]
+}

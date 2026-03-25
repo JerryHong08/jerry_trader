@@ -1,146 +1,95 @@
 # Roadmap
 
-## Stage 1 & Initial Start
+## 1. Domain Layer
 
-mainly focus on basic function test and expriment.
+Foundation pure business logic value objects.
 
-✅IBKR Order Placement & Realtime Order Book Web App (Python + React)
+- [ ] 1.1 Populate domain/market/ with Tick, Bar, Snapshot models
+- [ ] 1.2 Populate domain/order/ with Order, Fill, Contract models
+- [ ] 1.3 Populate domain/strategy/ with Signal, Risk models
+- [ ] 1.4 Populate domain/factor/ with Factor value objects
 
-- ✅React frontend + backend
-  - websocket backend server
-  - websocket backend debug server
-  - single ticker real-time quote
-  - multi ticker real-time quote
-  - add trades
-- ✅IBKR Order Placement Engine
-  - IBKR Gateway/TWS connect & starter(using `/opt/ibc/gatewaystart.sh`). now moved to use windows gateway for wsl mirrored network mode.
-  - Basic IB Classes like Contract, Order...
+## 2. Rust Core
 
-## Stage2
+Performance-critical components rewritten in Rust.
 
-mainly focus on basic modules development and strcuture buidling.
+- [-] 2.1 StateEngine rewrite in Rust
+- [ ] 2.2 FactorEngine rewrite in Rust
 
-- ✅ using figma make frontend code package.
-  this frontend layout of trading system is gird layout, and each grid/module is seperated for easy to develop and customize.
-  - Top Gainers/Rank List
-  - Overview Chart
-  - Order Management
-  - Stock Detail
-  - Portfolio
-  - Chart
+## 3. Services Layer
 
-- migrate the backend data source to the frontend replacing the mock data.
-  - ✅ start with building a backend for frontend(bff), then migrate data step by step.
-  - first start with the Top Gainers column data.
-    - ✅ first we test with basic direct emit columns like ['symbol', 'rank', 'price', 'change', 'changePercent', 'volume', 'relativeVolume5min', 'relativeVolumeDaily'].
-    - ✅ then we test the state column
-    - ✅ then we test the passively fetched and emitted columns like ['float_share','marketCap','news'].
-  - ✅ after that or during test of column data, we can test the overviewchartdata emit, which needs to normalize the frontend chart and get_chart_data in overviewchartdataManager.py.
-  - ✅ then Stock Detail. the data request is driven by top gainers and backend data management, so it should use cache, and also the data request can be driven by the frontend button. it's basic the same as the static data column update in top gainers column.
-  - ✅ then the Portfolio and Order Management. this module is isolated, so it's easier to integrate.
+Stateful workers and use-case implementations.
 
-### Stage2.5
+- [x] 3.1 FactorEngine Python implementation (hybrid bar + tick based)
+- [-] 3.2 StateEngine Python wrappers and integration
+- [ ] 3.3 Real-time risk management engine with position limits
+- [ ] 3.4 Risk management rules and drawdown checks
+- [ ] 3.5 Risk engine integration with order execution
 
-✅ the last and the hardest one is the Chart module, based on tradingview lightweight chart, the focus is balance between the real-time update and historical data retrival. **data management and historical data bootstrap. also build a architecture prepared for stage3 strategy real-time/replay computation, execution, analysis**
+## 4. ML Pipeline
 
-- ✅ add frontend request_id to prevent race conditions.
-- ✅ frontend charts seperated.
-- ✅ deep review how current bar_buidler builds the bars in different senarios. 10s bootstrap done.
-- ✅ _needs_historical_backfill logic refine.
-- ✅ Snapshot processor to rust
-- ✅ Snapshot data: InfluxDB → ClickHouse
-In this stage we introduce rust based global clock to maintain acuuracy among the whole project running time. In replay mode, The **chartdata machine** is the clock domain master (also runs`local_tickdata_replayer` in-process). Remote machines (running
-`MarketSnapshotReplayer`) follow via Redis heartbeat.
+Machine learning for breakout-compute-analyze context model.
 
-- ✅ add replay global clock in rust to maintain time accuracy in replay mode.
-- ✅ Remote machine sync + snapshot replayer
-- ✅ Redis heartbeat publisher in `clock.py` (100ms interval, from ChartBFF machine)
-- ✅ `RemoteClockFollower` class (monotonic interpolation between heartbeats)
-- ✅ Modify `MarketSnapshotReplayer` to poll `RemoteClockFollower.now_ns()` instead of `asyncio.sleep`
-- ✅ Test cross-machine sync (same network + Tailscale)
+- [ ] 4.1 Expand runtime/ml/ with training/evaluation workflows
+- [ ] 4.2 Historical context model for breakout detection
+- [ ] 4.3 Integrate ML pipeline with FactorEngine
+- [ ] 4.4 Simulate market_snapshot replay using historical trade&quote bulk file
 
-- ✅ Downstream consumers + InfluxDB→ClickHouse migration
-- ✅ FactorEngine consumes batched bars/data, while also consumes raw ticks for real-time update.
-- ✅ Foundation for v3.0 stream bus architecture
+## 5. Frontend
 
-## Stage3(Current)
+React/TradingView UI modules and UX improvements.
 
-mainly focus on strategy computation,execution,replay backtest. and the optimization for UX/UI and orchestration/backend.
+- [ ] [5.1](roadmap/factor-realtime-analysis.md) Fix factor real-time update moduleId mismatch bug
+- [ ] [5.2](roadmap/factor-realtime-analysis.md) Factor chart sub-follower mode (sync timeframe with main chart)
+- [ ] 5.3 Abstract all search boxes into unified component
+- [ ] 5.4 Unify bar chart and factor chart styles
+- [ ] 5.5 Frame group feature
+- [ ] 5.6 Better UX improvements
 
-strategy:
+## 6. Orchestration
 
-- ✅ rewrite factorEegine in Rust.
-  - ✅ factor output: InfluxDB → ClickHouse
-  - [ ] factor chart module behaves as a sub follower chart as main chart.
-    - [ ] real-time update not done yet.
-  - [ ] factor bootstrap sync to the trades_bootstrap.(quotes_bootstrap needed in the future for factors like spread etc.)
-    - [ ] it triggers trades_backfill every time main bar chart switch the timeframe, need to be decoupled and fixed.
-  - [ ] configurable timeframe switch and bootstrap computation
-  - ✅ delete the deprecated factor_manager.py code.
-- [ ] rewrite stateEngine in rust.
-- [ ] real-time risk management engine/trigger.
-  - [ ] risk manage rule.
-- [ ] developing machine learning module.
-  - [ ] build breakout-compute-analyze oriented Context Model using current recored files.
-  - [ ] simulate market_snapshot replay using historical trade&quote bulk file.
-  - [ ] build historical context model.
+System-wide coordination and backtest infrastructure.
 
-ochesration:
+- [ ] [6.1](roadmap/factor-realtime-analysis.md) Decouple trades_backfill from timeframe switch events
+- [ ] 6.2 Configurable timeframe switch and bootstrap computation
+- [ ] [6.3](roadmap/factor-realtime-analysis.md) Factor bootstrap sync to trades_bootstrap
+- [ ] 6.4 Tickers pre-location fitting strategy/conditions
+- [ ] 6.5 Strategy pre-locate orchestrator with auto-sequenced jumps
+- [ ] 6.6 Pre-located tickers pipeline backtest visualization and validation
 
-- [ ] tickers fit in strategy/condition pre locate.
-- [ ] Strategy pre-locate orchestrator: accepts `(ticker, timestamp)` list, auto-sequences jumps
-- [ ] pre-located tickers pipeline backtest visualization& validation.
-- ✅ preload parquet load method optimization.
+## 7. AI Agent Layer
 
-frontend:
+Event-driven AI agent system (Stage 4).
 
-- [ ] abstract all the search box into one.
-- [ ] bar chart and factor chart style unified.
-- [ ] better UX
-  - ✅ keyboard shortcut
-  - [ ] frame group
+- [ ] 7.1 Redis streams to event_bus migration
+- [ ] 7.2 Redis-based RPC for cross-service tool calls
+- [ ] 7.3 AgentBFF HTTP + WebSocket interface
+- [ ] 7.4 Agent core loop with tool dispatch
+- [ ] 7.5 Tool registry wrapping existing services
+- [ ] 7.6 Short and long-term memory system
+- [ ] 7.7 txt to tool-calling validation
+- [ ] 7.8 Strategy pipeline agent validation
+- [ ] 7.9 ML pipeline agent validation
+- [ ] 7.10 Basic CLI tools and skills instruction
 
-## Stage 4
+## 8. Optional Features
 
-- [ ] AI Agent powered Event-Driven System
-  - [ ] redis streams to event_bus
-  - [ ] rpc
-  - [ ] basic tools build up, cli & skills instruction
-  - [ ] memory system
-  - [ ] txt to tool-calling validation
-- [ ] strategy pipeline agent validation
-- [ ] ml pipeline validation
+Enhancements and additional modules.
 
-```bash
-apps/agent_app/          ← AgentBFF HTTP + WebSocket interface
-services/agent/          ← (new) agent loop, tool dispatch, memory
-    ├── agent.py         ← core agent loop
-    ├── tools.py         ← tool registry (wraps existing services)
-    ├── memory.py        ← short + long-term memory store
-    └── planner.py       ← [future] planning module
-platform/messaging/rpc/  ← Redis-based RPC for cross-service tool calls
-skills/                  ← Markdown skill instruction files (already at root)
-```
+- [ ] 8.1 Historical orders analysis module
+- [ ] 8.2 News engine output from log to JSON log
+- [ ] 8.3 Chatbox module
 
-## optional features
+## Design Concerns
 
-some other features to make it better.
+Architectural decisions needing discussion.
 
-- ✅ separated works to other computuers using ssh. configured in config.yaml.
-- [ ] historical orders analysis modules.
-- [ ] Add more modules, like Agent module to monitor the global staus also focus on one ticker at the same time.
-  - [ ] News engine output from log to json log. route to openclaw/heartbeat llm in the future.
-    - ✅ news room
-      - ✅ focus mode(synced with group)
-    - [ ] chatbox
+- [ ] config_builder.py merge with config.py in platform/config/
+- [ ] Event bus architecture for Stage 4
+- [ ] Domain layer empty placeholders strategy
 
-## open issues
+## Open Issues
 
-- ✅ when switch to frontend chart [10s,1m] timespan, the newest bar always start a new bar based on incoming websocket since connected, the new rendered bar will cover up the the last bar timespan duration time open,high,low price. this seems not to be fixed in a short term for not effect the current tickdata orchestration of between frontend and backend.
-- ✅ there is bar close problem, the root cause might be rust `bar.rs`
-- ✅ 4h local data in replay fetch has a problem overlapping the bar though we have cut_off before resample in local_data_loader.
-- ✅ some of the bars are built empty volume. this originated from a race between ingest_trade and time-driven close; current work has migrated to `advance` + Rust completed-queue flow and is being validated in runtime.
-  - ✅ Rust output queue path integrated; completed bars are now drained from Rust via `drain_completed()` in flush loop (thread hazard reduced, second-flush burst reduced).
-  - ✅ Rename `check_expired` → `advance` across runtime and tests (bars_builder_service + Rust API + test suite updated).
-  - ✅ Min-heap scheduling added in Rust (`expiry_heap` with stale-entry seq guard) so expiry scan is boundary-driven instead of full map sweep.
-  - ✅ Watermark-based close + late-arrival window added (`configure_watermark(late_arrival_ms, idle_close_ms)`) with idle fallback; tests run with strict window for deterministic boundary assertions.
+Known issues and bugs requiring attention.
+
+- [ ] Frontend chart timespan switch: newest bar covers last bar's open/high/low

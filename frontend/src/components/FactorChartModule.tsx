@@ -2,12 +2,11 @@
  * FactorChartModule - Real-time Factor Visualization
  *
  * Displays computed factors (EMA, TradeRate) using TradingView Lightweight Charts.
- * Follows the ChartModule's symbol and timeframe (passive/follower mode).
+ * Follows the ChartModule's symbol and timeframe (passive/sub-follower mode).
  *
  * Features:
  * - Syncs symbol from selectedSymbol prop (follows ChartModule)
- * - Syncs timeframe from settings (follows ChartModule)
- * - Manual timeframe override available
+ * - Syncs timeframe from settings (sub-follower of ChartModule)
  * - Dual Y-axis for different factor scales (EMA ~price, TradeRate ~rate)
  * - Toggle visibility for each factor
  * - Auto-subscribe/unsubscribe on symbol/timeframe change
@@ -15,7 +14,7 @@
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { createChart, IChartApi, ISeriesApi, LineSeries, ColorType, CrosshairMode } from 'lightweight-charts';
-import { Eye, EyeOff, TrendingUp } from 'lucide-react';
+import { Eye, EyeOff, TrendingUp, ChevronDown } from 'lucide-react';
 import { useFactorDataStore, factorStoreKey } from '../stores/factorDataStore';
 import { useTickDataStore } from '../stores/tickDataStore';
 import type { ModuleProps, ChartTimeframe } from '../types';
@@ -23,10 +22,6 @@ import type { ModuleProps, ChartTimeframe } from '../types';
 // ============================================================================
 // Constants
 // ============================================================================
-
-const TIMEFRAMES: ChartTimeframe[] = [
-  '10s', '1m', '5m', '15m', '30m', '1h', '4h', '1D', '1W', '1M',
-];
 
 const BFF_HTTP_URL =
   typeof import.meta !== 'undefined' && import.meta.env?.VITE_CHART_BFF_URL
@@ -52,15 +47,24 @@ export function FactorChartModule({
   onRemove,
   selectedSymbol,
   onSymbolSelect,
+  selectedTimeframe,
   settings,
   onSettingsChange,
 }: ModuleProps) {
   // ── Symbol & Timeframe (follows ChartModule) ──────────────────────────
   const [symbol, setSymbol] = useState(selectedSymbol || '');
 
-  // Timeframe from settings (follows ChartModule), default '5m'
-  const defaultTimeframe: ChartTimeframe = settings?.chart?.timeframe ?? '5m';
-  const [timeframe, setTimeframe] = useState<ChartTimeframe>(defaultTimeframe);
+  // Timeframe from settings (independent mode)
+  const timeframe: ChartTimeframe = settings?.chart?.timeframe ?? '5m';
+
+  // Timeframe selector dropdown state
+  const [showTfMenu, setShowTfMenu] = useState(false);
+  const TIMEFRAMES: ChartTimeframe[] = ['10s', '1m', '5m', '15m', '30m', '1h', '4h', '1D'];
+
+  const handleTimeframeChange = (tf: ChartTimeframe) => {
+    onSettingsChange?.({ chart: { timeframe: tf } });
+    setShowTfMenu(false);
+  };
 
   // Sync symbol from external sync group (ChartModule)
   useEffect(() => {
@@ -68,13 +72,6 @@ export function FactorChartModule({
       setSymbol(selectedSymbol);
     }
   }, [selectedSymbol]);
-
-  // Sync timeframe from settings (ChartModule changes)
-  useEffect(() => {
-    if (settings?.chart?.timeframe && settings.chart.timeframe !== timeframe) {
-      setTimeframe(settings.chart.timeframe);
-    }
-  }, [settings?.chart?.timeframe]);
 
   // ── Factor Configuration ───────────────────────────────────────────────
   const [factorConfigs, setFactorConfigs] = useState<Record<string, FactorConfig>>({
@@ -102,7 +99,12 @@ export function FactorChartModule({
   // ── Factor data store ──────────────────────────────────────────────────
   const fetchFactors = useFactorDataStore((s) => s.fetchFactors);
   const symbolFactors = useFactorDataStore((s) => s.symbolFactors);
-  const factorState = symbol ? symbolFactors[factorStoreKey(moduleId, symbol)] : undefined;
+  // Get factor state for this module + symbol + timeframe
+  // We need both tick-based (TradeRate) and bar-based (EMA) factors for the current timeframe
+  const tickFactorKey = factorStoreKey(moduleId, symbol, 'tick');
+  const barFactorKey = symbol ? factorStoreKey(moduleId, symbol, timeframe) : null;
+  const tickFactorState = symbol ? symbolFactors[tickFactorKey] : undefined;
+  const barFactorState = barFactorKey ? symbolFactors[barFactorKey] : undefined;
 
   // ── Initialize chart ───────────────────────────────────────────────────
   useEffect(() => {
@@ -155,25 +157,18 @@ export function FactorChartModule({
     };
   }, []);
 
-  // ── Render factor series ───────────────────────────────────────────────
+  // Keep track of previous timeframe to detect changes
+  const prevTimeframeRef = useRef<ChartTimeframe>(timeframe);
+
+  // ── Render factor series (initial setup only) ──────────────────────────
+  // This effect runs once on mount to set up the series
   useEffect(() => {
     const chart = chartRef.current;
-    if (!chart || !factorState || factorState.loading) return;
+    if (!chart) return;
 
-    // Remove all existing series
-    Object.values(seriesRefsRef.current).forEach((series) => {
-      try {
-        chart.removeSeries(series);
-      } catch (e) {
-        console.warn('[FactorChart] Failed to remove series:', e);
-      }
-    });
-    seriesRefsRef.current = {};
-
-    // Create series for each factor
+    // Create series for each factor config (empty initially)
     Object.values(factorConfigs).forEach((config) => {
-      const points = factorState.factors[config.name] || [];
-      if (points.length === 0) return;
+      if (seriesRefsRef.current[config.name]) return; // Already exists
 
       try {
         const series = chart.addSeries(LineSeries, {
@@ -184,15 +179,78 @@ export function FactorChartModule({
           title: config.displayName,
         });
 
-        series.setData(points);
         seriesRefsRef.current[config.name] = series;
       } catch (e) {
         console.error(`[FactorChart] Failed to add series for ${config.name}:`, e);
       }
     });
 
+    // Only fit content on initial mount
     chart.timeScale().fitContent();
-  }, [factorState, factorConfigs]);
+  }, []); // Run once on mount
+
+  // ── Update factor data (incremental, preserves zoom/pan) ───────────────
+  // This effect updates data without recreating series or resetting view
+  useEffect(() => {
+    const chart = chartRef.current;
+    const isLoading = tickFactorState?.loading || barFactorState?.loading;
+    if (!chart || isLoading) return;
+
+    // Check if timeframe changed - if so, don't clear tick-based data
+    const timeframeChanged = prevTimeframeRef.current !== timeframe;
+    prevTimeframeRef.current = timeframe;
+
+    // Merge factors from both tick-based and bar-based states
+    const mergedFactors: Record<string, { time: number; value: number }[]> = {};
+    if (tickFactorState?.factors) {
+      Object.entries(tickFactorState.factors).forEach(([name, points]) => {
+        mergedFactors[name] = points;
+      });
+    }
+    if (barFactorState?.factors) {
+      Object.entries(barFactorState.factors).forEach(([name, points]) => {
+        mergedFactors[name] = points;
+      });
+    }
+
+    // Update each series with new data (incremental)
+    Object.values(factorConfigs).forEach((config) => {
+      const series = seriesRefsRef.current[config.name];
+      if (!series) return;
+
+      const points = mergedFactors[config.name] || [];
+      if (points.length === 0) {
+        // Only clear bar-based series on timeframe change, keep tick-based
+        if (timeframeChanged && config.name !== 'trade_rate') {
+          try {
+            series.setData([]);
+          } catch (e) {
+            console.warn(`[FactorChart] Failed to clear series for ${config.name}:`, e);
+          }
+        }
+        return;
+      }
+
+      try {
+        // Use update for incremental updates to preserve chart position
+        // Sort points by time to ensure correct order
+        const sortedPoints = [...points].sort((a, b) => a.time - b.time);
+        series.setData(sortedPoints);
+      } catch (e) {
+        console.error(`[FactorChart] Failed to update series for ${config.name}:`, e);
+      }
+    });
+  }, [tickFactorState, barFactorState, timeframe]); // Include timeframe to detect changes
+
+  // ── Sync series visibility with config ─────────────────────────────────
+  useEffect(() => {
+    Object.values(factorConfigs).forEach((config) => {
+      const series = seriesRefsRef.current[config.name];
+      if (series) {
+        series.applyOptions({ visible: config.visible });
+      }
+    });
+  }, [factorConfigs]);
 
   // ── Bootstrap factors on symbol/timeframe change ──────────────────────
   useEffect(() => {
@@ -200,41 +258,21 @@ export function FactorChartModule({
 
     const symbolUpper = symbol.toUpperCase();
 
-    // Calculate time range based on timeframe
-    const now = Date.now();
-    let fromMs: number;
-    switch (timeframe) {
-      case '10s':
-      case '1m':
-      case '5m':
-        fromMs = now - 3600000; // 1 hour
-        break;
-      case '15m':
-      case '30m':
-        fromMs = now - 14400000; // 4 hours
-        break;
-      case '1h':
-      case '4h':
-        fromMs = now - 86400000; // 1 day
-        break;
-      case '1D':
-      case '1W':
-      case '1M':
-        fromMs = now - 604800000; // 1 week
-        break;
-      default:
-        fromMs = now - 3600000;
-    }
-
-    // Fetch historical factors
-    fetchFactors(moduleId, symbolUpper, fromMs, now);
+    // Fetch historical factors for both tick-based and bar-based
+    // Don't specify time range - backend returns all available data
+    // This works for both live mode and replay mode with historical dates
+    fetchFactors(moduleId, symbolUpper, undefined, undefined, undefined, 'tick'); // TradeRate
+    fetchFactors(moduleId, symbolUpper, undefined, undefined, undefined, timeframe); // EMA
 
     // Subscribe to real-time updates via tickDataStore
+    // Subscribe to BOTH tick-based factors (TradeRate) and bar-based factors (EMA) for current timeframe
     const tickStore = useTickDataStore.getState();
-    tickStore.subscribeFactors(symbolUpper);
+    tickStore.subscribeFactors(symbolUpper, 'tick'); // TradeRate and tick-based
+    tickStore.subscribeFactors(symbolUpper, timeframe); // EMA and bar-based for this timeframe
 
     return () => {
-      tickStore.unsubscribeFactors(symbolUpper);
+      tickStore.unsubscribeFactors(symbolUpper, 'tick');
+      tickStore.unsubscribeFactors(symbolUpper, timeframe);
     };
   }, [symbol, timeframe, moduleId, fetchFactors]);
 
@@ -259,13 +297,6 @@ export function FactorChartModule({
     });
   }, []);
 
-  // ── Manual timeframe change ────────────────────────────────────────────
-  const handleTimeframeChange = (tf: ChartTimeframe) => {
-    setTimeframe(tf);
-    // Optionally update settings to sync back to ChartModule
-    // onSettingsChange?.({ ...settings, chart: { ...settings?.chart, timeframe: tf } });
-  };
-
   // ── Render ─────────────────────────────────────────────────────────────
   return (
     <div className="flex flex-col h-full bg-zinc-900 text-zinc-100 p-3">
@@ -278,40 +309,55 @@ export function FactorChartModule({
           </h3>
         </div>
 
-        {/* Timeframe Selector */}
-        <div className="flex gap-1">
-          {TIMEFRAMES.map((tf) => (
-            <button
-              key={tf}
-              onClick={() => handleTimeframeChange(tf)}
-              className={`px-2 py-1 text-xs font-medium rounded transition-colors ${
-                timeframe === tf
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
-              }`}
-            >
-              {tf}
-            </button>
-          ))}
+        {/* Timeframe selector dropdown for easy debugging */}
+        <div className="relative">
+          <button
+            onClick={() => setShowTfMenu(!showTfMenu)}
+            className="flex items-center gap-1 px-2 py-1 text-xs font-medium rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 transition-colors"
+          >
+            {timeframe}
+            <ChevronDown className="w-3 h-3" />
+          </button>
+          {showTfMenu && (
+            <div className="absolute top-full left-0 mt-1 bg-zinc-800 border border-zinc-700 rounded shadow-xl z-50 min-w-[80px]">
+              {TIMEFRAMES.map((tf) => (
+                <button
+                  key={tf}
+                  onClick={() => handleTimeframeChange(tf)}
+                  className={`w-full text-left px-2 py-1 text-xs hover:bg-zinc-700 ${
+                    tf === timeframe ? 'bg-blue-600 text-white' : 'text-zinc-400'
+                  }`}
+                >
+                  {tf}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
-        {/* Factor Toggles */}
+        {/* Factor Toggles with timeframe labels */}
         <div className="flex gap-2">
-          {Object.values(factorConfigs).map((config) => (
-            <button
-              key={config.name}
-              onClick={() => toggleFactorVisibility(config.name)}
-              className="flex items-center gap-1.5 px-2 py-1 text-xs font-medium rounded transition-colors bg-zinc-800 hover:bg-zinc-700"
-              style={{ color: config.visible ? config.color : '#71717a' }}
-            >
-              {config.visible ? (
-                <Eye className="w-3.5 h-3.5" />
-              ) : (
-                <EyeOff className="w-3.5 h-3.5" />
-              )}
-              {config.displayName}
-            </button>
-          ))}
+          {Object.values(factorConfigs).map((config) => {
+            // Show timeframe for each factor: EMA uses bar timeframe, TradeRate uses tick
+            const factorTimeframe = config.name === 'trade_rate' ? 'tick' : timeframe;
+            return (
+              <button
+                key={config.name}
+                onClick={() => toggleFactorVisibility(config.name)}
+                className="flex items-center gap-1.5 px-2 py-1 text-xs font-medium rounded transition-colors bg-zinc-800 hover:bg-zinc-700"
+                style={{ color: config.visible ? config.color : '#71717a' }}
+                title={`${config.displayName} (${factorTimeframe})`}
+              >
+                {config.visible ? (
+                  <Eye className="w-3.5 h-3.5" />
+                ) : (
+                  <EyeOff className="w-3.5 h-3.5" />
+                )}
+                {config.displayName}
+                <span className="text-[10px] opacity-60 ml-0.5">({factorTimeframe})</span>
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -320,14 +366,16 @@ export function FactorChartModule({
         <div ref={chartContainerRef} className="absolute inset-0" />
 
         {/* Loading/Error Overlay */}
-        {factorState?.loading && (
+        {(tickFactorState?.loading || barFactorState?.loading) && (
           <div className="absolute inset-0 flex items-center justify-center bg-zinc-950/80">
             <div className="text-sm text-zinc-400">Loading factors...</div>
           </div>
         )}
-        {factorState?.error && (
+        {(tickFactorState?.error || barFactorState?.error) && (
           <div className="absolute inset-0 flex items-center justify-center bg-zinc-950/80">
-            <div className="text-sm text-red-400">Error: {factorState.error}</div>
+            <div className="text-sm text-red-400">
+              Error: {tickFactorState?.error || barFactorState?.error}
+            </div>
           </div>
         )}
         {!symbol && (
@@ -346,15 +394,30 @@ export function FactorChartModule({
             <span className="font-medium text-zinc-400">{symbol}</span>
             <span className="ml-2 text-zinc-600">•</span>
             <span className="ml-2">{timeframe}</span>
-            {factorState && !factorState.loading && (
-              <>
-                <span className="ml-2 text-zinc-600">•</span>
-                <span className="ml-2">
-                  {Object.keys(factorState.factors).length} factors •{' '}
-                  {Object.values(factorState.factors).reduce((sum, points) => sum + points.length, 0)} points
-                </span>
-              </>
-            )}
+            {/* Merge factors from both states for display */}
+            {(() => {
+              const mergedFactors: Record<string, { time: number; value: number }[]> = {};
+              if (tickFactorState?.factors) {
+                Object.entries(tickFactorState.factors).forEach(([name, points]) => {
+                  mergedFactors[name] = points;
+                });
+              }
+              if (barFactorState?.factors) {
+                Object.entries(barFactorState.factors).forEach(([name, points]) => {
+                  mergedFactors[name] = points;
+                });
+              }
+              const factorCount = Object.keys(mergedFactors).length;
+              const pointCount = Object.values(mergedFactors).reduce((sum, points) => sum + points.length, 0);
+              return factorCount > 0 ? (
+                <>
+                  <span className="ml-2 text-zinc-600">•</span>
+                  <span className="ml-2">
+                    {factorCount} factors • {pointCount} points
+                  </span>
+                </>
+              ) : null;
+            })()}
           </>
         )}
       </div>

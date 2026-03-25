@@ -77,6 +77,8 @@ class ClickHouseClient:
             session_id=self.session_id,
         )
 
+        # Store config for per-thread client creation (thread-safe)
+        self._ch_config = clickhouse_config
         self.ch_client = get_clickhouse_client(clickhouse_config)
         if not self.ch_client:
             logger.info(
@@ -280,8 +282,9 @@ class ClickHouseClient:
         is_daily_or_above = dur_sec >= 86400
 
         try:
+            # Use per-thread client via config to avoid concurrent query errors
             n = write_bars(
-                self.ch_client,
+                self._ch_config,
                 bar_dicts,
                 source="polygon_backfill",
                 filter_closed=not is_daily_or_above,

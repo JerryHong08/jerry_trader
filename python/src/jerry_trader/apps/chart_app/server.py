@@ -381,6 +381,7 @@ class ChartBFF:
             from_ms: Optional[int] = None,
             to_ms: Optional[int] = None,
             factors: Optional[str] = None,
+            timeframe: Optional[str] = None,
         ):
             """Fetch historical factors for bootstrap.
 
@@ -389,6 +390,7 @@ class ChartBFF:
                 from_ms: Start timestamp in milliseconds (default: 1 hour ago)
                 to_ms: End timestamp in milliseconds (default: now)
                 factors: Comma-separated factor names to filter (default: all)
+                timeframe: Timeframe filter (e.g., 'tick', '1m', '5m'). Default: all timeframes.
 
             Returns:
                 JSON with factors dict: {factor_name: [{time, value}, ...]}
@@ -405,20 +407,20 @@ class ChartBFF:
             if self._factor_engine is not None:
                 self._factor_engine.wait_for_bootstrap(ticker_upper, timeout=10.0)
 
-            # Default: last 1 hour
-            import time as time_module
-
-            to_ms = to_ms or int(time_module.time() * 1000)
-            from_ms = from_ms or (to_ms - 3600000)
-
             factor_names = factors.split(",") if factors else None
+
+            # Convert ms to ns if provided, otherwise query all data (no time filter)
+            # This supports replay mode where data is from historical dates
+            start_ns = from_ms * 1_000_000 if from_ms else None
+            end_ns = to_ms * 1_000_000 if to_ms else None
 
             try:
                 results = self.factor_storage.query_factors(
                     ticker=ticker_upper,
-                    start_ns=from_ms * 1_000_000,
-                    end_ns=to_ms * 1_000_000,
+                    start_ns=start_ns,
+                    end_ns=end_ns,
                     factor_names=factor_names,
+                    timeframe=timeframe,
                 )
 
                 # Transform to frontend format: {factor_name: [{time, value}, ...]}
@@ -595,6 +597,21 @@ class ChartBFF:
         """
         subscriptions = data.get("subscriptions", [])
 
+        # Frontend format: { type: 'subscribe_bars', payload: { ticker, timeframe } }
+        if not subscriptions and "payload" in data:
+            payload = data.get("payload", {})
+            ticker = payload.get("ticker")
+            timeframe = payload.get("timeframe", "")
+            if ticker:
+                subscriptions = [
+                    {
+                        "symbol": ticker,
+                        "timeframe": timeframe,
+                        "events": ["Q"],
+                        "sec_type": "STOCK",
+                    }
+                ]
+
         # Backward compatibility: legacy polygon format
         if not subscriptions:
             symbols = data.get("symbols", [])
@@ -643,14 +660,25 @@ class ChartBFF:
                 if self._bars_builder is not None:
                     self._bars_builder.pre_register_bootstrap(sym)
 
-                try:
-                    self.r.xadd(
-                        self.FACTOR_TASKS_STREAM,
-                        {"action": "add", "ticker": sym},
-                    )
-                    logger.debug(f"📥 XADD factor_tasks: add {sym}")
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to XADD add {sym}: {e}")
+                # Get requested timeframe from subscription
+                # Only notify FactorEngine if a specific timeframe is provided
+                # (Factor subscription via _handle_factor_subscribe handles factor-specific timeframes)
+                timeframe = sub.get("timeframe", "")
+                if timeframe:
+                    try:
+                        self.r.xadd(
+                            self.FACTOR_TASKS_STREAM,
+                            {
+                                "action": "add",
+                                "ticker": sym,
+                                "timeframes": timeframe,
+                            },
+                        )
+                        logger.debug(
+                            f"📥 XADD factor_tasks: add {sym} timeframes={timeframe}"
+                        )
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to XADD add {sym}: {e}")
 
                 # Trigger custom_bar_backfill for ALL TFs (except 10s)
                 # on first subscription — warm up ClickHouse for fast
@@ -668,9 +696,13 @@ class ChartBFF:
 
         Args:
             websocket: WebSocket connection
-            data: Parsed JSON message {"action": "subscribe_factors", "symbols": ["AAPL", "TSLA"]}
+            data: Parsed JSON message {
+                "action": "subscribe_factors",
+                "symbols": ["AAPL", "TSLA"],
+                "timeframe": "5m"  // optional, defaults to tick-based factors
+            }
             consumer_tasks: Dict of task_key -> asyncio.Task
-            factor_subscriptions: Set of currently subscribed symbols
+            factor_subscriptions: Set of currently subscribed symbols (with timeframe)
         """
         symbols = data.get("symbols", [])
         if isinstance(symbols, str):
@@ -678,23 +710,54 @@ class ChartBFF:
         else:
             symbols = [s.upper() for s in symbols if s]
 
+        # Timeframe for bar-based factors (e.g., "1m", "5m")
+        # Use "tick" for tick-based factors (TradeRate, etc.)
+        timeframe = data.get("timeframe", "tick")
+
         if not symbols:
             logger.warning("⚠️ No symbols in factor subscribe request")
             return
 
-        logger.info(f"📊 Factor subscribe request: {symbols}")
+        logger.info(f"📊 Factor subscribe request: {symbols} (timeframe={timeframe})")
 
         for symbol in symbols:
-            if symbol in factor_subscriptions:
-                logger.debug(f"📊 Already subscribed to factors for {symbol}")
+            # Subscription key includes timeframe: "AAPL:5m"
+            sub_key = f"{symbol}:{timeframe}"
+            if sub_key in factor_subscriptions:
+                logger.debug(f"📊 Already subscribed to factors for {sub_key}")
                 continue
 
-            # Create Redis pub/sub consumer task
-            task_key = f"factors:{symbol}"
-            task = asyncio.create_task(self._consume_factor_stream(websocket, symbol))
+            # Create Redis pub/sub consumer task for specific timeframe
+            task_key = f"factors:{symbol}:{timeframe}"
+            task = asyncio.create_task(
+                self._consume_factor_stream(websocket, symbol, timeframe)
+            )
             consumer_tasks[task_key] = task
-            factor_subscriptions.add(symbol)
-            logger.info(f"📊 Subscribed to factors for {symbol}")
+            factor_subscriptions.add(sub_key)
+            logger.info(f"📊 Subscribed to factors for {sub_key}")
+
+            # Notify FactorEngine to add this symbol with timeframe for bar-based factors
+            if timeframe != "tick":
+                # Pre-register bootstrap Event so that REST requests arriving
+                # before FactorEngine picks up the Redis message will block on
+                # wait_for_bootstrap instead of serving stale data.
+                if self._factor_engine is not None:
+                    self._factor_engine.pre_register_bootstrap(symbol)
+
+                try:
+                    self.r.xadd(
+                        self.FACTOR_TASKS_STREAM,
+                        {
+                            "action": "add",
+                            "ticker": symbol,
+                            "timeframes": timeframe,
+                        },
+                    )
+                    logger.debug(
+                        f"📥 XADD factor_tasks: add {symbol} timeframe={timeframe}"
+                    )
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to XADD add {symbol}: {e}")
 
     async def _handle_factor_unsubscribe(
         self,
@@ -707,9 +770,13 @@ class ChartBFF:
 
         Args:
             websocket: WebSocket connection
-            data: Parsed JSON message {"action": "unsubscribe_factors", "symbols": ["AAPL"]}
+            data: Parsed JSON message {
+                "action": "unsubscribe_factors",
+                "symbols": ["AAPL"],
+                "timeframe": "5m"  // optional, defaults to tick-based factors
+            }
             consumer_tasks: Dict of task_key -> asyncio.Task
-            factor_subscriptions: Set of currently subscribed symbols
+            factor_subscriptions: Set of currently subscribed symbols (with timeframe)
         """
         symbols = data.get("symbols", [])
         if isinstance(symbols, str):
@@ -717,35 +784,40 @@ class ChartBFF:
         else:
             symbols = [s.upper() for s in symbols if s]
 
+        timeframe = data.get("timeframe", "tick")
+
         if not symbols:
             logger.warning("⚠️ No symbols in factor unsubscribe request")
             return
 
-        logger.info(f"📊 Factor unsubscribe request: {symbols}")
+        logger.info(f"📊 Factor unsubscribe request: {symbols} (timeframe={timeframe})")
 
         for symbol in symbols:
-            if symbol not in factor_subscriptions:
+            sub_key = f"{symbol}:{timeframe}"
+            if sub_key not in factor_subscriptions:
                 continue
 
-            task_key = f"factors:{symbol}"
+            task_key = f"factors:{symbol}:{timeframe}"
             if task_key in consumer_tasks:
                 consumer_tasks[task_key].cancel()
                 del consumer_tasks[task_key]
-            factor_subscriptions.discard(symbol)
-            logger.info(f"📊 Unsubscribed from factors for {symbol}")
+            factor_subscriptions.discard(sub_key)
+            logger.info(f"📊 Unsubscribed from factors for {sub_key}")
 
     async def _consume_factor_stream(
         self,
         websocket: WebSocket,
         symbol: str,
+        timeframe: str = "tick",
     ) -> None:
         """Consume factor updates from Redis pub/sub and forward to WebSocket.
 
         Args:
             websocket: WebSocket connection
             symbol: Ticker symbol
+            timeframe: Timeframe for factors (e.g., "1m", "5m", "tick")
         """
-        channel = f"factors:{symbol}"
+        channel = f"factors:{symbol}:{timeframe}"
         pubsub = self.r.pubsub()
 
         try:
@@ -761,7 +833,7 @@ class ChartBFF:
                         await websocket.send_json(
                             {"type": "factor_update", "data": factor_data}
                         )
-                        logger.debug(f"📊 Forwarded factor update for {symbol}")
+                        # logger.debug(f"📊 Forwarded factor update for {symbol}")
                     except json.JSONDecodeError as e:
                         logger.error(f"📊 Invalid JSON in factor message: {e}")
                     except Exception as e:

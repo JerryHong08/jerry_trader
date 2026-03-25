@@ -13,9 +13,10 @@ CREATE DATABASE IF NOT EXISTS jerry_trader;
 CREATE TABLE IF NOT EXISTS jerry_trader.factors
 (
     ticker        LowCardinality(String),    -- e.g. "AAPL"
+    timeframe     LowCardinality(String),    -- e.g. "tick", "10s", "1m", "5m" for bar-based factors
     timestamp_ns  Int64,                     -- epoch nanoseconds, factor computation time
     session       String,                    -- session_id for this run
-    factor_name   LowCardinality(String),    -- e.g. "momentum", "volatility", "rsi"
+    factor_name   LowCardinality(String),    -- e.g. "ema_20", "trade_rate"
     factor_value  Float64,                   -- computed factor value
 
     trade_date    Date DEFAULT toDate(fromUnixTimestamp64Nano(timestamp_ns)),  -- partition key

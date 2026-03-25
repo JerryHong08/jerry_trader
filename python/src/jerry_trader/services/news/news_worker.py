@@ -71,7 +71,7 @@ from jerry_trader.shared.ids.redis_keys import (
 from jerry_trader.shared.logging.logger import setup_logger
 from jerry_trader.shared.utils.async_helpers import AsyncRateLimiter, RetryConfig
 
-logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
+logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG, json_format=True)
 
 
 class NewsWorker:

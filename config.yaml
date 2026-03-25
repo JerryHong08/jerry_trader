@@ -83,6 +83,7 @@ machines:
         port: 8000
         redis: "redis-a"
         heartbeat_redis: "redis-a"
+        clickhouse: "clickhouse-a"
         # manager_type: "synced-replayer" # choices=["polygon", "theta", "replayer", "synced-replayer"]
       # StateEngine:
       #   enabled: true

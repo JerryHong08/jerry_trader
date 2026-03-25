@@ -17,11 +17,24 @@ aggregate bar backfills (which previously had zeros).
 """
 
 import logging
-from typing import Dict, List, Optional
+import threading
+from typing import Any, Dict, List, Optional
 
+from jerry_trader.platform.storage.clickhouse import get_clickhouse_client
 from jerry_trader.shared.time.timezone import is_closed_session_utc
 
 logger = logging.getLogger(__name__)
+
+# Thread-local storage for per-thread ClickHouse clients
+_thread_local = threading.local()
+
+
+def _get_thread_local_ch_client(clickhouse_config: Optional[Dict[str, Any]] = None):
+    """Get or create a per-thread ClickHouse client."""
+    if not hasattr(_thread_local, "ch_client"):
+        _thread_local.ch_client = get_clickhouse_client(clickhouse_config)
+    return _thread_local.ch_client
+
 
 # ── Constants ────────────────────────────────────────────────────────────
 
@@ -69,7 +82,7 @@ def bar_dict_to_row(bar: dict) -> list:
 
 
 def write_bars(
-    ch_client,
+    ch_client_or_config,
     bars: List[dict],
     *,
     source: str = "unknown",
@@ -78,7 +91,10 @@ def write_bars(
     """Write a batch of bar dicts to ClickHouse, with session filtering.
 
     Args:
-        ch_client: ``clickhouse_connect`` client instance.
+        ch_client_or_config: Either a ``clickhouse_connect`` client instance,
+            or a config dict to create a per-thread client (recommended for
+            thread safety). Per-thread clients prevent "concurrent queries"
+            errors when multiple threads write bars simultaneously.
         bars: List of bar dicts.  Each must have at minimum:
               ``ticker``, ``timeframe``, ``bar_start``, ``bar_end``,
               ``open``, ``high``, ``low``, ``close``.
@@ -105,6 +121,16 @@ def write_bars(
             logger.debug(
                 f"write_bars [{source}]: all {skipped} bars filtered (closed session)"
             )
+        return 0
+
+    # Use per-thread client if config dict provided, otherwise use passed client
+    if isinstance(ch_client_or_config, dict):
+        ch_client = _get_thread_local_ch_client(ch_client_or_config)
+    else:
+        ch_client = ch_client_or_config
+
+    if not ch_client:
+        logger.error(f"write_bars [{source}]: no ClickHouse client available")
         return 0
 
     try:

@@ -139,6 +139,8 @@ class BarsBuilderService:
         password_env = ch_cfg.get("password_env", "CLICKHOUSE_PASSWORD")
         ch_password = os.getenv(password_env, "")
 
+        # Store config for per-thread client creation (thread-safe writes)
+        self._ch_config = clickhouse_config or {}
         self.ch_client = clickhouse_connect.get_client(
             host=ch_host,
             port=ch_port,
@@ -1104,8 +1106,9 @@ class BarsBuilderService:
         #     )
 
         try:
+            # Use per-thread client via config to avoid concurrent query errors
             n = write_bars(
-                self.ch_client,
+                self._ch_config,
                 bars,
                 source="bars_builder",
                 filter_closed=False,  # Rust BarBuilder already filters closed session

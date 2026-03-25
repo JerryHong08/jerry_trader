@@ -24,6 +24,7 @@ from jerry_trader.platform.storage.clickhouse import (
     get_clickhouse_client,
     query_ohlcv_bars,
 )
+from jerry_trader.services.bar_builder.chart_data_service import REPLAY_LOOKBACK
 from jerry_trader.services.factor.factor_storage import FactorStorage
 from jerry_trader.services.factor.indicators import (
     EMA,
@@ -44,18 +45,37 @@ COMPUTE_INTERVAL_SEC = 1.0  # Tick indicator compute interval
 
 
 @dataclass
+class TimeframeState:
+    """Per-timeframe indicator state for a ticker."""
+
+    timeframe: str
+    bar_indicators: list[BarIndicator] = field(default_factory=list)
+    last_bar_start_ms: int = 0  # Track last processed bar to avoid duplicates
+
+    def reset(self) -> None:
+        """Reset all bar indicators."""
+        for ind in self.bar_indicators:
+            ind.reset()
+        self.last_bar_start_ms = 0
+
+
+@dataclass
 class TickerState:
-    """Per-ticker indicator state."""
+    """Per-ticker indicator state across all timeframes."""
 
     symbol: str
-    bar_indicators: list[BarIndicator] = field(default_factory=list)
+    timeframe_states: dict[str, TimeframeState] = field(default_factory=dict)
     tick_indicators: list[TickIndicator] = field(default_factory=list)
     quote_indicators: list[QuoteIndicator] = field(default_factory=list)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    last_bootstrap_trade_ms: int = (
+        0  # Track last trade from bootstrap to avoid duplicates
+    )
 
     def reset(self) -> None:
         """Reset all indicators."""
-        for ind in self.bar_indicators:
-            ind.reset()
+        for tf_state in self.timeframe_states.values():
+            tf_state.reset()
         for ind in self.tick_indicators:
             ind.reset()
         for ind in self.quote_indicators:
@@ -77,7 +97,7 @@ class FactorEngine:
         redis_config: dict[str, Any] | None = None,
         ws_manager: UnifiedTickManager | None = None,
         ws_loop: asyncio.AbstractEventLoop | None = None,
-        timeframe: str = "1m",
+        timeframe: str | None = None,  # Deprecated, kept for compatibility
         clickhouse_config: dict[str, Any] | None = None,
         # Unused params for backend_starter compatibility
         manager_type: str | None = None,
@@ -89,11 +109,12 @@ class FactorEngine:
             redis_config: Redis connection config
             ws_manager: Shared UnifiedTickManager for tick data
             ws_loop: Event loop for async tick consumption
-            timeframe: Bar timeframe to subscribe to (default: 1m)
+            timeframe: Deprecated - timeframes now registered per-ticker
             clickhouse_config: ClickHouse connection config
         """
         self.session_id = session_id
-        self.timeframe = timeframe
+        # Default timeframe for backward compatibility
+        self._default_timeframe = timeframe or "1m"
 
         # Redis client
         redis_config = redis_config or {}
@@ -104,9 +125,11 @@ class FactorEngine:
             decode_responses=True,
         )
 
-        # ClickHouse storage
+        # ClickHouse storage - create per-thread clients to avoid concurrent query issues
+        self._ch_config = clickhouse_config
         ch_client = get_clickhouse_client(clickhouse_config)
         self.storage = FactorStorage(ch_client, session_id) if ch_client else None
+        self._session_id = session_id  # stored for creating per-thread clients
 
         # Tick manager (shared with ChartBFF/BarsBuilder)
         self.ws_manager = ws_manager
@@ -138,10 +161,9 @@ class FactorEngine:
         self._bootstrap_events: dict[str, threading.Event] = {}
         self._bootstrap_done: set[str] = set()
         self._bars_builder = None  # set by backend_starter via set_bars_builder()
-        self._ch_client = ch_client  # raw ClickHouse client for bar queries
 
         logger.info(
-            f"FactorEngine initialized: session={session_id}, timeframe={timeframe}, "
+            f"FactorEngine initialized: session={session_id}, default_timeframe={self._default_timeframe}, "
             f"shared_manager={not self._owns_manager}, storage={'enabled' if self.storage else 'disabled'}"
         )
 
@@ -166,17 +188,40 @@ class FactorEngine:
     # Ticker Management
     # ═══════════════════════════════════════════════════════════════════════════
 
-    def add_ticker(self, symbol: str) -> None:
-        """Start tracking a ticker for factor computation."""
+    def add_ticker(self, symbol: str, timeframes: list[str] | None = None) -> None:
+        """Start tracking a ticker for factor computation.
+
+        Args:
+            symbol: Ticker symbol to track
+            timeframes: List of timeframes to compute bar-based factors for.
+                       Defaults to [self._default_timeframe] if not specified.
+        """
+        timeframes = timeframes or [self._default_timeframe]
+
         with self._states_lock:
             if symbol in self.ticker_states:
                 logger.debug(f"FactorEngine: {symbol} already tracked")
+                # Add any new timeframes to existing ticker
+                state = self.ticker_states[symbol]
+                for tf in timeframes:
+                    if tf not in state.timeframe_states:
+                        state.timeframe_states[tf] = TimeframeState(
+                            timeframe=tf, bar_indicators=[EMA(period=20)]
+                        )
+                        self._subscribe_bars_for_timeframe(symbol, tf)
                 return
+
+            # Create timeframe states for each timeframe
+            timeframe_states: dict[str, TimeframeState] = {}
+            for tf in timeframes:
+                timeframe_states[tf] = TimeframeState(
+                    timeframe=tf, bar_indicators=[EMA(period=20)]
+                )
 
             # Create indicator instances
             state = TickerState(
                 symbol=symbol,
-                bar_indicators=[EMA(period=20)],
+                timeframe_states=timeframe_states,
                 tick_indicators=[TradeRate(window_ms=20_000, min_trades=5)],
                 quote_indicators=[],
             )
@@ -186,10 +231,11 @@ class FactorEngine:
         if symbol not in self._bootstrap_events:
             self._bootstrap_events[symbol] = threading.Event()
 
-        # Subscribe to bar pub/sub channel
-        self._subscribe_bars(symbol)
+        # Subscribe to bar pub/sub channels for all timeframes
+        for tf in timeframes:
+            self._subscribe_bars_for_timeframe(symbol, tf)
 
-        # Subscribe to tick stream
+        # Subscribe to tick stream (timeframe-agnostic)
         self._subscribe_ticks(symbol)
 
         # Start bootstrap in background thread
@@ -202,22 +248,25 @@ class FactorEngine:
             )
             t.start()
 
-        logger.info(f"FactorEngine: tracking {symbol}")
+        logger.info(f"FactorEngine: tracking {symbol} with timeframes={timeframes}")
 
     def remove_ticker(self, symbol: str) -> None:
         """Stop tracking a ticker."""
         with self._states_lock:
             if symbol not in self.ticker_states:
                 return
+            state = self.ticker_states[symbol]
+            timeframes = list(state.timeframe_states.keys())
             del self.ticker_states[symbol]
 
-        # Unsubscribe from bar channel
+        # Unsubscribe from all bar channels
         if self._pubsub:
-            channel = f"bars:{symbol}:{self.timeframe}"
-            try:
-                self._pubsub.unsubscribe(channel)
-            except Exception:
-                pass
+            for tf in timeframes:
+                channel = f"bars:{symbol}:{tf}"
+                try:
+                    self._pubsub.unsubscribe(channel)
+                except Exception:
+                    pass
 
         # Cancel tick consumer
         self._unsubscribe_ticks(symbol)
@@ -262,8 +311,10 @@ class FactorEngine:
         snapshots: list[FactorSnapshot] = []
         last_compute_ms = 0
 
+        max_ts_ms = 0
         for ts_ms, price, size in trades:
             ts_ms = int(ts_ms)
+            max_ts_ms = max(max_ts_ms, ts_ms)
             for ind in state.tick_indicators:
                 ind.on_tick(ts_ms, float(price), int(size))
 
@@ -286,49 +337,58 @@ class FactorEngine:
                     )
                 last_compute_ms = ts_ms
 
+        # Track the last trade timestamp to avoid duplicate processing
+        # when real-time trades arrive via WebSocket
+        state.last_bootstrap_trade_ms = max_ts_ms
+        logger.debug(
+            f"_on_bootstrap_trades - {symbol}: last_bootstrap_trade_ms set to {max_ts_ms}"
+        )
+
         # Batch write tick-based factor snapshots to ClickHouse
         if snapshots and self.storage:
-            count = self.storage.write_batch(snapshots)
+            # Create tuples with timeframe for write_batch
+            snapshots_with_tf = [(s, "tick") for s in snapshots]
+            count = self.storage.write_batch(snapshots_with_tf)
             logger.info(
                 f"_on_bootstrap_trades - {symbol}: wrote {count} tick factor rows "
                 f"from {len(snapshots)} snapshots"
             )
 
-    def _bootstrap_bars(self, symbol: str) -> None:
-        """Warm up bar-based indicators (EMA) from today's completed bars in ClickHouse."""
-        if not self._ch_client:
-            logger.warning(
-                f"_bootstrap_bars - {symbol}: no ClickHouse client, skipping"
-            )
+    def _bootstrap_bars_for_timeframe(
+        self, symbol: str, timeframe: str, tf_state: "TimeframeState"
+    ) -> None:
+        """Warm up bar-based indicators for a specific timeframe from ClickHouse."""
+        # Create per-thread ClickHouse client to avoid concurrent query issues
+        ch_client = get_clickhouse_client(self._ch_config)
+        if not ch_client:
             return
 
-        state = self.ticker_states.get(symbol)
-        if not state:
-            return
+        # Query bars using same lookback as ChartDataService (REPLAY_LOOKBACK)
+        # This ensures enough historical bars for EMA warmup without over-fetching
+        end_ms = clock_mod.now_ms()
+        lookback_days = REPLAY_LOOKBACK.get(timeframe, 5)  # default 5 days
+        start_ms = end_ms - (lookback_days * 24 * 60 * 60 * 1000)
 
-        # Query today's bars from ClickHouse
-        now_ms = clock_mod.now_ms()
-        # Go back 24h to cover pre-market
-        start_ms = now_ms - 86_400_000
-        result = query_ohlcv_bars(
-            self._ch_client, symbol, self.timeframe, start_ms, now_ms
-        )
+        result = query_ohlcv_bars(ch_client, symbol, timeframe, start_ms, end_ms)
 
         if not result or not result.get("bars"):
-            logger.info(f"_bootstrap_bars - {symbol}: no bars found for warmup")
+            logger.info(
+                f"_bootstrap_bars - {symbol}/{timeframe}: no bars found for warmup"
+            )
             return
 
         bars = result["bars"]
         logger.info(
-            f"_bootstrap_bars - {symbol}: feeding {len(bars)} bars to bar indicators"
+            f"_bootstrap_bars - {symbol}/{timeframe}: feeding {len(bars)} bars to bar indicators"
         )
 
         snapshots: list[FactorSnapshot] = []
         for bar_dict in bars:
+            # query_ohlcv_bars returns bars with "time" (epoch seconds)
             bar = Bar(
                 symbol=symbol,
-                timestamp_ns=bar_dict["bar_start"] * 1_000_000,
-                timespan=self.timeframe,
+                timestamp_ns=bar_dict["time"] * 1_000_000_000,  # seconds to ns
+                timespan=timeframe,
                 open=bar_dict["open"],
                 high=bar_dict["high"],
                 low=bar_dict["low"],
@@ -339,7 +399,7 @@ class FactorEngine:
             )
 
             factors: dict[str, float] = {}
-            for ind in state.bar_indicators:
+            for ind in tf_state.bar_indicators:
                 value = ind.update(bar)
                 if value is not None:
                     factors[ind.name] = value
@@ -353,13 +413,43 @@ class FactorEngine:
                     )
                 )
 
-        # Batch write bar-based factor snapshots
+        # Batch write bar-based factor snapshots for this timeframe
         if snapshots and self.storage:
-            count = self.storage.write_batch(snapshots)
+            # Create tuples with timeframe for write_batch
+            snapshots_with_tf = [(s, timeframe) for s in snapshots]
+            count = self.storage.write_batch(snapshots_with_tf)
             logger.info(
-                f"_bootstrap_bars - {symbol}: wrote {count} bar factor rows "
+                f"_bootstrap_bars - {symbol}/{timeframe}: wrote {count} bar factor rows "
                 f"from {len(snapshots)} snapshots"
             )
+
+        # Track the last bar timestamp to avoid duplicate processing
+        # when real-time bars arrive via Redis pub/sub
+        if bars:
+            last_bar = bars[-1]
+            tf_state.last_bar_start_ms = last_bar["time"] * 1000  # seconds to ms
+
+    def _bootstrap_bars(self, symbol: str) -> None:
+        """Warm up bar-based indicators (EMA) from today's completed bars in ClickHouse.
+
+        Bootstraps each timeframe separately.
+        """
+        if not self._ch_config:
+            logger.warning(
+                f"_bootstrap_bars - {symbol}: no ClickHouse config, skipping"
+            )
+            return
+
+        state = self.ticker_states.get(symbol)
+        if not state:
+            return
+
+        # Bootstrap each timeframe separately
+        # Create a snapshot to avoid "dictionary changed size during iteration"
+        with state.lock:
+            timeframe_items = list(state.timeframe_states.items())
+        for timeframe, tf_state in timeframe_items:
+            self._bootstrap_bars_for_timeframe(symbol, timeframe, tf_state)
 
     def _run_bootstrap(self, symbol: str) -> None:
         """Orchestrate factor bootstrap for a ticker."""
@@ -369,7 +459,10 @@ class FactorEngine:
                 logger.info(
                     f"_run_bootstrap - {symbol}: waiting for bars_builder bootstrap"
                 )
-                ok = self._bars_builder.wait_for_bootstrap(symbol, timeout=30.0)
+                # Pre-register to ensure Event exists (otherwise wait_for_bootstrap
+                # returns immediately if bootstrap hasn't started yet)
+                self._bars_builder.pre_register_bootstrap(symbol)
+                ok = self._bars_builder.wait_for_bootstrap(symbol, timeout=60.0)
                 if not ok:
                     logger.warning(
                         f"_run_bootstrap - {symbol}: bars_builder bootstrap timed out"
@@ -415,12 +508,12 @@ class FactorEngine:
     # Bar Subscription (Redis pub/sub)
     # ═══════════════════════════════════════════════════════════════════════════
 
-    def _subscribe_bars(self, symbol: str) -> None:
-        """Subscribe to Redis pub/sub channel for bars."""
+    def _subscribe_bars_for_timeframe(self, symbol: str, timeframe: str) -> None:
+        """Subscribe to Redis pub/sub channel for bars of a specific timeframe."""
         if not self._pubsub:
             return
 
-        channel = f"bars:{symbol}:{self.timeframe}"
+        channel = f"bars:{symbol}:{timeframe}"
         try:
             self._pubsub.subscribe(channel)
             logger.debug(f"FactorEngine: subscribed to {channel}")
@@ -455,20 +548,52 @@ class FactorEngine:
         if not symbol:
             return
 
+        # Skip processing until bootstrap is complete to ensure
+        # indicator state is fully warmed up before real-time bars
+        if symbol not in self._bootstrap_done:
+            # logger.debug(
+            #     f"_on_bar: skipping bar for {symbol} - bootstrap not complete"
+            # )
+            return
+
+        # Get timeframe from bar data
+        timeframe = bar_dict.get("timeframe")
+        if not timeframe:
+            logger.warning(f"_on_bar: bar for {symbol} missing timeframe, skipping")
+            return
+
         with self._states_lock:
             state = self.ticker_states.get(symbol)
 
         if not state:
             return
 
+        # Get the timeframe-specific state
+        tf_state = state.timeframe_states.get(timeframe)
+        if not tf_state:
+            logger.debug(f"_on_bar: no factor state for {symbol}/{timeframe}, skipping")
+            return
+
+        # Check for duplicate bars (already processed during bootstrap)
+        bar_start_ms = bar_dict.get("bar_start", 0)
+        if bar_start_ms <= tf_state.last_bar_start_ms:
+            logger.debug(
+                f"_on_bar: skipping duplicate bar for {symbol}/{timeframe} "
+                f"at {bar_start_ms} (last processed: {tf_state.last_bar_start_ms})"
+            )
+            return
+
+        # Update last processed bar timestamp
+        tf_state.last_bar_start_ms = bar_start_ms
+
         logger.debug(
-            f"_on_bar: received bar for {symbol} at {bar_dict.get('bar_start')}"
+            f"_on_bar: received bar for {symbol}/{timeframe} at {bar_start_ms}"
         )
         # Convert to Bar domain model
         bar = Bar(
             symbol=symbol,
             timestamp_ns=bar_dict["bar_start"] * 1_000_000,  # ms to ns
-            timespan=bar_dict.get("timeframe", self.timeframe),
+            timespan=timeframe,
             open=bar_dict["open"],
             high=bar_dict["high"],
             low=bar_dict["low"],
@@ -478,24 +603,24 @@ class FactorEngine:
             trade_count=bar_dict.get("trade_count"),
         )
 
-        # Update bar indicators
+        # Update bar indicators for this timeframe
         factors: dict[str, float] = {}
-        for ind in state.bar_indicators:
+        for ind in tf_state.bar_indicators:
             logger.debug(
-                f"_on_bar: calculate {symbol} {ind.name} with bar at {bar_dict.get('bar_start')}"
+                f"_on_bar: calculate {symbol}/{timeframe} {ind.name} with bar at {bar_dict.get('bar_start')}"
             )
             value = ind.update(bar)
 
             logger.debug(
-                f"_on_bar: calculated {symbol} {ind.name} = {value} with bar at {bar_dict.get('bar_start')}"
+                f"_on_bar: calculated {symbol}/{timeframe} {ind.name} = {value}"
             )
 
             if value is not None:
                 factors[ind.name] = value
 
-        # Write bar-based factors to ClickHouse
+        # Write bar-based factors to ClickHouse with timeframe
         if factors:
-            self._write_factors(symbol, bar.timestamp_ns, factors)
+            self._write_factors(symbol, bar.timestamp_ns, factors, timeframe)
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Tick Subscription (UnifiedTickManager)
@@ -581,6 +706,14 @@ class FactorEngine:
         if not symbol:
             return
 
+        # Skip processing until bootstrap is complete to ensure
+        # tick indicators are warmed up with historical trades
+        if symbol not in self._bootstrap_done:
+            logger.debug(
+                f"_on_tick: skipping tick for {symbol} - bootstrap not complete"
+            )
+            return
+
         with self._states_lock:
             state = self.ticker_states.get(symbol)
 
@@ -594,14 +727,32 @@ class FactorEngine:
         if ts_ms is None or price is None:
             return
 
+        ts_ms = int(ts_ms)
+
+        # Skip trades that were already processed during bootstrap
+        # to avoid duplicate counting in tick indicators
+        if ts_ms <= state.last_bootstrap_trade_ms:
+            logger.debug(
+                f"_on_tick: skipping duplicate trade for {symbol} "
+                f"at {ts_ms} (last bootstrap: {state.last_bootstrap_trade_ms})"
+            )
+            return
+
         # Feed to tick indicators
         for ind in state.tick_indicators:
-            ind.on_tick(int(ts_ms), float(price), int(size))
+            ind.on_tick(ts_ms, float(price), int(size))
 
     def _on_quote(self, data: dict) -> None:
         """Handle a quote tick."""
         symbol = data.get("symbol")
-        state = self.ticker_states.get(symbol) if symbol else None
+        if not symbol:
+            return
+
+        # Skip processing until bootstrap is complete
+        if symbol not in self._bootstrap_done:
+            return
+
+        state = self.ticker_states.get(symbol)
         if not state or not state.quote_indicators:
             return
 
@@ -635,6 +786,11 @@ class FactorEngine:
                 states = list(self.ticker_states.values())
 
             for state in states:
+                # Skip tick factor publishing until bootstrap is complete
+                # to avoid mixing real-time data with historical bootstrap data
+                if state.symbol not in self._bootstrap_done:
+                    continue
+
                 try:
                     factors: dict[str, float] = {}
                     for ind in state.tick_indicators:
@@ -652,6 +808,7 @@ class FactorEngine:
                             state.symbol,
                             ts_ms * 1_000_000,  # ms to ns
                             factors,
+                            timeframe="tick",  # Tick-based indicators
                         )
                 except Exception as e:
                     logger.error(
@@ -671,6 +828,7 @@ class FactorEngine:
         symbol: str,
         timestamp_ns: int,
         factors: dict[str, float],
+        timeframe: str = "tick",
     ) -> None:
         """Write factors to ClickHouse via FactorStorage and publish to Redis pub/sub.
 
@@ -678,6 +836,8 @@ class FactorEngine:
             symbol: Ticker symbol
             timestamp_ns: Timestamp in nanoseconds
             factors: Dict of factor_name -> value
+            timeframe: Timeframe for these factors (e.g., '1m', '5m', 'tick')
+                      Use 'tick' for tick-based indicators like TradeRate
         """
         if not self.storage:
             return
@@ -689,28 +849,29 @@ class FactorEngine:
         )
 
         try:
-            count = self.storage.write_factor_snapshot(snapshot)
+            count = self.storage.write_factor_snapshot(snapshot, timeframe)
             if count > 0:
                 logger.debug(
-                    f"FactorEngine: wrote {count} factors for {symbol} "
+                    f"FactorEngine: wrote {count} factors for {symbol}/{timeframe} "
                     f"({list(factors.keys())})"
                 )
 
-                # Publish to Redis pub/sub for real-time streaming
+                # Publish to timeframe-specific Redis channel for real-time streaming
                 try:
-                    channel = f"factors:{symbol}"
+                    channel = f"factors:{symbol}:{timeframe}"
                     message = json.dumps(
                         {
                             "symbol": symbol,
                             "timestamp_ns": timestamp_ns,
                             "timestamp_ms": timestamp_ns // 1_000_000,
+                            "timeframe": timeframe,
                             "factors": factors,
                         }
                     )
                     self.redis_client.publish(channel, message)
-                    logger.debug(
-                        f"FactorEngine: published {len(factors)} factors to {channel}"
-                    )
+                    # logger.debug(
+                    #     f"FactorEngine: published {len(factors)} factors to {channel}"
+                    # )
                 except Exception as e:
                     logger.error(f"FactorEngine: Redis publish failed - {e}")
 
@@ -748,7 +909,17 @@ class FactorEngine:
                                 continue
 
                             if action == "add":
-                                self.add_ticker(ticker)
+                                # Parse timeframes from message (e.g., "10s,1m,5m")
+                                timeframes_str = msg_data.get("timeframes", "")
+                                if timeframes_str:
+                                    timeframes = [
+                                        tf.strip()
+                                        for tf in timeframes_str.split(",")
+                                        if tf.strip()
+                                    ]
+                                else:
+                                    timeframes = None  # Use default
+                                self.add_ticker(ticker, timeframes)
                             elif action == "remove":
                                 self.remove_ticker(ticker)
                             else:
@@ -781,10 +952,15 @@ class FactorEngine:
         # Initialize bar pub/sub
         self._pubsub = self.redis_client.pubsub()
 
-        # Subscribe to bars for existing tickers
+        # Subscribe to bars for existing tickers (all their timeframes)
         with self._states_lock:
-            for symbol in self.ticker_states:
-                self._subscribe_bars(symbol)
+            ticker_states_snapshot = list(self.ticker_states.items())
+        for symbol, state in ticker_states_snapshot:
+            # Create a copy of timeframe keys to avoid "dictionary changed size during iteration"
+            with state.lock:
+                timeframes = list(state.timeframe_states.keys())
+            for timeframe in timeframes:
+                self._subscribe_bars_for_timeframe(symbol, timeframe)
 
         # Start bars listener thread
         self._bars_thread = threading.Thread(

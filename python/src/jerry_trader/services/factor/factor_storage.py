@@ -56,11 +56,14 @@ class FactorStorage:
         except Exception as e:
             logger.error(f"FactorStorage: Failed to check table existence - {e}")
 
-    def write_factor_snapshot(self, snapshot: FactorSnapshot) -> int:
+    def write_factor_snapshot(
+        self, snapshot: FactorSnapshot, timeframe: str = "tick"
+    ) -> int:
         """Write factor snapshot to ClickHouse.
 
         Args:
             snapshot: FactorSnapshot with computed factors
+            timeframe: Timeframe for these factors (e.g., 'tick', '1m', '5m')
 
         Returns:
             Number of factor rows written
@@ -74,6 +77,7 @@ class FactorStorage:
         rows = [
             [
                 snapshot.symbol,
+                timeframe,
                 snapshot.timestamp_ns,
                 self.session_id,
                 name,
@@ -88,6 +92,7 @@ class FactorStorage:
                 data=rows,
                 column_names=[
                     "ticker",
+                    "timeframe",
                     "timestamp_ns",
                     "session",
                     "factor_name",
@@ -95,7 +100,7 @@ class FactorStorage:
                 ],
             )
             logger.debug(
-                f"FactorStorage: Wrote {len(rows)} factors for {snapshot.symbol} "
+                f"FactorStorage: Wrote {len(rows)} factors for {snapshot.symbol}/{timeframe} "
                 f"at ts={snapshot.timestamp_ns}"
             )
             return len(rows)
@@ -103,11 +108,11 @@ class FactorStorage:
             logger.error(f"FactorStorage: Failed to write factors - {e}")
             return 0
 
-    def write_batch(self, snapshots: list[FactorSnapshot]) -> int:
+    def write_batch(self, snapshots: list[tuple[FactorSnapshot, str]]) -> int:
         """Write multiple factor snapshots in a single batch.
 
         Args:
-            snapshots: List of FactorSnapshot objects
+            snapshots: List of (FactorSnapshot, timeframe) tuples
 
         Returns:
             Total number of factor rows written
@@ -116,11 +121,12 @@ class FactorStorage:
             return 0
 
         rows = []
-        for snapshot in snapshots:
+        for snapshot, timeframe in snapshots:
             for name, value in snapshot.factors.items():
                 rows.append(
                     [
                         snapshot.symbol,
+                        timeframe,
                         snapshot.timestamp_ns,
                         self.session_id,
                         name,
@@ -137,6 +143,7 @@ class FactorStorage:
                 data=rows,
                 column_names=[
                     "ticker",
+                    "timeframe",
                     "timestamp_ns",
                     "session",
                     "factor_name",
@@ -152,42 +159,56 @@ class FactorStorage:
     def query_factors(
         self,
         ticker: str,
-        start_ns: int,
-        end_ns: int,
+        start_ns: int | None = None,
+        end_ns: int | None = None,
         factor_names: list[str] | None = None,
+        timeframe: str | None = None,
     ) -> list[dict]:
         """Query historical factors from ClickHouse.
 
         Args:
             ticker: Symbol to query
-            start_ns: Start timestamp in nanoseconds
-            end_ns: End timestamp in nanoseconds
+            start_ns: Start timestamp in nanoseconds (optional, no filter if None)
+            end_ns: End timestamp in nanoseconds (optional, no filter if None)
             factor_names: Optional list of factor names to filter
+            timeframe: Optional timeframe filter (e.g., 'tick', '1m', '5m')
 
         Returns:
-            List of dicts with ticker, timestamp_ns, factor_name, factor_value
+            List of dicts with ticker, timeframe, timestamp_ns, factor_name, factor_value
         """
         if not self.ch_client:
             return []
 
         try:
             factor_filter = ""
+            timeframe_filter = ""
+            time_filter = ""
             params: dict[str, Any] = {
                 "ticker": ticker,
-                "start_ns": start_ns,
-                "end_ns": end_ns,
             }
+
+            # Add time range filters only if provided
+            if start_ns is not None:
+                time_filter += " AND timestamp_ns >= {start_ns:Int64}"
+                params["start_ns"] = start_ns
+            if end_ns is not None:
+                time_filter += " AND timestamp_ns < {end_ns:Int64}"
+                params["end_ns"] = end_ns
 
             if factor_names:
                 factor_filter = "AND factor_name IN {factor_names:Array(String)}"
                 params["factor_names"] = factor_names
 
+            if timeframe:
+                timeframe_filter = "AND timeframe = {timeframe:String}"
+                params["timeframe"] = timeframe
+
             query = f"""
-                SELECT ticker, timestamp_ns, factor_name, factor_value
+                SELECT ticker, timeframe, timestamp_ns, factor_name, factor_value
                 FROM {self.TABLE_NAME} FINAL
                 WHERE ticker = {{ticker:String}}
-                  AND timestamp_ns >= {{start_ns:Int64}}
-                  AND timestamp_ns < {{end_ns:Int64}}
+                  {time_filter}
+                  {timeframe_filter}
                   {factor_filter}
                 ORDER BY timestamp_ns ASC
             """
@@ -197,9 +218,10 @@ class FactorStorage:
             return [
                 {
                     "ticker": row[0],
-                    "timestamp_ns": row[1],
-                    "factor_name": row[2],
-                    "factor_value": row[3],
+                    "timeframe": row[1],
+                    "timestamp_ns": row[2],
+                    "factor_name": row[3],
+                    "factor_value": row[4],
                 }
                 for row in result.result_rows
             ]

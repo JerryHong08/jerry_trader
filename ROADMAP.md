@@ -20,11 +20,10 @@ Performance-critical components rewritten in Rust.
 
 Stateful workers and use-case implementations.
 
-- [x] 3.1 FactorEngine Python implementation (hybrid bar + tick based)
 - [-] 3.2 StateEngine Python wrappers and integration
-- [ ] 3.3 Real-time risk management engine with position limits
-- [ ] 3.4 Risk management rules and drawdown checks
-- [ ] 3.5 Risk engine integration with order execution
+- [ ] 3.4 Real-time risk management engine with position limits
+- [ ] 3.5 Risk management rules and drawdown checks
+- [ ] 3.6 Risk engine integration with order execution
 
 ## 4. ML Pipeline
 
@@ -39,9 +38,6 @@ Machine learning for breakout-compute-analyze context model.
 
 React/TradingView UI modules and UX improvements.
 
-- [ ] [5.1](roadmap/factor-realtime-analysis.md) Fix factor real-time update moduleId mismatch bug
-- [ ] [5.2](roadmap/factor-realtime-analysis.md) Factor chart sub-follower mode (sync timeframe with main chart)
-- [ ] 5.3 Abstract all search boxes into unified component
 - [ ] 5.4 Unify bar chart and factor chart styles
 - [ ] 5.5 Frame group feature
 - [ ] 5.6 Better UX improvements
@@ -77,8 +73,7 @@ Event-driven AI agent system (Stage 4).
 Enhancements and additional modules.
 
 - [ ] 8.1 Historical orders analysis module
-- [ ] 8.2 News engine output from log to JSON log
-- [ ] 8.3 Chatbox module
+- [ ] [8.3](roadmap/chatbox-module.md) Chatbox module
 
 ## Design Concerns
 
@@ -92,4 +87,4 @@ Architectural decisions needing discussion.
 
 Known issues and bugs requiring attention.
 
-- [ ] Frontend chart timespan switch: newest bar covers last bar's open/high/low
+_Inbox empty - add new issues as they arise_

@@ -31,7 +31,7 @@ _thread_local = threading.local()
 
 def _get_thread_local_ch_client(clickhouse_config: Optional[Dict[str, Any]] = None):
     """Get or create a per-thread ClickHouse client."""
-    if not hasattr(_thread_local, "ch_client"):
+    if not hasattr(_thread_local, "ch_client") or _thread_local.ch_client is None:
         _thread_local.ch_client = get_clickhouse_client(clickhouse_config)
     return _thread_local.ch_client
 

@@ -48,32 +48,41 @@ System-wide coordination and backtest infrastructure.
 
 - [ ] [6.1](roadmap/factor-realtime-analysis.md) Decouple trades_backfill from timeframe switch events
 - [ ] 6.2 Configurable timeframe switch and bootstrap computation
-- [ ] [6.3](roadmap/factor-realtime-analysis.md) Factor bootstrap sync to trades_bootstrap
 - [ ] 6.4 Tickers pre-location fitting strategy/conditions
 - [ ] 6.5 Strategy pre-locate orchestrator with auto-sequenced jumps
 - [ ] 6.6 Pre-located tickers pipeline backtest visualization and validation
 
 ## 7. AI Agent Layer
 
-Event-driven AI agent system (Stage 4).
+Event-driven AI agent system with generative UI capabilities.
 
+**Core Infrastructure:**
 - [ ] 7.1 Redis streams to event_bus migration
 - [ ] 7.2 Redis-based RPC for cross-service tool calls
-- [ ] 7.3 AgentBFF HTTP + WebSocket interface
-- [ ] 7.4 Agent core loop with tool dispatch
-- [ ] 7.5 Tool registry wrapping existing services
-- [ ] 7.6 Short and long-term memory system
-- [ ] 7.7 txt to tool-calling validation
-- [ ] 7.8 Strategy pipeline agent validation
-- [ ] 7.9 ML pipeline agent validation
-- [ ] 7.10 Basic CLI tools and skills instruction
+- [ ] [7.3](roadmap/chatbox-module.md) Agent BFF - WebSocket + HTTP interface
+
+**Agent Runtime:**
+- [ ] 7.4 Tool registry - wrap services as callable tools
+- [ ] 7.5 Agent core loop - LLM reasoning + tool dispatch
+- [ ] 7.6 Context manager - session state + memory
+
+**Generative Widget System:**
+- [ ] [7.7](roadmap/chatbox-module.md) Widget sandbox - iframe + security model
+- [ ] [7.8](roadmap/chatbox-module.md) Widget registry - CRUD + lifecycle
+- [ ] [7.9](roadmap/chatbox-module.md) Widget generation - template → LLM
+- [ ] [7.10](roadmap/chatbox-module.md) Human-agent interaction - context, right-click, focus
+
+**Validation & CLI:**
+- [ ] 7.11 txt to tool-calling validation
+- [ ] 7.12 Strategy pipeline agent validation
+- [ ] 7.13 ML pipeline agent validation
+- [ ] 7.14 Basic CLI tools and skills instruction
 
 ## 8. Optional Features
 
 Enhancements and additional modules.
 
 - [ ] 8.1 Historical orders analysis module
-- [ ] [8.3](roadmap/chatbox-module.md) Chatbox module
 
 ## Design Concerns
 

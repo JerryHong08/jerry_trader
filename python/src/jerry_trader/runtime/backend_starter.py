@@ -468,6 +468,7 @@ class JerryTraderBackendStarter:
                     session_id=self.session_id,
                     ws_manager=self._shared_ws_manager,
                     redis_config=role_cfg.get("redis"),
+                    clickhouse_config=role_cfg.get("clickhouse"),
                     bars_builder=self.bars_builder,
                 )
             else:

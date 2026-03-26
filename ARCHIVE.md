@@ -23,6 +23,10 @@ Stateful workers and use-case implementations.
 - [x] 3.10 Fix factor bootstrap race condition (wait_for_bootstrap vs pre_register)
 - [x] 3.11 Fix ClickHouse client config for ChartBFF (custom_bar_backfill)
 
+- [x] 3.12 Fix concurrent ClickHouse queries in bar_query_service (per-thread clients)
+- [x] 3.13 Fix tick-based factor bootstrap sent before ready (tick_bootstrap_events)
+
+
 ## 5. Frontend
 React/TradingView UI modules and UX improvements.
 
@@ -33,6 +37,13 @@ React/TradingView UI modules and UX improvements.
 - [x] 5.7 Fix FactorChart position reset on real-time updates
 - [x] 5.8 Fix chart timespan switch: newest bar covers last bar's open/high/low
 - [~] 5.3 Abstract all search boxes into unified component
+
+
+## 6. Orchestration
+
+System-wide coordination and backtest infrastructure.
+
+- [x] [6.3](roadmap/factor-realtime-analysis.md) Factor bootstrap sync to trades_bootstrap
 
 ## 8. Optional Features
 Enhancements and additional modules.

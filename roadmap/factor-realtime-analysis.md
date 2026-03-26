@@ -78,10 +78,13 @@
    - `FactorChartModule.tsx` uses actual `moduleId` prop as key
    - **Result**: Real-time factor updates never match stored data
 
-2. **Factor Bootstrap Timing**
-   - FactorEngine waits for BarsBuilder bootstrap
-   - But factor bootstrap doesn't wait for trades_backfill
-   - Race condition: tick indicators may miss historical trades
+2. ~~**Factor Bootstrap Timing**~~ ✅ FIXED
+   - ~~FactorEngine waits for BarsBuilder bootstrap~~
+   - ~~But factor bootstrap doesn't wait for trades_backfill~~
+   - ~~Race condition: tick indicators may miss historical trades~~
+   - **Fix**: Added `_tick_bootstrap_events` for tick-based factors
+   - `_run_bootstrap` now waits for `_on_bootstrap_trades` callback
+   - REST API and WebSocket consumer wait for both bar and tick bootstrap
 
 3. **Sub-Follower Chart Mode**
    - Factor chart should auto-sync timeframe with main chart

@@ -8,6 +8,7 @@ platform/storage/clickhouse.py and can be used independently by other services
 """
 
 import logging
+import threading
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set
 
@@ -25,6 +26,9 @@ from jerry_trader.shared.logging.logger import setup_logger
 from jerry_trader.shared.time.timezone import ms_to_readable
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
+
+# Thread-local storage for per-thread ClickHouse clients
+_thread_local = threading.local()
 
 
 class ClickHouseClient:
@@ -79,17 +83,29 @@ class ClickHouseClient:
 
         # Store config for per-thread client creation (thread-safe)
         self._ch_config = clickhouse_config
-        self.ch_client = get_clickhouse_client(clickhouse_config)
-        if not self.ch_client:
+
+        # Test connectivity once at startup (creates temporary client)
+        test_client = get_clickhouse_client(clickhouse_config)
+        if test_client:
+            test_client.close()
+            logger.info(
+                f"ClickHouseClient initialized: session_id={self.session_id}, "
+                f"run_mode={self.run_mode}, clickhouse=connected"
+            )
+        else:
             logger.info(
                 "ClickHouse unavailable — bar queries fall back to ChartDataService"
             )
 
-        logger.info(
-            f"ClickHouseClient initialized: session_id={self.session_id}, "
-            f"run_mode={self.run_mode}, "
-            f"clickhouse={'connected' if self.ch_client else 'unavailable'}"
-        )
+    def _get_thread_ch_client(self):
+        """Get or create a per-thread ClickHouse client.
+
+        Per-thread clients prevent "concurrent queries within same session" errors
+        when multiple threads query ClickHouse simultaneously.
+        """
+        if not hasattr(_thread_local, "ch_client") or _thread_local.ch_client is None:
+            _thread_local.ch_client = get_clickhouse_client(self._ch_config)
+        return _thread_local.ch_client
 
     def _append_partial_bar(
         self,
@@ -204,7 +220,8 @@ class ClickHouseClient:
         limit: int = 5000,
     ) -> Optional[Dict]:
         """Query completed bars from ClickHouse. Returns ChartDataService-format dict or None."""
-        if not self.ch_client:
+        ch_client = self._get_thread_ch_client()
+        if not ch_client:
             return None
 
         from jerry_trader import clock
@@ -240,9 +257,7 @@ class ClickHouseClient:
             * 1000
         )
 
-        return query_ohlcv_bars(
-            self.ch_client, ticker, builder_tf, start_ms, end_ms, limit
-        )
+        return query_ohlcv_bars(ch_client, ticker, builder_tf, start_ms, end_ms, limit)
 
     _CUSTOM_BAR_BACKFILL_TFS: list = [
         ("1m", "1m"),
@@ -315,9 +330,10 @@ class ClickHouseClient:
         )
         return total
 
-    def tickers_with_bars_today(self) -> Set[str]:
+    def tickers_with_bars_today(self) -> set[str]:
         """Return all tickers that have bars in ClickHouse for today (ET)."""
-        if not self.ch_client:
+        ch_client = self._get_thread_ch_client()
+        if not ch_client:
             return set()
 
         from datetime import timedelta
@@ -331,7 +347,7 @@ class ClickHouseClient:
         start_ms = int(today_start.timestamp() * 1000)
         end_ms = int(tomorrow_start.timestamp() * 1000)
 
-        tickers = query_tickers_with_bars_today(self.ch_client, start_ms, end_ms)
+        tickers = query_tickers_with_bars_today(ch_client, start_ms, end_ms)
         if tickers:
             logger.info(
                 f"tickers_with_bars_today: found {len(tickers)} tickers "
@@ -339,11 +355,10 @@ class ClickHouseClient:
             )
         return tickers
 
-    def get_last_bar_start(
-        self, ticker: str, timeframe: str, date: str
-    ) -> Optional[int]:
+    def get_last_bar_start(self, ticker: str, timeframe: str, date: str) -> int | None:
         """Return the last bar_start (ms) for a ticker+timeframe on a specific date."""
-        if not self.ch_client:
+        ch_client = self._get_thread_ch_client()
+        if not ch_client:
             return None
 
         start_dt = datetime.strptime(date, "%Y%m%d")
@@ -352,7 +367,7 @@ class ClickHouseClient:
         end_ms = int(end_dt.timestamp() * 1000)
 
         last_start = query_last_bar_start(
-            self.ch_client, ticker, timeframe, start_ms, end_ms
+            ch_client, ticker, timeframe, start_ms, end_ms
         )
         if last_start:
             logger.debug(
@@ -366,10 +381,9 @@ class ClickHouseClient:
         return last_start
 
     def cleanup(self):
-        """Clean up resources on shutdown."""
-        if self.ch_client:
-            try:
-                self.ch_client.close()
-            except Exception:
-                pass
+        """Clean up resources on shutdown.
+
+        Note: Per-thread ClickHouse clients are automatically garbage collected
+        when threads exit. We don't track them individually for cleanup.
+        """
         logger.info("ClickHouseClient resources cleaned up")

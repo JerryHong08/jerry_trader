@@ -185,13 +185,9 @@ class ChartBFF:
         # ── FactorStorage (for factor queries) ───────────────────────────
         from jerry_trader.services.factor.factor_storage import FactorStorage
 
-        self.factor_storage = (
-            FactorStorage(
-                ch_client=self.ch_client.ch_client,
-                session_id=self.session_id,
-            )
-            if self.ch_client and self.ch_client.ch_client
-            else None
+        self.factor_storage = FactorStorage(
+            session_id=self.session_id,
+            clickhouse_config=clickhouse_config,
         )
 
         # Optional reference to FactorEngine (same process).
@@ -403,9 +399,15 @@ class ChartBFF:
                     status_code=503,
                 )
 
+            # Pre-register bootstrap if FactorEngine exists (ensures wait_for_bootstrap
+            # has an event to wait on even if this REST call happens before WebSocket
+            # subscription triggers FactorEngine to start processing)
+            if self._factor_engine is not None:
+                self._factor_engine.pre_register_bootstrap(ticker_upper)
+
             # Wait for factor bootstrap before querying
             if self._factor_engine is not None:
-                self._factor_engine.wait_for_bootstrap(ticker_upper, timeout=10.0)
+                self._factor_engine.wait_for_bootstrap(ticker_upper, timeout=30.0)
 
             factor_names = factors.split(",") if factors else None
 
@@ -736,28 +738,31 @@ class ChartBFF:
             factor_subscriptions.add(sub_key)
             logger.info(f"📊 Subscribed to factors for {sub_key}")
 
-            # Notify FactorEngine to add this symbol with timeframe for bar-based factors
-            if timeframe != "tick":
-                # Pre-register bootstrap Event so that REST requests arriving
-                # before FactorEngine picks up the Redis message will block on
-                # wait_for_bootstrap instead of serving stale data.
-                if self._factor_engine is not None:
-                    self._factor_engine.pre_register_bootstrap(symbol)
+            # Pre-register bootstrap Event so that REST requests arriving
+            # before FactorEngine picks up the Redis message will block on
+            # wait_for_bootstrap instead of serving stale data.
+            # This applies to BOTH tick-based and bar-based factors.
+            if self._factor_engine is not None:
+                self._factor_engine.pre_register_bootstrap(symbol)
 
-                try:
-                    self.r.xadd(
-                        self.FACTOR_TASKS_STREAM,
-                        {
-                            "action": "add",
-                            "ticker": symbol,
-                            "timeframes": timeframe,
-                        },
-                    )
-                    logger.debug(
-                        f"📥 XADD factor_tasks: add {symbol} timeframe={timeframe}"
-                    )
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to XADD add {symbol}: {e}")
+            # Notify FactorEngine to add this symbol
+            # For bar-based factors, include the timeframe for indicator computation.
+            # For tick-based factors, use empty timeframes (FactorEngine uses defaults).
+            try:
+                timeframes = timeframe if timeframe != "tick" else ""
+                self.r.xadd(
+                    self.FACTOR_TASKS_STREAM,
+                    {
+                        "action": "add",
+                        "ticker": symbol,
+                        "timeframes": timeframes,
+                    },
+                )
+                logger.debug(
+                    f"📥 XADD factor_tasks: add {symbol} timeframes={timeframes}"
+                )
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to XADD add {symbol}: {e}")
 
     async def _handle_factor_unsubscribe(
         self,
@@ -817,6 +822,27 @@ class ChartBFF:
             symbol: Ticker symbol
             timeframe: Timeframe for factors (e.g., "1m", "5m", "tick")
         """
+        # Wait for factor bootstrap to complete before consuming real-time updates
+        # This prevents receiving real-time factors before historical bootstrap is ready
+        if self._factor_engine is not None:
+            logger.debug(
+                f"_consume_factor_stream - {symbol}/{timeframe}: waiting for bootstrap"
+            )
+            loop = asyncio.get_running_loop()
+            # Run wait_for_bootstrap in thread pool since it uses threading.Event
+            ok = await loop.run_in_executor(
+                None,
+                lambda: self._factor_engine.wait_for_bootstrap(symbol, timeout=30.0),
+            )
+            if ok:
+                logger.info(
+                    f"_consume_factor_stream - {symbol}/{timeframe}: bootstrap complete, starting consumption"
+                )
+            else:
+                logger.warning(
+                    f"_consume_factor_stream - {symbol}/{timeframe}: bootstrap wait timed out, starting anyway"
+                )
+
         channel = f"factors:{symbol}:{timeframe}"
         pubsub = self.r.pubsub()
 

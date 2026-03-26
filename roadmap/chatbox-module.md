@@ -1,4 +1,4 @@
-# Task: Generative Agent System + Dynamic UI (8.3)
+# Task: Generative Agent System + Dynamic UI (7.7-7.10)
 
 ## Context
 
@@ -287,33 +287,33 @@ interface WidgetRegistry {
 
 ## Plan
 
-### Phase 1: Foundation (2-3 weeks)
+### Phase 1: Foundation → Task 7.7 + 7.8 (2-3 weeks)
 
-**Backend:**
+**7.7 Widget Sandbox:**
+1. Iframe sandbox component with CSP
+2. PostMessage API bridge (parent ↔ child)
+3. Permission system for API access
+4. Code validation service (TypeScript compiler)
+
+**7.8 Widget Registry:**
 1. Widget schema definition
-2. Code validation service (TypeScript compiler API)
-3. Sandbox execution environment
-4. Widget registry API (CRUD + lifecycle)
+2. Registry API (CRUD + lifecycle)
+3. Widget storage (DB + code repo)
+4. Version control for widgets
 
-**Frontend:**
-1. Sandboxed iframe component
-2. PostMessage API bridge
-3. Widget registry store
-4. Basic widget types (chart, table, text)
-
-### Phase 2: Agent Integration (2 weeks)
+### Phase 2: Generation Engine → Task 7.9 (2 weeks)
 
 1. Template-based code generation
-2. Agent BFF endpoints for widget creation
+2. LLM integration for natural language → widget
 3. Intent → widget mapping
 4. Review/approval flow
 
-### Phase 3: Advanced Features (2-3 weeks)
+### Phase 3: Interaction System → Task 7.10 (2 weeks)
 
-1. LLM-based generation (beyond templates)
-2. Widget-to-widget communication
-3. Auto-layout suggestions
-4. Usage analytics → auto-improvement
+1. Context system (symbol, timeframe, selection)
+2. Right-click contextual actions
+3. Focus tracking (what agent is "watching")
+4. Natural language chat interface
 
 ### Phase 4: Autonomous Mode (Future)
 
@@ -322,40 +322,82 @@ interface WidgetRegistry {
 3. A/B tests widget layouts
 4. Self-modifies based on feedback
 
-## File Structure
+## File Structure by Task
 
+### Task 7.7 - Widget Sandbox
+```
+frontend/src/
+  components/
+    widgets/
+      Sandbox.tsx         # Iframe with CSP sandbox
+      WidgetError.tsx     # Error boundary for widgets
+  hooks/
+    useSandbox.ts         # PostMessage API bridge
+  lib/
+    widgetApi.ts          # Sandbox API client
+
+python/src/jerry_trader/agent/
+  widgets/
+    validator.py          # TypeScript code validation
+    sandbox.py            # Server-side sandbox execution
+```
+
+### Task 7.8 - Widget Registry
 ```
 python/src/jerry_trader/agent/
   widgets/
     __init__.py
     registry.py           # WidgetRegistry class
-    validator.py          # TypeScript validation
-    sandbox.py            # Sandbox execution
-    generator.py          # Code generation
-    templates/
-      __init__.py
-      chart.py            # Chart widget templates
-      table.py            # Table widget templates
-      control.py          # Control widget templates
-      container.py        # Container templates
+    models.py             # Widget pydantic models
+    storage.py            # DB + file storage
 
 frontend/src/
   components/
     widgets/
-      Sandbox.tsx         # Iframe sandbox
-      WidgetFrame.tsx     # Wrapper (title, controls, resize)
-      WidgetRegistry.tsx  # Discovery/browse UI
-      WidgetEditor.tsx    # Code editor for advanced users
-      generated/          # Generated widgets (gitignored)
-  hooks/
-    useWidgetRegistry.ts
-    useSandbox.ts
-    useWidgetGeneration.ts
+      WidgetFrame.tsx     # Wrapper (drag, resize, delete)
+      WidgetRegistry.tsx  # Discovery UI
+      WidgetGallery.tsx   # Browse existing widgets
   stores/
     widgetRegistryStore.ts
-    sandboxStore.ts
-  lib/
-    widgetApi.ts          # PostMessage API client
+```
+
+### Task 7.9 - Widget Generation
+```
+python/src/jerry_trader/agent/
+  widgets/
+    generator.py          # Code generation engine
+    templates/
+      __init__.py
+      chart.py            # Chart templates
+      table.py            # Table templates
+      control.py          # Control templates
+      container.py        # Container templates
+    llm/
+      prompts.py          # LLM prompts for generation
+      parser.py           # Parse LLM output → widget
+
+frontend/src/
+  components/
+    widgets/
+      WidgetEditor.tsx    # Code editor (advanced)
+      GenerationPanel.tsx # Natural language input
+  hooks/
+    useWidgetGeneration.ts
+```
+
+### Task 7.10 - Human-Agent Interaction
+```
+frontend/src/
+  components/
+    agent/
+      AgentChat.tsx       # Natural language interface
+      ContextPanel.tsx    # Shows what agent is "watching"
+      ContextMenu.tsx     # Right-click agent actions
+  stores/
+    agentContextStore.ts  # Focus, selection, sync state
+  hooks/
+    useAgentContext.ts    # Context provider
+    useAgentActions.ts    # Contextual action hooks
 ```
 
 ## Technical Stack

@@ -125,11 +125,16 @@ class FactorEngine:
             decode_responses=True,
         )
 
-        # ClickHouse storage - create per-thread clients to avoid concurrent query issues
+        # ClickHouse storage - uses per-thread clients to avoid concurrent query issues
         self._ch_config = clickhouse_config
-        ch_client = get_clickhouse_client(clickhouse_config)
-        self.storage = FactorStorage(ch_client, session_id) if ch_client else None
-        self._session_id = session_id  # stored for creating per-thread clients
+        self.storage = (
+            FactorStorage(
+                session_id=session_id,
+                clickhouse_config=clickhouse_config,
+            )
+            if clickhouse_config
+            else None
+        )
 
         # Tick manager (shared with ChartBFF/BarsBuilder)
         self.ws_manager = ws_manager
@@ -161,6 +166,8 @@ class FactorEngine:
         self._bootstrap_events: dict[str, threading.Event] = {}
         self._bootstrap_done: set[str] = set()
         self._bars_builder = None  # set by backend_starter via set_bars_builder()
+        # Track tick bootstrap completion per ticker (callback from trades_backfill)
+        self._tick_bootstrap_events: dict[str, threading.Event] = {}
 
         logger.info(
             f"FactorEngine initialized: session={session_id}, default_timeframe={self._default_timeframe}, "
@@ -227,9 +234,11 @@ class FactorEngine:
             )
             self.ticker_states[symbol] = state
 
-        # Create bootstrap Event
+        # Create bootstrap Events
         if symbol not in self._bootstrap_events:
             self._bootstrap_events[symbol] = threading.Event()
+        if symbol not in self._tick_bootstrap_events:
+            self._tick_bootstrap_events[symbol] = threading.Event()
 
         # Subscribe to bar pub/sub channels for all timeframes
         for tf in timeframes:
@@ -343,6 +352,12 @@ class FactorEngine:
         logger.debug(
             f"_on_bootstrap_trades - {symbol}: last_bootstrap_trade_ms set to {max_ts_ms}"
         )
+
+        # Signal that tick bootstrap is complete for this symbol
+        tick_evt = self._tick_bootstrap_events.get(symbol)
+        if tick_evt:
+            tick_evt.set()
+            logger.debug(f"_on_bootstrap_trades - {symbol}: tick bootstrap event set")
 
         # Batch write tick-based factor snapshots to ClickHouse
         if snapshots and self.storage:
@@ -471,7 +486,22 @@ class FactorEngine:
             # 2. Bar-based indicator warmup from ClickHouse bars
             self._bootstrap_bars(symbol)
 
-            # 3. Tick bootstrap already happened via _on_bootstrap_trades callback
+            # 3. Wait for tick bootstrap to complete (via _on_bootstrap_trades callback)
+            # This ensures tick indicators are fully warmed up before we start
+            # processing real-time ticks
+            tick_evt = self._tick_bootstrap_events.get(symbol)
+            if tick_evt:
+                logger.info(f"_run_bootstrap - {symbol}: waiting for tick bootstrap")
+                if not tick_evt.wait(timeout=30.0):
+                    # Timeout - no historical trades received, set event anyway
+                    # so we don't block forever
+                    logger.warning(
+                        f"_run_bootstrap - {symbol}: tick bootstrap timed out, "
+                        "proceeding without tick warmup"
+                    )
+                    tick_evt.set()
+                else:
+                    logger.info(f"_run_bootstrap - {symbol}: tick bootstrap complete")
 
             logger.info(f"_run_bootstrap - {symbol}: bootstrap complete")
         except Exception as e:
@@ -483,26 +513,72 @@ class FactorEngine:
                 evt.set()
 
     def pre_register_bootstrap(self, symbol: str) -> None:
-        """Pre-create a bootstrap Event for this ticker.
+        """Pre-create bootstrap Events for this ticker.
 
         Called by ChartBFF BEFORE the Redis XADD so that any concurrent
         REST request will block on wait_for_bootstrap.
         """
         if symbol not in self._bootstrap_events:
             self._bootstrap_events[symbol] = threading.Event()
-            logger.debug(f"pre_register_bootstrap - {symbol}: Event pre-created")
+            logger.debug(
+                f"pre_register_bootstrap - {symbol}: bootstrap event pre-created"
+            )
+        if symbol not in self._tick_bootstrap_events:
+            self._tick_bootstrap_events[symbol] = threading.Event()
+            logger.debug(
+                f"pre_register_bootstrap - {symbol}: tick bootstrap event pre-created"
+            )
 
     def wait_for_bootstrap(self, symbol: str, timeout: float = 10.0) -> bool:
         """Wait until factor bootstrap completes for this ticker.
 
-        Returns True if bootstrap completed, False if timed out.
+        Waits for both bar-based and tick-based bootstrap to complete.
+        Returns True if bootstrap completed, False if timed out or bootstrap
+        was not pre-registered (indicating FactorEngine hasn't started processing).
         """
         if symbol in self._bootstrap_done:
             return True
+
+        # Check if bootstrap was pre-registered (events exist)
+        # If not, FactorEngine hasn't started processing this ticker yet
         evt = self._bootstrap_events.get(symbol)
-        if evt is None:
-            return True
-        return evt.wait(timeout=timeout)
+        tick_evt = self._tick_bootstrap_events.get(symbol)
+
+        if evt is None and tick_evt is None:
+            # Bootstrap not pre-registered yet, wait briefly for it to appear
+            logger.debug(
+                f"wait_for_bootstrap - {symbol}: events not created yet, waiting..."
+            )
+            for _ in range(50):  # 5 seconds total
+                time.sleep(0.1)
+                evt = self._bootstrap_events.get(symbol)
+                tick_evt = self._tick_bootstrap_events.get(symbol)
+                if evt is not None or tick_evt is not None:
+                    break
+            if evt is None and tick_evt is None:
+                logger.warning(
+                    f"wait_for_bootstrap - {symbol}: events never created, returning False"
+                )
+                return False
+
+        # Wait for bar bootstrap
+        if evt is not None:
+            if not evt.wait(timeout=timeout):
+                logger.warning(
+                    f"wait_for_bootstrap - {symbol}: bar bootstrap timed out"
+                )
+                return False
+
+        # Wait for tick bootstrap (trade observer callback)
+        if tick_evt is not None:
+            if not tick_evt.wait(timeout=timeout):
+                logger.warning(
+                    f"wait_for_bootstrap - {symbol}: tick bootstrap timed out"
+                )
+                return False
+
+        logger.debug(f"wait_for_bootstrap - {symbol}: bootstrap complete")
+        return True
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Bar Subscription (Redis pub/sub)

@@ -1,12 +1,16 @@
 """ClickHouse storage adapter for factors."""
 
 import logging
-from typing import Any
+import threading
+from typing import Any, Dict, Optional
 
 from jerry_trader.domain.factor import FactorSnapshot
 from jerry_trader.shared.logging.logger import setup_logger
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
+
+# Thread-local storage for per-thread ClickHouse clients
+_thread_local = threading.local()
 
 
 class FactorStorage:
@@ -14,20 +18,59 @@ class FactorStorage:
 
     Handles persistence of FactorSnapshot to ClickHouse with proper
     schema management and batch writing.
+
+    Uses per-thread ClickHouse clients to avoid "concurrent queries within
+    same session" errors when multiple threads access ClickHouse simultaneously.
     """
 
     TABLE_NAME = "factors"
 
-    def __init__(self, ch_client: Any, session_id: str):
-        """Initialize storage with ClickHouse client and session ID.
+    def __init__(
+        self,
+        session_id: str,
+        ch_client: Any = None,
+        clickhouse_config: Optional[Dict[str, Any]] = None,
+    ):
+        """Initialize storage with ClickHouse client/config and session ID.
 
         Args:
-            ch_client: ClickHouse client from clickhouse_connect
             session_id: Session identifier for this run
+            ch_client: ClickHouse client from clickhouse_connect (legacy, optional)
+            clickhouse_config: ClickHouse connection config for per-thread clients
         """
-        self.ch_client = ch_client
+        self._ch_config = clickhouse_config
+        self._shared_client = ch_client  # Legacy support
         self.session_id = session_id
+
+        # Test connectivity once at startup (creates temporary client)
+        if self._ch_config:
+            from jerry_trader.platform.storage.clickhouse import get_clickhouse_client
+
+            test_client = get_clickhouse_client(self._ch_config)
+            if test_client:
+                test_client.close()
+                logger.info("FactorStorage: ClickHouse connectivity verified")
+            else:
+                logger.warning("FactorStorage: ClickHouse unavailable")
+
         self._ensure_table()
+
+    def _get_thread_ch_client(self):
+        """Get or create a per-thread ClickHouse client.
+
+        Per-thread clients prevent "concurrent queries within same session" errors
+        when multiple threads query ClickHouse simultaneously.
+        """
+        # If we have a shared client (legacy mode), use it
+        if self._shared_client:
+            return self._shared_client
+
+        # Otherwise use per-thread clients
+        if not hasattr(_thread_local, "ch_client") or _thread_local.ch_client is None:
+            from jerry_trader.platform.storage.clickhouse import get_clickhouse_client
+
+            _thread_local.ch_client = get_clickhouse_client(self._ch_config)
+        return _thread_local.ch_client
 
     def _ensure_table(self) -> None:
         """Verify factors table exists.
@@ -35,13 +78,14 @@ class FactorStorage:
         Note: Table should be created via sql/clickhouse_factors.sql
         This method only checks existence and logs a warning if missing.
         """
-        if not self.ch_client:
+        ch_client = self._get_thread_ch_client()
+        if not ch_client:
             logger.warning("FactorStorage: No ClickHouse client, skipping table check")
             return
 
         try:
             # Check if table exists
-            result = self.ch_client.query(
+            result = ch_client.query(
                 f"EXISTS TABLE {self.TABLE_NAME}",
             )
             exists = result.result_rows[0][0] if result.result_rows else 0
@@ -68,7 +112,8 @@ class FactorStorage:
         Returns:
             Number of factor rows written
         """
-        if not self.ch_client:
+        ch_client = self._get_thread_ch_client()
+        if not ch_client:
             return 0
 
         if not snapshot.factors:
@@ -87,7 +132,7 @@ class FactorStorage:
         ]
 
         try:
-            self.ch_client.insert(
+            ch_client.insert(
                 self.TABLE_NAME,
                 data=rows,
                 column_names=[
@@ -117,7 +162,8 @@ class FactorStorage:
         Returns:
             Total number of factor rows written
         """
-        if not self.ch_client or not snapshots:
+        ch_client = self._get_thread_ch_client()
+        if not ch_client or not snapshots:
             return 0
 
         rows = []
@@ -138,7 +184,7 @@ class FactorStorage:
             return 0
 
         try:
-            self.ch_client.insert(
+            ch_client.insert(
                 self.TABLE_NAME,
                 data=rows,
                 column_names=[
@@ -176,7 +222,8 @@ class FactorStorage:
         Returns:
             List of dicts with ticker, timeframe, timestamp_ns, factor_name, factor_value
         """
-        if not self.ch_client:
+        ch_client = self._get_thread_ch_client()
+        if not ch_client:
             return []
 
         try:
@@ -213,7 +260,7 @@ class FactorStorage:
                 ORDER BY timestamp_ns ASC
             """
 
-            result = self.ch_client.query(query, parameters=params)
+            result = ch_client.query(query, parameters=params)
 
             return [
                 {

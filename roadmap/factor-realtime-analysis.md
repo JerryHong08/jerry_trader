@@ -91,10 +91,13 @@
    - Currently manual timeframe selector
    - Switching main chart timeframe doesn't update factor chart
 
-4. **Trades Backfill Triggering**
-   - Every timeframe switch triggers trades_backfill
-   - Should only trigger on symbol subscribe/unsubscribe
-   - Wastes resources and causes unnecessary data fetches
+4. ~~**Trades Backfill Triggering**~~ ✅ FIXED
+   - ~~Every timeframe switch triggers trades_backfill~~
+   - ~~Should only trigger on symbol subscribe/unsubscribe~~
+   - ~~Wastes resources and causes unnecessary data fetches~~
+   - **Fix**: Changed `active_tickers` to `_active_timeframes: Dict[str, set]`
+   - `_add_ticker` only triggers `trades_backfill` for NEW tickers
+   - `_remove_ticker` only fully unsubscribes when ALL timeframes are removed
 
 ## Critical Path to Working Real-Time Factors
 

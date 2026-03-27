@@ -309,7 +309,7 @@ class ChartBFF:
             # is updated in the WS handler.
             if self._bars_builder is not None and ch_tf in self.BARS_BUILDER_TIMEFRAMES:
                 ready = self._bars_builder.wait_for_bootstrap(
-                    ticker_upper, timeout=10.0
+                    ticker_upper, timeout=30.0
                 )
                 if not ready:
                     logger.warning(
@@ -407,7 +407,7 @@ class ChartBFF:
 
             # Wait for factor bootstrap before querying
             if self._factor_engine is not None:
-                self._factor_engine.wait_for_bootstrap(ticker_upper, timeout=30.0)
+                self._factor_engine.wait_for_bootstrap(ticker_upper, timeout=60.0)
 
             factor_names = factors.split(",") if factors else None
 
@@ -832,7 +832,7 @@ class ChartBFF:
             # Run wait_for_bootstrap in thread pool since it uses threading.Event
             ok = await loop.run_in_executor(
                 None,
-                lambda: self._factor_engine.wait_for_bootstrap(symbol, timeout=30.0),
+                lambda: self._factor_engine.wait_for_bootstrap(symbol, timeout=60.0),
             )
             if ok:
                 logger.info(

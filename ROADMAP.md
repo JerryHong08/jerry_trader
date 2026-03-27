@@ -21,6 +21,7 @@ Performance-critical components rewritten in Rust.
 Stateful workers and use-case implementations.
 
 - [-] 3.2 StateEngine Python wrappers and integration
+- [ ] [3.15](roadmap/event-bus-architecture.md) EventBus for service communication (replace callbacks)
 - [ ] 3.4 Real-time risk management engine with position limits
 - [ ] 3.5 Risk management rules and drawdown checks
 - [ ] 3.6 Risk engine integration with order execution
@@ -46,7 +47,6 @@ React/TradingView UI modules and UX improvements.
 
 System-wide coordination and backtest infrastructure.
 
-- [ ] [6.1](roadmap/factor-realtime-analysis.md) Decouple trades_backfill from timeframe switch events
 - [ ] 6.2 Configurable timeframe switch and bootstrap computation
 - [ ] 6.4 Tickers pre-location fitting strategy/conditions
 - [ ] 6.5 Strategy pre-locate orchestrator with auto-sequenced jumps
@@ -89,7 +89,6 @@ Enhancements and additional modules.
 Architectural decisions needing discussion.
 
 - [ ] config_builder.py merge with config.py in platform/config/
-- [ ] Event bus architecture for Stage 4
 - [ ] Domain layer empty placeholders strategy
 
 ## Open Issues
@@ -97,3 +96,5 @@ Architectural decisions needing discussion.
 Known issues and bugs requiring attention.
 
 _Inbox empty - add new issues as they arise_
+
+- [ ] Maybe we should constrain what timeframes of each bar based factor need. e.g. for ema20 it may only need 10s and 1m bar.

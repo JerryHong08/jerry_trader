@@ -168,6 +168,9 @@ class FactorEngine:
         self._bars_builder = None  # set by backend_starter via set_bars_builder()
         # Track tick bootstrap completion per ticker (callback from trades_backfill)
         self._tick_bootstrap_events: dict[str, threading.Event] = {}
+        # Track timeframes that failed bootstrap (no bars found) so we can retry
+        # when bar backfill completes. Structure: {symbol: {timeframe1, timeframe2, ...}}
+        self._failed_bootstrap_timeframes: dict[str, set[str]] = {}
 
         logger.info(
             f"FactorEngine initialized: session={session_id}, default_timeframe={self._default_timeframe}, "
@@ -291,6 +294,55 @@ class FactorEngine:
         self._bars_builder = bars_builder
         bars_builder.register_trade_observer(self._on_bootstrap_trades)
 
+    def _on_bar_backfill(self, symbol: str, timeframe: str, bar_count: int) -> None:
+        """Callback when bar backfill completes for a timeframe.
+
+        Called by ClickHouseClient.custom_bar_backfill after bars are written.
+        If this timeframe previously failed bootstrap (no bars found), retry
+        the bootstrap now that bars are available.
+
+        Args:
+            symbol: Ticker symbol
+            timeframe: Timeframe that was backfilled
+            bar_count: Number of bars written
+        """
+        # Check if this timeframe failed bootstrap for this symbol
+        failed_tfs = self._failed_bootstrap_timeframes.get(symbol, set())
+        if timeframe not in failed_tfs:
+            return
+
+        logger.info(
+            f"_on_bar_backfill - {symbol}/{timeframe}: {bar_count} bars backfilled, "
+            f"retrying bootstrap"
+        )
+
+        # Get the timeframe state
+        state = self.ticker_states.get(symbol)
+        if not state:
+            logger.debug(
+                f"_on_bar_backfill - {symbol}/{timeframe}: TickerState not found, skipping"
+            )
+            return
+
+        tf_state = state.timeframe_states.get(timeframe)
+        if not tf_state:
+            logger.debug(
+                f"_on_bar_backfill - {symbol}/{timeframe}: TimeframeState not found, skipping"
+            )
+            return
+
+        # Retry bootstrap for this timeframe
+        self._bootstrap_bars_for_timeframe(symbol, timeframe, tf_state)
+
+        # If bootstrap succeeded, remove from failed set
+        # (it will have bars now, so the retry will succeed)
+        failed_tfs.discard(timeframe)
+        if not failed_tfs:
+            self._failed_bootstrap_timeframes.pop(symbol, None)
+            logger.info(
+                f"_on_bar_backfill - {symbol}/{timeframe}: bootstrap retry complete"
+            )
+
     def _on_bootstrap_trades(self, symbol: str, trades: list[tuple]) -> None:
         """Callback from BarsBuilder.trades_backfill with historical trades (UTC).
 
@@ -390,6 +442,10 @@ class FactorEngine:
             logger.info(
                 f"_bootstrap_bars - {symbol}/{timeframe}: no bars found for warmup"
             )
+            # Track this timeframe as failed so we can retry when bar backfill completes
+            if symbol not in self._failed_bootstrap_timeframes:
+                self._failed_bootstrap_timeframes[symbol] = set()
+            self._failed_bootstrap_timeframes[symbol].add(timeframe)
             return
 
         bars = result["bars"]
@@ -785,9 +841,9 @@ class FactorEngine:
         # Skip processing until bootstrap is complete to ensure
         # tick indicators are warmed up with historical trades
         if symbol not in self._bootstrap_done:
-            logger.debug(
-                f"_on_tick: skipping tick for {symbol} - bootstrap not complete"
-            )
+            # logger.debug(
+            #     f"_on_tick: skipping tick for {symbol} - bootstrap not complete"
+            # )
             return
 
         with self._states_lock:

@@ -521,6 +521,14 @@ class JerryTraderBackendStarter:
             self.chart_bff.set_factor_engine(self.factor_engine)
             logger.info("Wired ChartBFF ← FactorEngine (bootstrap wait)")
 
+        # Wire FactorEngine ← ChartBFF ClickHouseClient for bar backfill observer
+        # This allows FactorEngine to retry bootstrap when bars become available
+        if self.chart_bff and self.factor_engine:
+            self.chart_bff.ch_client.register_bar_backfill_observer(
+                self.factor_engine._on_bar_backfill
+            )
+            logger.info("Wired FactorEngine ← ChartBFF (bar backfill observer)")
+
         if "AgentBFF" in self.roles:
             from jerry_trader.apps.news_app.server import AgentBFF
 

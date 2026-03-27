@@ -209,7 +209,10 @@ class BarsBuilderService:
         )
 
         # ── Runtime state ────────────────────────────────────────────
-        self.active_tickers: set = set()
+        # Track active timeframes per ticker to prevent unnecessary trades_backfill
+        # when switching timeframes for the same ticker.
+        # Key: ticker, Value: set of active timeframes
+        self._active_timeframes: Dict[str, set] = {}
         self.stream_consumers: Dict[str, Future] = {}
         self._threads: Dict[str, Thread] = {}
         self._running = True
@@ -353,10 +356,22 @@ class BarsBuilderService:
                         if not symbol:
                             continue
 
+                        # Parse timeframes from message (comma-separated)
+                        timeframes_str = msg_data.get("timeframes", "")
+                        timeframes = (
+                            [
+                                tf.strip()
+                                for tf in timeframes_str.split(",")
+                                if tf.strip()
+                            ]
+                            if timeframes_str
+                            else []
+                        )
+
                         if action == "add":
-                            self._add_ticker(symbol)
+                            self._add_ticker(symbol, timeframes)
                         elif action == "remove":
-                            self._remove_ticker(symbol)
+                            self._remove_ticker(symbol, timeframes)
 
                         self.redis_client.xack(
                             self.STREAM_NAME, self.CONSUMER_GROUP, msg_id
@@ -373,98 +388,165 @@ class BarsBuilderService:
     # Ticker management
     # ════════════════════════════════════════════════════════════════════
 
-    def _add_ticker(self, symbol: str) -> None:
-        if symbol in self.active_tickers:
-            return
-        logger.info(f"_add_ticker - {symbol}: subscribing to tick stream")
-        self.active_tickers.add(symbol)
+    def _add_ticker(self, symbol: str, timeframes: list[str] | None = None) -> None:
+        """Add a ticker with specified timeframes.
 
-        # Subscribe to trade events via shared UnifiedTickManager
-        # NOTE: subscribe() is an async coroutine — must schedule on ws_loop
-        logger.debug(f"_add_ticker - {symbol}: calling ws_manager.subscribe()")
-        try:
-            sub_future = asyncio.run_coroutine_threadsafe(
-                self.ws_manager.subscribe(
-                    websocket_client=CLIENT_ID,
-                    symbols=[symbol],
-                    events=["T"],
-                ),
-                self.ws_loop,
+        Only triggers trades_backfill when the ticker has NO active timeframes
+        yet (first subscription). Subsequent timeframe additions just update
+        the tracking without re-triggering bootstrap.
+
+        Args:
+            symbol: Ticker symbol
+            timeframes: List of timeframes being subscribed (for tracking)
+        """
+        timeframes = timeframes or []
+        current_active = self._active_timeframes.get(symbol, set())
+
+        # Check if this is a new ticker (no active timeframes)
+        is_new_ticker = len(current_active) == 0
+
+        if is_new_ticker:
+            logger.info(f"_add_ticker - {symbol}: subscribing to tick stream")
+            # Initialize the timeframe set
+            self._active_timeframes[symbol] = set()
+
+            # Subscribe to trade events via shared UnifiedTickManager
+            # NOTE: subscribe() is an async coroutine — must schedule on ws_loop
+            logger.debug(f"_add_ticker - {symbol}: calling ws_manager.subscribe()")
+            try:
+                sub_future = asyncio.run_coroutine_threadsafe(
+                    self.ws_manager.subscribe(
+                        websocket_client=CLIENT_ID,
+                        symbols=[symbol],
+                        events=["T"],
+                    ),
+                    self.ws_loop,
+                )
+                # Wait for subscribe to complete (with timeout) before creating consumer
+                sub_future.result(timeout=2.0)
+                logger.debug(
+                    f"_add_ticker - {symbol}: ws_manager.subscribe() completed"
+                )
+            except Exception as e:
+                logger.error(
+                    f"_add_ticker - {symbol}: ws_manager.subscribe() failed - {e}"
+                )
+                # Clean up the empty set if subscribe failed
+                self._active_timeframes.pop(symbol, None)
+                return
+
+            # Create async consumer for each trade stream key
+            stream_key = f"T.{symbol}"
+            future = asyncio.run_coroutine_threadsafe(
+                self._consume_stream_key(stream_key, symbol), self.ws_loop
             )
-            # Wait for subscribe to complete (with timeout) before creating consumer
-            sub_future.result(timeout=2.0)
-            logger.debug(f"_add_ticker - {symbol}: ws_manager.subscribe() completed")
-        except Exception as e:
-            logger.error(f"_add_ticker - {symbol}: ws_manager.subscribe() failed - {e}")
-            self.active_tickers.discard(symbol)
-            return
+            self.stream_consumers[stream_key] = future
+            logger.debug(f"_add_ticker - {symbol}: created consumer for {stream_key}")
 
-        # Create async consumer for each trade stream key
-        stream_key = f"T.{symbol}"
-        future = asyncio.run_coroutine_threadsafe(
-            self._consume_stream_key(stream_key, symbol), self.ws_loop
-        )
-        self.stream_consumers[stream_key] = future
-        logger.debug(f"_add_ticker - {symbol}: created consumer for {stream_key}")
+            # Bootstrap intraday bars from historical trades (only for NEW tickers).
+            # Determines start point from last bar_start in ClickHouse today.
+            # Using bar_start (not bar_end) ensures that partial bars written
+            # during unsubscribe are rebuilt from the beginning of that bar
+            # with complete trade data, rather than overwritten by a gap.
+            # None → first subscription → 4 AM ET session start.
+            #
+            # IMPORTANT: If ANY TF has no bars (returns None), from_ms must
+            # be None (session start) because that TF needs the full trade
+            # history.  Since trades_backfill builds ALL TFs from the same
+            # trade stream, we must fetch from the earliest needed point.
+            #
+            # On re-subscribe, per_tf_starts tracks each TF's last bar_start
+            # so trades_backfill can skip writing bars that already exist
+            # correctly in ClickHouse (bar_start < per_tf_starts[tf]).
+            bootstrap_tfs = list(self._bootstrap_tfs_set)
+            if bootstrap_tfs:
+                # Reuse a pre-registered Event (from tickdata_server) if it
+                # exists, otherwise create a new one.  This avoids orphaning
+                # an Event that a REST handler might already be wait()-ing on.
+                evt = self._bootstrap_events.get(symbol)
+                if evt is None or evt.is_set():
+                    evt = Event()
+                self._bootstrap_events[symbol] = evt
 
-        # Bootstrap intraday bars from historical trades.
-        # Determines start point from last bar_start in ClickHouse today.
-        # Using bar_start (not bar_end) ensures that partial bars written
-        # during unsubscribe are rebuilt from the beginning of that bar
-        # with complete trade data, rather than overwritten by a gap.
-        # None → first subscription → 4 AM ET session start.
-        #
-        # IMPORTANT: If ANY TF has no bars (returns None), from_ms must
-        # be None (session start) because that TF needs the full trade
-        # history.  Since trades_backfill builds ALL TFs from the same
-        # trade stream, we must fetch from the earliest needed point.
-        #
-        # On re-subscribe, per_tf_starts tracks each TF's last bar_start
-        # so trades_backfill can skip writing bars that already exist
-        # correctly in ClickHouse (bar_start < per_tf_starts[tf]).
-        bootstrap_tfs = list(self._bootstrap_tfs_set)
-        if bootstrap_tfs:
-            # Reuse a pre-registered Event (from tickdata_server) if it
-            # exists, otherwise create a new one.  This avoids orphaning
-            # an Event that a REST handler might already be wait()-ing on.
-            evt = self._bootstrap_events.get(symbol)
-            if evt is None or evt.is_set():
-                evt = Event()
-            self._bootstrap_events[symbol] = evt
-
-            from_ms = None
-            all_tfs_have_bars = True
-            per_tf_starts: Dict[str, int] = {}
-            for tf in bootstrap_tfs:
-                last_start = self._get_last_bar_start_today(symbol, tf)
-                if last_start is None:
-                    # At least one TF needs full bootstrap → use session start
-                    all_tfs_have_bars = False
-                    from_ms = None
-                    logger.info(
-                        f"_add_ticker - {symbol}: {tf} has no bars today, "
-                        f"bootstrapping all TFs from session start"
-                    )
-                    break
-                per_tf_starts[tf] = last_start
-                if from_ms is None or last_start < from_ms:
-                    from_ms = last_start
-
-            if not all_tfs_have_bars:
                 from_ms = None
-                per_tf_starts = {}  # no per-TF filtering for first subscribe
+                all_tfs_have_bars = True
+                per_tf_starts: Dict[str, int] = {}
+                for tf in bootstrap_tfs:
+                    last_start = self._get_last_bar_start_today(symbol, tf)
+                    if last_start is None:
+                        # At least one TF needs full bootstrap → use session start
+                        all_tfs_have_bars = False
+                        from_ms = None
+                        logger.info(
+                            f"_add_ticker - {symbol}: {tf} has no bars today, "
+                            f"bootstrapping all TFs from session start"
+                        )
+                        break
+                    per_tf_starts[tf] = last_start
+                    if from_ms is None or last_start < from_ms:
+                        from_ms = last_start
 
-            Thread(
-                target=self.trades_backfill,
-                args=(symbol, bootstrap_tfs, from_ms, per_tf_starts),
-                daemon=True,
-                name=f"bootstrap-{symbol}",
-            ).start()
+                if not all_tfs_have_bars:
+                    from_ms = None
+                    per_tf_starts = {}  # no per-TF filtering for first subscribe
 
-    def _remove_ticker(self, symbol: str) -> None:
-        if symbol not in self.active_tickers:
+                Thread(
+                    target=self.trades_backfill,
+                    args=(symbol, bootstrap_tfs, from_ms, per_tf_starts),
+                    daemon=True,
+                    name=f"bootstrap-{symbol}",
+                ).start()
+
+        # Track all timeframes for this ticker (new or existing)
+        for tf in timeframes:
+            self._active_timeframes[symbol].add(tf)
+        if timeframes:
+            logger.debug(
+                f"_add_ticker - {symbol}: tracking timeframes {timeframes}, "
+                f"total active: {self._active_timeframes[symbol]}"
+            )
+
+    def _remove_ticker(self, symbol: str, timeframes: list[str] | None = None) -> None:
+        """Remove timeframes for a ticker.
+
+        Only fully unsubscribes when ALL timeframes are removed.
+        This prevents unnecessary trades_backfill when switching timeframes.
+
+        Args:
+            symbol: Ticker symbol
+            timeframes: List of timeframes being unsubscribed (empty = remove all)
+        """
+        timeframes = timeframes or []
+        active = self._active_timeframes.get(symbol, set())
+
+        if not active:
+            # No active timeframes for this ticker
             return
-        logger.info(f"_remove_ticker - {symbol}: unsubscribing from tick stream")
+
+        # Remove the specified timeframes
+        if timeframes:
+            for tf in timeframes:
+                active.discard(tf)
+            logger.debug(
+                f"_remove_ticker - {symbol}: removed timeframes {timeframes}, "
+                f"remaining: {active}"
+            )
+
+            # If there are still active timeframes, don't fully unsubscribe
+            if active:
+                logger.debug(
+                    f"_remove_ticker - {symbol}: still has active timeframes, "
+                    "keeping tick stream"
+                )
+                return
+        else:
+            # No timeframes specified = remove all
+            active.clear()
+
+        # All timeframes removed — fully unsubscribe
+        logger.info(
+            f"_remove_ticker - {symbol}: no more timeframes, unsubscribing from tick stream"
+        )
 
         # Unsubscribe from WebSocket stream via UnifiedTickManager
         logger.debug(f"_remove_ticker - {symbol}: calling ws_manager.unsubscribe()")
@@ -523,7 +605,8 @@ class BarsBuilderService:
         if evt:
             evt.set()
 
-        self.active_tickers.discard(symbol)
+        # Remove from active timeframes
+        self._active_timeframes.pop(symbol, None)
 
     # ════════════════════════════════════════════════════════════════════
     # trades_backfill: Polygon/Parquet Trades → BarBuilder → ClickHouse
@@ -1128,13 +1211,13 @@ class BarsBuilderService:
     def _enqueue_bars(self, bars: List[Dict], source: str = "unknown") -> None:
         if not bars:
             return
-        for bar in bars:
-            logger.debug(
-                f"_enqueue_bars [{source}]: {bar.get('ticker')}/{bar.get('timeframe')} "
-                f"bar_start={self._ms_to_et(bar.get('bar_start', 0))} "
-                f"bar_end={self._ms_to_et(bar.get('bar_end', 0))} "
-                f"trades={bar.get('trade_count')}"
-            )
+        # for bar in bars:
+        #     logger.debug(
+        #         f"_enqueue_bars [{source}]: {bar.get('ticker')}/{bar.get('timeframe')} "
+        #         f"bar_start={self._ms_to_et(bar.get('bar_start', 0))} "
+        #         f"bar_end={self._ms_to_et(bar.get('bar_end', 0))} "
+        #         f"trades={bar.get('trade_count')}"
+        #     )
         with self._pending_lock:
             self._pending_bars.extend(bars)
 

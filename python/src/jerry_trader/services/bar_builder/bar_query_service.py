@@ -97,6 +97,21 @@ class ClickHouseClient:
                 "ClickHouse unavailable — bar queries fall back to ChartDataService"
             )
 
+        # Bar backfill observers - called after each custom_bar_backfill completes
+        # Allows FactorEngine to retry bootstrap for timeframes that now have bars
+        self._bar_backfill_observers: list = []
+
+    def register_bar_backfill_observer(self, callback) -> None:
+        """Register a callback to be notified when bar backfill completes.
+
+        Callback signature: (symbol: str, timeframe: str, bar_count: int) -> None
+
+        Args:
+            callback: Function to call when custom_bar_backfill completes for a TF
+        """
+        self._bar_backfill_observers.append(callback)
+        logger.debug(f"ClickHouseClient: registered bar backfill observer")
+
     def _get_thread_ch_client(self):
         """Get or create a per-thread ClickHouse client.
 
@@ -308,6 +323,18 @@ class ClickHouseClient:
                 f"custom_bar_backfill - {ticker}/{builder_tf}: "
                 f"backfilled {n} bars to ClickHouse (source={result.get('source', '?')})"
             )
+
+            # Notify observers (e.g., FactorEngine) that bars are now available
+            if n > 0:
+                for observer in self._bar_backfill_observers:
+                    try:
+                        observer(ticker, builder_tf, n)
+                    except Exception as e:
+                        logger.error(
+                            f"custom_bar_backfill - {ticker}/{builder_tf}: "
+                            f"observer error - {e}"
+                        )
+
             return n
         except Exception as e:
             logger.error(

@@ -26,6 +26,7 @@ Stateful workers and use-case implementations.
 - [x] 3.12 Fix concurrent ClickHouse queries in bar_query_service (per-thread clients)
 - [x] 3.13 Fix tick-based factor bootstrap sent before ready (tick_bootstrap_events)
 
+- [x] [3.14](roadmap/bar-backfill-observer.md) Add bar backfill observer for FactorEngine bootstrap
 
 ## 5. Frontend
 React/TradingView UI modules and UX improvements.
@@ -44,6 +45,9 @@ React/TradingView UI modules and UX improvements.
 System-wide coordination and backtest infrastructure.
 
 - [x] [6.3](roadmap/factor-realtime-analysis.md) Factor bootstrap sync to trades_bootstrap
+
+- [x] [6.1](roadmap/factor-realtime-analysis.md) Decouple trades_backfill from timeframe switch events
+
 
 ## 8. Optional Features
 Enhancements and additional modules.

@@ -84,6 +84,26 @@ def clock_heartbeat_channel(session_id: str) -> str:
     return f"clock:heartbeat:{session_id}"
 
 
+def events_stream(session_id: str) -> str:
+    """Unified event bus stream for inter-service communication.
+
+    Services publish typed events (BarBackfillCompleted, TradesBackfillCompleted,
+    BarClosed, etc.) and subscribe to react to events from other services.
+
+    Replaces callback-based observer pattern with message-based decoupling.
+
+    Event schema:
+        {
+            "type": str,           # EventType enum value
+            "symbol": str,         # Ticker symbol
+            "timeframe": str,      # Bar timeframe or empty
+            "timestamp_ns": str,   # Event timestamp as string
+            "data": str,           # JSON-encoded event-specific payload
+        }
+    """
+    return f"events:{session_id}"
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Fixed keys – one per session
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -233,6 +253,7 @@ ALL_STREAM_BUILDERS = [
     news_processor_results_stream,
     factor_tasks_stream,
     signal_events_stream,
+    events_stream,
 ]
 
 

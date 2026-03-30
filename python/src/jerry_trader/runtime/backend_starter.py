@@ -504,8 +504,7 @@ class JerryTraderBackendStarter:
                     ws_manager=self._shared_ws_manager,
                     redis_config=role_cfg.get("redis"),
                     clickhouse_config=role_cfg.get("clickhouse"),
-                    bars_builder=self.bars_builder,
-                    event_bus=self._event_bus,
+                    coordinator=self._bootstrap_coordinator,
                 )
             else:
                 logger.error(

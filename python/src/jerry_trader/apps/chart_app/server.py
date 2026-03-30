@@ -106,8 +106,7 @@ class ChartBFF:
         redis_config: Optional[Dict[str, Any]] = None,
         clickhouse_config: Optional[Dict[str, Any]] = None,
         manager_type: Optional[str] = None,
-        bars_builder: Optional[Any] = None,
-        event_bus: Optional[Any] = None,
+        coordinator=None,
     ):
         self.host = host
         self.port = port
@@ -151,18 +150,11 @@ class ChartBFF:
             session_id=self.session_id,
             redis_config=redis_config,
             clickhouse_config=clickhouse_config,
-            bars_builder=bars_builder,
-            event_bus=event_bus,
         )
 
         # Bootstrap _backfill_done from ClickHouse: tickers already backfilled
         # today skip redundant custom_bar_backfill_all on re-subscribe after restart
         self._backfill_done.update(self.ch_client.tickers_with_bars_today())
-
-        # Optional reference to BarsBuilderService (same process).
-        # Used to wait for trades_backfill completion before serving
-        # bar REST responses, avoiding stale gap data on re-subscribe.
-        self._bars_builder = bars_builder
 
         # Build FastAPI app
         self.app = FastAPI(title="ChartBFF", version="1.0.0")
@@ -196,9 +188,17 @@ class ChartBFF:
         # Used to wait for factor bootstrap before serving factor REST responses.
         self._factor_engine = None
 
+        # BootstrapCoordinator for unified orchestration
+        self._coordinator = coordinator
+
     def set_factor_engine(self, engine) -> None:
         """Set FactorEngine reference for bootstrap wait."""
         self._factor_engine = engine
+
+    def set_coordinator(self, coordinator) -> None:
+        """Set BootstrapCoordinator for unified bootstrap orchestration."""
+        self._coordinator = coordinator
+        logger.info(f"ChartBFF: coordinator {'set' if coordinator else 'cleared'}")
 
     def _setup_routes(self):
         """Setup FastAPI routes and WebSocket endpoints."""
@@ -306,18 +306,17 @@ class ChartBFF:
             # If trades_backfill is running for this ticker (e.g., after
             # subscribe/re-subscribe), wait briefly so the gap-fill bars
             # land in ClickHouse before we serve the REST response.
-            # We check _bootstrap_events directly (not subscribed_tickers)
-            # because the REST request can arrive before subscribed_tickers
-            # is updated in the WS handler.
-            if self._bars_builder is not None and ch_tf in self.BARS_BUILDER_TIMEFRAMES:
-                ready = self._bars_builder.wait_for_bootstrap(
-                    ticker_upper, timeout=30.0
-                )
-                if not ready:
-                    logger.warning(
-                        f"get_chart_bars - {ticker_upper}/{ch_tf}: "
-                        f"trades_backfill not done after 3s, serving available data"
+            # Use BootstrapCoordinator if available, otherwise fall back to legacy.
+            if ch_tf in self.BARS_BUILDER_TIMEFRAMES:
+                if self._coordinator is not None:
+                    ready = self._coordinator.wait_for_ticker_ready(
+                        ticker_upper, timeout=30.0
                     )
+                    if not ready:
+                        logger.warning(
+                            f"get_chart_bars - {ticker_upper}/{ch_tf}: "
+                            f"bootstrap not ready after 30s, serving available data"
+                        )
 
             ch_result = self.ch_client._query_bars_clickhouse(
                 ticker_upper,
@@ -649,44 +648,68 @@ class ChartBFF:
 
         current_streams.update(to_add)
 
-        # Notify FactorEngine via Redis stream, update subscribed_tickers,
-        # and trigger custom_bar_backfill for ALL TFs on first subscription
+        # Start bootstrap coordination for each subscription
         for sub in subscriptions:
             sym = sub.get("symbol", "").upper()
-            if sym:
-                # Add to subscribed tickers set
-                self.subscribed_tickers.add(sym)
+            timeframe = sub.get("timeframe", "")
+            if not sym:
+                continue
 
-                # Pre-register bootstrap Event so that REST
-                # requests arriving before bars_builder picks
-                # up the Redis message will block on
-                # wait_for_bootstrap instead of serving stale data.
-                if self._bars_builder is not None:
-                    self._bars_builder.pre_register_bootstrap(sym)
+            # Add to subscribed tickers set
+            self.subscribed_tickers.add(sym)
 
-                # Get requested timeframe from subscription
-                # Only notify FactorEngine if a specific timeframe is provided
-                # (Factor subscription via _handle_factor_subscribe handles factor-specific timeframes)
-                timeframe = sub.get("timeframe", "")
-                if timeframe:
-                    try:
-                        self.r.xadd(
-                            self.FACTOR_TASKS_STREAM,
-                            {
-                                "action": "add",
-                                "ticker": sym,
-                                "timeframes": timeframe,
-                            },
-                        )
-                        logger.debug(
-                            f"📥 XADD factor_tasks: add {sym} timeframes={timeframe}"
-                        )
-                    except Exception as e:
-                        logger.warning(f"⚠️ Failed to XADD add {sym}: {e}")
+            # Use BootstrapCoordinator for unified orchestration
+            if self._coordinator is not None and timeframe:
+                # Start bootstrap plan
+                self._coordinator.start_bootstrap(sym, [timeframe])
+                logger.info(
+                    f"📥 Subscribe: started bootstrap for {sym}/{timeframe} via coordinator"
+                )
 
-                # Trigger custom_bar_backfill for ALL TFs (except 10s)
-                # on first subscription — warm up ClickHouse for fast
-                # chart rendering. Deduped per ticker.
+                # Notify FactorEngine via Redis stream (it will coordinate via coordinator)
+                try:
+                    self.r.xadd(
+                        self.FACTOR_TASKS_STREAM,
+                        {
+                            "action": "add",
+                            "ticker": sym,
+                            "timeframes": timeframe,
+                        },
+                    )
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to XADD add {sym}: {e}")
+
+                # Wait for bootstrap completion in background
+                async def wait_bootstrap(symbol: str):
+                    loop = asyncio.get_event_loop()
+                    # Run blocking wait in thread pool
+                    ready = await loop.run_in_executor(
+                        None,  # default executor
+                        self._coordinator.wait_for_ticker_ready,
+                        symbol,
+                        60.0,  # timeout
+                    )
+                    if ready:
+                        logger.info(f"✅ Subscribe: {symbol} bootstrap ready")
+                    else:
+                        logger.warning(f"⏱️ Subscribe: {symbol} bootstrap timeout")
+
+                # Fire-and-forget wait task (logs only, doesn't block WebSocket)
+                asyncio.create_task(wait_bootstrap(sym))
+            elif timeframe:
+                # No coordinator: just notify FactorEngine directly
+                try:
+                    self.r.xadd(
+                        self.FACTOR_TASKS_STREAM,
+                        {
+                            "action": "add",
+                            "ticker": sym,
+                            "timeframes": timeframe,
+                        },
+                    )
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to XADD add {sym}: {e}")
+
                 self._trigger_custom_bar_backfill(sym)
 
     async def _handle_factor_subscribe(
@@ -740,10 +763,13 @@ class ChartBFF:
             factor_subscriptions.add(sub_key)
             logger.info(f"📊 Subscribed to factors for {sub_key}")
 
-            # Pre-register bootstrap Event so that REST requests arriving
-            # before FactorEngine picks up the Redis message will block on
-            # wait_for_bootstrap instead of serving stale data.
-            # This applies to BOTH tick-based and bar-based factors.
+            # Use coordinator for bootstrap if available
+            if self._coordinator is not None:
+                # Use "tick" timeframe for tick-based factors, otherwise use specified timeframe
+                tf_for_bootstrap = ["tick"] if timeframe == "tick" else [timeframe]
+                self._coordinator.start_bootstrap(symbol, tf_for_bootstrap)
+
+            # Pre-register bootstrap Event for legacy compatibility
             if self._factor_engine is not None:
                 self._factor_engine.pre_register_bootstrap(symbol)
 

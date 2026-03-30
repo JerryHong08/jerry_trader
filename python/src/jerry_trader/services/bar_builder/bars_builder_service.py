@@ -314,6 +314,17 @@ class BarsBuilderService:
 
         logger.info(f"BarsBuilderService stopped. " f"Stats: {self._stats}")
 
+    def set_coordinator(self, coordinator) -> None:
+        """Wire BootstrapCoordinator for unified bootstrap orchestration.
+
+        Args:
+            coordinator: BootstrapCoordinator instance
+        """
+        self._coordinator = coordinator
+        logger.info(
+            f"BarsBuilderService: coordinator {'set' if coordinator else 'cleared'}"
+        )
+
     # ════════════════════════════════════════════════════════════════════
     # WS event loop (standalone mode)
     # ════════════════════════════════════════════════════════════════════
@@ -853,6 +864,14 @@ class BarsBuilderService:
             # _flush_loop has a chance to drain _pending_bars, resulting
             # in stale / missing data served to the frontend.
             self._flush_to_clickhouse(caller="trades_backfill")
+
+            # Notify coordinator that bars are ready for each timeframe
+            if self._coordinator:
+                for tf in bootstrap_tfs:
+                    self._coordinator.on_bars_ready(symbol, tf)
+                    logger.debug(
+                        f"trades_backfill - {symbol}/{tf}: notified coordinator bars ready"
+                    )
 
             # Store trades in BootstrapCoordinator for FactorEngine to consume
             # This replaces the old callback pattern with unified orchestration

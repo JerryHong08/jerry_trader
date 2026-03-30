@@ -457,6 +457,19 @@ class JerryTraderBackendStarter:
             )
             logger.info(f"EventBus created for session {self.session_id}")
 
+            # Create BootstrapCoordinator for unified bootstrap orchestration
+            from jerry_trader.services.orchestration.bootstrap_coordinator import (
+                BootstrapCoordinator,
+                set_coordinator,
+            )
+
+            self._bootstrap_coordinator = BootstrapCoordinator(
+                redis_client=event_bus_redis,
+                event_bus=self._event_bus,
+            )
+            set_coordinator(self._bootstrap_coordinator)
+            logger.info("BootstrapCoordinator created and set as global")
+
             self.bars_builder = BarsBuilderService(
                 session_id=self.session_id,
                 redis_config=role_cfg.get("redis"),
@@ -538,6 +551,15 @@ class JerryTraderBackendStarter:
         if self.factor_engine and self.bars_builder:
             self.factor_engine.set_bars_builder(self.bars_builder)
             logger.info("Wired FactorEngine ↔ BarsBuilder (trade observer)")
+
+        # Wire BootstrapCoordinator to FactorEngine and BarsBuilder
+        if self._bootstrap_coordinator:
+            if self.factor_engine:
+                self.factor_engine.set_coordinator(self._bootstrap_coordinator)
+                logger.info("Wired BootstrapCoordinator → FactorEngine")
+            if self.bars_builder:
+                self.bars_builder.set_coordinator(self._bootstrap_coordinator)
+                logger.info("Wired BootstrapCoordinator → BarsBuilder")
 
         # Pass factor_engine to ChartBFF for bootstrap wait
         if self.chart_bff and self.factor_engine:

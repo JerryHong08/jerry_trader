@@ -41,6 +41,10 @@ from jerry_trader.services.market_data.bootstrap.polygon_fetcher import (
 from jerry_trader.services.market_data.feeds.unified_tick_manager import (
     UnifiedTickManager,
 )
+from jerry_trader.services.orchestration.bootstrap_coordinator import (
+    BootstrapCoordinator,
+    get_coordinator,
+)
 from jerry_trader.shared.logging.logger import setup_logger
 
 logger = setup_logger("factor_engine", log_to_file=True, level=logging.DEBUG)
@@ -176,6 +180,11 @@ class FactorEngine:
         # Track timeframes that failed bootstrap (no bars found) so we can retry
         # when bar backfill completes. Structure: {symbol: {timeframe1, timeframe2, ...}}
         self._failed_bootstrap_timeframes: dict[str, set[str]] = {}
+
+        # BootstrapCoordinator integration (new orchestration)
+        self._coordinator: BootstrapCoordinator | None = (
+            None  # set via set_coordinator()
+        )
 
     # ═══════════════════════════════════════════════════════════════════════════
     # EventBus handlers
@@ -518,7 +527,19 @@ class FactorEngine:
         self._subscribe_ticks(symbol)
 
         # Start bootstrap in background thread
-        if self._bars_builder is not None:
+        # Use coordinator-based bootstrap if available, otherwise fall back to v1
+        if self._coordinator is not None:
+            t = threading.Thread(
+                target=self._run_bootstrap_v2,
+                args=(symbol, timeframes),
+                daemon=True,
+                name=f"FactorEngine-Bootstrap-{symbol}",
+            )
+            t.start()
+            logger.info(
+                f"FactorEngine: tracking {symbol} with coordinator v2 bootstrap"
+            )
+        elif self._bars_builder is not None:
             t = threading.Thread(
                 target=self._run_bootstrap,
                 args=(symbol,),
@@ -526,6 +547,7 @@ class FactorEngine:
                 name=f"FactorEngine-Bootstrap-{symbol}",
             )
             t.start()
+            logger.info(f"FactorEngine: tracking {symbol} with legacy bootstrap")
 
         logger.info(f"FactorEngine: tracking {symbol} with timeframes={timeframes}")
 
@@ -559,6 +581,17 @@ class FactorEngine:
     def set_bars_builder(self, bars_builder) -> None:
         """Wire BarsBuilder reference for bootstrap wait functionality."""
         self._bars_builder = bars_builder
+
+    def set_coordinator(self, coordinator: BootstrapCoordinator | None) -> None:
+        """Wire BootstrapCoordinator for unified bootstrap orchestration.
+
+        When coordinator is set, FactorEngine will use the new orchestration flow:
+        - Register as consumer for tick_warmup and per-timeframe bar_warmup
+        - Read trades from coordinator (instead of re-fetching)
+        - Report completion via coordinator.report_done()
+        """
+        self._coordinator = coordinator
+        logger.info(f"FactorEngine: coordinator {'set' if coordinator else 'cleared'}")
 
     def _bootstrap_bars_for_timeframe(
         self, symbol: str, timeframe: str, tf_state: "TimeframeState"
@@ -660,6 +693,123 @@ class FactorEngine:
             timeframe_items = list(state.timeframe_states.items())
         for timeframe, tf_state in timeframe_items:
             self._bootstrap_bars_for_timeframe(symbol, timeframe, tf_state)
+
+    def _run_bootstrap_v2(self, symbol: str, timeframes: list[str]) -> None:
+        """Orchestrate factor bootstrap using BootstrapCoordinator (V2).
+
+        This is the new bootstrap flow that uses the Coordinator for:
+        - Reading trades from coordinator (tick warmup)
+        - Reading bars from ClickHouse (bar warmup per timeframe)
+        - Reporting completion via coordinator.report_done()
+
+        Args:
+            symbol: Ticker symbol
+            timeframes: List of timeframes to bootstrap
+        """
+        coordinator = self._coordinator
+        if not coordinator:
+            logger.warning(
+                f"_run_bootstrap_v2 - {symbol}: no coordinator, falling back to v1"
+            )
+            self._run_bootstrap(symbol)
+            return
+
+        try:
+            # 1. Register as consumer with coordinator
+            logger.info(f"_run_bootstrap_v2 - {symbol}: registering consumers")
+
+            # Register tick warmup consumer if trades are needed
+            needs_tick_warmup = False
+            for tf in timeframes:
+                tf_bootstrap = coordinator.get_bootstrap(symbol)
+                if (
+                    tf_bootstrap
+                    and tf_bootstrap.trades_state
+                    != coordinator.TradesBootstrapState.NOT_NEEDED
+                ):
+                    needs_tick_warmup = True
+                    break
+
+            if needs_tick_warmup:
+                coordinator.register_consumer(symbol, "tick_warmup", "factor_engine")
+                logger.debug(
+                    f"_run_bootstrap_v2 - {symbol}: registered tick_warmup consumer"
+                )
+
+            # Register bar warmup consumers for each timeframe
+            for tf in timeframes:
+                coordinator.register_consumer(
+                    symbol, f"bar_warmup:{tf}", "factor_engine"
+                )
+                logger.debug(
+                    f"_run_bootstrap_v2 - {symbol}/{tf}: registered bar_warmup consumer"
+                )
+
+            # 2. Wait for trades to be ready (if needed) and process tick warmup
+            if needs_tick_warmup:
+                logger.info(f"_run_bootstrap_v2 - {symbol}: waiting for trades")
+                # Poll until trades are available or timeout
+                trades = []
+                for _ in range(300):  # 30 seconds (100ms * 300)
+                    trades = coordinator.get_trades(symbol)
+                    if trades:
+                        break
+                    time.sleep(0.1)
+
+                if trades:
+                    logger.info(
+                        f"_run_bootstrap_v2 - {symbol}: got {len(trades)} trades, processing tick warmup"
+                    )
+                    self._process_bootstrap_trades(symbol, trades)
+                else:
+                    logger.warning(
+                        f"_run_bootstrap_v2 - {symbol}: no trades available after timeout"
+                    )
+
+                # Report tick warmup done
+                coordinator.report_done(symbol, "tick_warmup", "factor_engine")
+                logger.info(f"_run_bootstrap_v2 - {symbol}: tick_warmup complete")
+
+            # 3. Wait for bars ready and process bar warmup per timeframe
+            state = self.ticker_states.get(symbol)
+            if state:
+                for tf in timeframes:
+                    # Wait for bars to be ready (poll bootstrap state)
+                    logger.info(f"_run_bootstrap_v2 - {symbol}/{tf}: waiting for bars")
+                    bars_ready = False
+                    for _ in range(600):  # 60 seconds
+                        tf_bootstrap = coordinator.get_bootstrap(symbol)
+                        if tf_bootstrap and tf in tf_bootstrap.timeframes:
+                            if tf_bootstrap.timeframes[tf].state in (
+                                coordinator.TimeframeState.READY,
+                                coordinator.TimeframeState.DONE,
+                            ):
+                                bars_ready = True
+                                break
+                        time.sleep(0.1)
+
+                    if bars_ready:
+                        tf_state = state.timeframe_states.get(tf)
+                        if tf_state:
+                            logger.info(
+                                f"_run_bootstrap_v2 - {symbol}/{tf}: bars ready, running bar warmup"
+                            )
+                            self._bootstrap_bars_for_timeframe(symbol, tf, tf_state)
+
+                    # Report bar warmup done for this timeframe
+                    coordinator.report_done(symbol, f"bar_warmup:{tf}", "factor_engine")
+                    logger.info(
+                        f"_run_bootstrap_v2 - {symbol}/{tf}: bar_warmup complete"
+                    )
+
+            logger.info(f"_run_bootstrap_v2 - {symbol}: all bootstrap complete")
+        except Exception as e:
+            logger.error(f"_run_bootstrap_v2 - {symbol}: error - {e}")
+        finally:
+            self._bootstrap_done.add(symbol)
+            evt = self._bootstrap_events.get(symbol)
+            if evt:
+                evt.set()
 
     def _run_bootstrap(self, symbol: str) -> None:
         """Orchestrate factor bootstrap for a ticker."""

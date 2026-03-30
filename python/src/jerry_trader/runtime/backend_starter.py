@@ -547,11 +547,6 @@ class JerryTraderBackendStarter:
         # if self.chart_bff is not None and self.bars_builder is not None:
         #     self.chart_bff._bars_builder = self.bars_builder
 
-        # Wire FactorEngine ↔ BarsBuilder for trade observer bootstrap
-        if self.factor_engine and self.bars_builder:
-            self.factor_engine.set_bars_builder(self.bars_builder)
-            logger.info("Wired FactorEngine ↔ BarsBuilder (trade observer)")
-
         # Wire BootstrapCoordinator to FactorEngine and BarsBuilder
         if self._bootstrap_coordinator:
             if self.factor_engine:
@@ -862,10 +857,6 @@ class JerryTraderBackendStarter:
                 self._event_bus.subscribe(
                     EventType.BAR_BACKFILL_COMPLETED,
                     self.factor_engine._on_event_bar_backfill_completed,
-                )
-                self._event_bus.subscribe(
-                    EventType.TRADES_BACKFILL_COMPLETED,
-                    self.factor_engine._on_event_trades_backfill_completed,
                 )
                 self._event_bus.subscribe(
                     EventType.BAR_CLOSED,

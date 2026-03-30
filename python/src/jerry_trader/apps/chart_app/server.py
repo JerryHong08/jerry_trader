@@ -107,6 +107,7 @@ class ChartBFF:
         clickhouse_config: Optional[Dict[str, Any]] = None,
         manager_type: Optional[str] = None,
         bars_builder: Optional[Any] = None,
+        event_bus: Optional[Any] = None,
     ):
         self.host = host
         self.port = port
@@ -151,6 +152,7 @@ class ChartBFF:
             redis_config=redis_config,
             clickhouse_config=clickhouse_config,
             bars_builder=bars_builder,
+            event_bus=event_bus,
         )
 
         # Bootstrap _backfill_done from ClickHouse: tickers already backfilled

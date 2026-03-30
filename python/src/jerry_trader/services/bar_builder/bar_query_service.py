@@ -13,6 +13,8 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set
 
 from jerry_trader.platform.config.session import make_session_id, parse_session_id
+from jerry_trader.platform.messaging.event_bus import Event as BusEvent
+from jerry_trader.platform.messaging.event_bus import EventBus
 from jerry_trader.platform.storage.clickhouse import (
     TF_DURATION_SEC,
     get_clickhouse_client,
@@ -70,11 +72,13 @@ class ClickHouseClient:
         redis_config: Optional[Dict[str, Any]] = None,
         clickhouse_config: Optional[Dict[str, Any]] = None,
         bars_builder: Optional[Any] = None,
+        event_bus: Optional[EventBus] = None,
     ):
         self.session_id = session_id or make_session_id()
         self.db_date, self.run_mode = parse_session_id(self.session_id)
 
         self._bars_builder = bars_builder
+        self._event_bus = event_bus
 
         self.chart_data_service = ChartDataService(
             redis_config=redis_config,
@@ -96,21 +100,6 @@ class ClickHouseClient:
             logger.info(
                 "ClickHouse unavailable — bar queries fall back to ChartDataService"
             )
-
-        # Bar backfill observers - called after each custom_bar_backfill completes
-        # Allows FactorEngine to retry bootstrap for timeframes that now have bars
-        self._bar_backfill_observers: list = []
-
-    def register_bar_backfill_observer(self, callback) -> None:
-        """Register a callback to be notified when bar backfill completes.
-
-        Callback signature: (symbol: str, timeframe: str, bar_count: int) -> None
-
-        Args:
-            callback: Function to call when custom_bar_backfill completes for a TF
-        """
-        self._bar_backfill_observers.append(callback)
-        logger.debug(f"ClickHouseClient: registered bar backfill observer")
 
     def _get_thread_ch_client(self):
         """Get or create a per-thread ClickHouse client.
@@ -324,16 +313,16 @@ class ClickHouseClient:
                 f"backfilled {n} bars to ClickHouse (source={result.get('source', '?')})"
             )
 
-            # Notify observers (e.g., FactorEngine) that bars are now available
-            if n > 0:
-                for observer in self._bar_backfill_observers:
-                    try:
-                        observer(ticker, builder_tf, n)
-                    except Exception as e:
-                        logger.error(
-                            f"custom_bar_backfill - {ticker}/{builder_tf}: "
-                            f"observer error - {e}"
-                        )
+            # Publish BarBackfillCompleted event to EventBus
+            if n > 0 and self._event_bus:
+                self._event_bus.publish(
+                    BusEvent.bar_backfill_completed(
+                        symbol=ticker,
+                        timeframe=builder_tf,
+                        bar_count=n,
+                        source=result.get("source", "unknown"),
+                    )
+                )
 
             return n
         except Exception as e:

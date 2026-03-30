@@ -18,8 +18,10 @@ from typing import Any
 import redis
 
 import jerry_trader.clock as clock_mod
+from jerry_trader._rust import load_trades_from_parquet
 from jerry_trader.domain.factor import FactorSnapshot
 from jerry_trader.domain.market import Bar
+from jerry_trader.platform.config.config import lake_data_dir
 from jerry_trader.platform.storage.clickhouse import (
     get_clickhouse_client,
     query_ohlcv_bars,
@@ -32,6 +34,9 @@ from jerry_trader.services.factor.indicators import (
     QuoteIndicator,
     TickIndicator,
     TradeRate,
+)
+from jerry_trader.services.market_data.bootstrap.polygon_fetcher import (
+    fetch_polygon_trades,
 )
 from jerry_trader.services.market_data.feeds.unified_tick_manager import (
     UnifiedTickManager,
@@ -166,16 +171,278 @@ class FactorEngine:
         self._bootstrap_events: dict[str, threading.Event] = {}
         self._bootstrap_done: set[str] = set()
         self._bars_builder = None  # set by backend_starter via set_bars_builder()
-        # Track tick bootstrap completion per ticker (callback from trades_backfill)
+        # Track tick bootstrap completion per ticker (EventBus TradesBackfillCompleted)
         self._tick_bootstrap_events: dict[str, threading.Event] = {}
         # Track timeframes that failed bootstrap (no bars found) so we can retry
         # when bar backfill completes. Structure: {symbol: {timeframe1, timeframe2, ...}}
         self._failed_bootstrap_timeframes: dict[str, set[str]] = {}
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # EventBus handlers
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _on_event_bar_backfill_completed(self, event) -> None:
+        """Handle BarBackfillCompleted event from EventBus.
+
+        Args:
+            event: Event with symbol, timeframe, bar_count in event.data
+        """
+        symbol = event.symbol
+        timeframe = event.timeframe
+        bar_count = event.data.get("bar_count", 0)
+
+        # Check if this timeframe failed bootstrap for this symbol
+        failed_tfs = self._failed_bootstrap_timeframes.get(symbol, set())
+        if timeframe not in failed_tfs:
+            return
+
         logger.info(
-            f"FactorEngine initialized: session={session_id}, default_timeframe={self._default_timeframe}, "
-            f"shared_manager={not self._owns_manager}, storage={'enabled' if self.storage else 'disabled'}"
+            f"_on_event_bar_backfill_completed - {symbol}/{timeframe}: "
+            f"{bar_count} bars backfilled, retrying bootstrap"
         )
+
+        # Get the timeframe state
+        state = self.ticker_states.get(symbol)
+        if not state:
+            logger.debug(
+                f"_on_event_bar_backfill_completed - {symbol}/{timeframe}: "
+                f"TickerState not found, skipping"
+            )
+            return
+
+        tf_state = state.timeframe_states.get(timeframe)
+        if not tf_state:
+            logger.debug(
+                f"_on_event_bar_backfill_completed - {symbol}/{timeframe}: "
+                f"TimeframeState not found, skipping"
+            )
+            return
+
+        # Retry bootstrap for this timeframe
+        self._bootstrap_bars_for_timeframe(symbol, timeframe, tf_state)
+
+        # Remove from failed set if bootstrap succeeded
+        failed_tfs.discard(timeframe)
+        if not failed_tfs:
+            self._failed_bootstrap_timeframes.pop(symbol, None)
+            logger.info(
+                f"_on_event_bar_backfill_completed - {symbol}/{timeframe}: "
+                f"bootstrap retry complete"
+            )
+
+    def _on_event_trades_backfill_completed(self, event) -> None:
+        """Handle TradesBackfillCompleted event from EventBus.
+
+        Fetches historical trades from the same source (Polygon/parquet) and
+        feeds them to tick indicators for warmup. This replaces the old
+        _on_bootstrap_trades callback.
+
+        Args:
+            event: Event with symbol, trade_count, source, from_ms, first_ws_ts in event.data
+        """
+        symbol = event.symbol
+        trade_count = event.data.get("trade_count", 0)
+        source = event.data.get("source", "unknown")
+        from_ms = event.data.get("from_ms")
+        first_ws_ts = event.data.get("first_ws_ts")
+
+        logger.info(
+            f"_on_event_trades_backfill_completed - {symbol}: "
+            f"{trade_count} trades from {source}, processing for tick warmup"
+        )
+
+        # Fetch trades from the same source
+        trades = self._fetch_trades_for_symbol(symbol, source, from_ms, first_ws_ts)
+        if not trades:
+            logger.warning(
+                f"_on_event_trades_backfill_completed - {symbol}: no trades fetched"
+            )
+            # Signal completion anyway so we don't block
+            tick_evt = self._tick_bootstrap_events.get(symbol)
+            if tick_evt:
+                tick_evt.set()
+            return
+
+        # Process trades for tick indicator warmup
+        self._process_bootstrap_trades(symbol, trades)
+
+    def _on_event_bar_closed(self, event) -> None:
+        """Handle BarClosed event from EventBus.
+
+        Called when BarsBuilder publishes a completed bar. This replaces
+        the Redis pub/sub _bars_listener for bar-based factor updates.
+
+        Args:
+            event: Event with symbol, timeframe, bar data in event.data
+        """
+        symbol = event.symbol
+        timeframe = event.timeframe
+
+        # Skip processing until bootstrap is complete
+        if symbol not in self._bootstrap_done:
+            return
+
+        state = self.ticker_states.get(symbol)
+        if not state:
+            return
+
+        tf_state = state.timeframe_states.get(timeframe)
+        if not tf_state:
+            return
+
+        # Check for duplicate bars
+        bar_start_ms = event.data.get("bar_start", 0)
+        if bar_start_ms <= tf_state.last_bar_start_ms:
+            logger.debug(
+                f"_on_event_bar_closed: skipping duplicate bar for {symbol}/{timeframe}"
+            )
+            return
+
+        # Update last processed bar timestamp
+        tf_state.last_bar_start_ms = bar_start_ms
+
+        # Convert event data to Bar domain model
+        bar = Bar(
+            symbol=symbol,
+            timestamp_ns=bar_start_ms * 1_000_000,  # ms to ns
+            timespan=timeframe,
+            open=event.data.get("open", 0.0),
+            high=event.data.get("high", 0.0),
+            low=event.data.get("low", 0.0),
+            close=event.data.get("close", 0.0),
+            volume=int(event.data.get("volume", 0)),
+        )
+
+        # Update bar indicators for this timeframe
+        factors: dict[str, float] = {}
+        for ind in tf_state.bar_indicators:
+            value = ind.update(bar)
+            if value is not None:
+                factors[ind.name] = value
+
+        # Write bar-based factors to ClickHouse
+        if factors:
+            self._write_factors(symbol, bar.timestamp_ns, factors, timeframe)
+
+    def _fetch_trades_for_symbol(
+        self, symbol: str, source: str, from_ms: int | None, first_ws_ts: int | None
+    ) -> list[tuple[int, float, int]]:
+        """Fetch trades from source for tick indicator warmup.
+
+        Args:
+            symbol: Ticker symbol
+            source: Data source ("polygon" or "parquet")
+            from_ms: Start timestamp (UTC ms)
+            first_ws_ts: End timestamp (UTC ms) - only trades before this
+
+        Returns:
+            List of (timestamp_ms, price, size) tuples
+        """
+        from jerry_trader.platform.config.session import parse_session_id
+
+        trades: list[tuple[int, float, int]] = []
+
+        if source == "live":
+            trades = fetch_polygon_trades(symbol, from_ms=from_ms)
+        else:  # replay mode - load from parquet
+            db_date, _ = parse_session_id(self.session_id)
+            end_ts_ms = first_ws_ts or clock_mod.now_ms()
+            trades = load_trades_from_parquet(
+                lake_data_dir, symbol, db_date, end_ts_ms, from_ms or 0
+            )
+
+        # Filter to only trades before first_ws_ts
+        if first_ws_ts and trades:
+            trades = [(t, p, s) for t, p, s in trades if t < first_ws_ts]
+
+        return trades
+
+    def _process_bootstrap_trades(
+        self, symbol: str, trades: list[tuple[int, float, int]]
+    ) -> None:
+        """Process historical trades for tick indicator warmup.
+
+        This replaces the old _on_bootstrap_trades callback.
+
+        Args:
+            symbol: Ticker symbol
+            trades: List of (timestamp_ms, price, size) tuples
+        """
+        # Wait up to 2s for TickerState to exist (BarsBuilder may process
+        # "add" before FactorEngine)
+        state = None
+        for _ in range(20):
+            state = self.ticker_states.get(symbol)
+            if state:
+                break
+            time.sleep(0.1)
+
+        if not state:
+            logger.warning(
+                f"_process_bootstrap_trades - {symbol}: TickerState not found after 2s, skipping"
+            )
+            # Signal completion anyway
+            tick_evt = self._tick_bootstrap_events.get(symbol)
+            if tick_evt:
+                tick_evt.set()
+            return
+
+        logger.info(
+            f"_process_bootstrap_trades - {symbol}: feeding {len(trades)} trades to tick indicators"
+        )
+
+        # Feed trades and simulate 1s compute intervals
+        snapshots: list[FactorSnapshot] = []
+        last_compute_ms = 0
+        max_ts_ms = 0
+
+        for ts_ms, price, size in trades:
+            ts_ms = int(ts_ms)
+            max_ts_ms = max(max_ts_ms, ts_ms)
+            for ind in state.tick_indicators:
+                ind.on_tick(ts_ms, float(price), int(size))
+
+            # Compute every 1000ms
+            if last_compute_ms == 0:
+                last_compute_ms = ts_ms
+            elif ts_ms - last_compute_ms >= 1000:
+                factors: dict[str, float] = {}
+                for ind in state.tick_indicators:
+                    value = ind.compute(ts_ms)
+                    if value is not None:
+                        factors[ind.name] = value
+                if factors:
+                    snapshots.append(
+                        FactorSnapshot(
+                            symbol=symbol,
+                            timestamp_ns=ts_ms * 1_000_000,
+                            factors=factors,
+                        )
+                    )
+                last_compute_ms = ts_ms
+
+        # Track the last trade timestamp to avoid duplicate processing
+        state.last_bootstrap_trade_ms = max_ts_ms
+        logger.debug(
+            f"_process_bootstrap_trades - {symbol}: last_bootstrap_trade_ms set to {max_ts_ms}"
+        )
+
+        # Signal that tick bootstrap is complete
+        tick_evt = self._tick_bootstrap_events.get(symbol)
+        if tick_evt:
+            tick_evt.set()
+            logger.debug(
+                f"_process_bootstrap_trades - {symbol}: tick bootstrap event set"
+            )
+
+        # Batch write tick-based factor snapshots to ClickHouse
+        if snapshots and self.storage:
+            snapshots_with_tf = [(s, "tick") for s in snapshots]
+            count = self.storage.write_batch(snapshots_with_tf)
+            logger.info(
+                f"_process_bootstrap_trades - {symbol}: wrote {count} tick factor rows "
+                f"from {len(snapshots)} snapshots"
+            )
 
     def _run_ws_loop(self) -> None:
         """Run the WebSocket event loop (only if we own the manager)."""
@@ -290,136 +557,8 @@ class FactorEngine:
     # ═══════════════════════════════════════════════════════════════════════════
 
     def set_bars_builder(self, bars_builder) -> None:
-        """Wire BarsBuilder for trade observer bootstrap."""
+        """Wire BarsBuilder reference for bootstrap wait functionality."""
         self._bars_builder = bars_builder
-        bars_builder.register_trade_observer(self._on_bootstrap_trades)
-
-    def _on_bar_backfill(self, symbol: str, timeframe: str, bar_count: int) -> None:
-        """Callback when bar backfill completes for a timeframe.
-
-        Called by ClickHouseClient.custom_bar_backfill after bars are written.
-        If this timeframe previously failed bootstrap (no bars found), retry
-        the bootstrap now that bars are available.
-
-        Args:
-            symbol: Ticker symbol
-            timeframe: Timeframe that was backfilled
-            bar_count: Number of bars written
-        """
-        # Check if this timeframe failed bootstrap for this symbol
-        failed_tfs = self._failed_bootstrap_timeframes.get(symbol, set())
-        if timeframe not in failed_tfs:
-            return
-
-        logger.info(
-            f"_on_bar_backfill - {symbol}/{timeframe}: {bar_count} bars backfilled, "
-            f"retrying bootstrap"
-        )
-
-        # Get the timeframe state
-        state = self.ticker_states.get(symbol)
-        if not state:
-            logger.debug(
-                f"_on_bar_backfill - {symbol}/{timeframe}: TickerState not found, skipping"
-            )
-            return
-
-        tf_state = state.timeframe_states.get(timeframe)
-        if not tf_state:
-            logger.debug(
-                f"_on_bar_backfill - {symbol}/{timeframe}: TimeframeState not found, skipping"
-            )
-            return
-
-        # Retry bootstrap for this timeframe
-        self._bootstrap_bars_for_timeframe(symbol, timeframe, tf_state)
-
-        # If bootstrap succeeded, remove from failed set
-        # (it will have bars now, so the retry will succeed)
-        failed_tfs.discard(timeframe)
-        if not failed_tfs:
-            self._failed_bootstrap_timeframes.pop(symbol, None)
-            logger.info(
-                f"_on_bar_backfill - {symbol}/{timeframe}: bootstrap retry complete"
-            )
-
-    def _on_bootstrap_trades(self, symbol: str, trades: list[tuple]) -> None:
-        """Callback from BarsBuilder.trades_backfill with historical trades (UTC).
-
-        Feeds trades to tick indicators and simulates 1s compute intervals
-        to generate historical tick-based factor snapshots.
-        """
-        # Wait up to 2s for TickerState to exist (BarsBuilder may process
-        # "add" before FactorEngine)
-        state = None
-        for _ in range(20):
-            state = self.ticker_states.get(symbol)
-            if state:
-                break
-            time.sleep(0.1)
-
-        if not state:
-            logger.warning(
-                f"_on_bootstrap_trades - {symbol}: TickerState not found after 2s, skipping"
-            )
-            return
-
-        logger.info(
-            f"_on_bootstrap_trades - {symbol}: feeding {len(trades)} trades to tick indicators"
-        )
-
-        # Feed trades and simulate 1s compute intervals
-        snapshots: list[FactorSnapshot] = []
-        last_compute_ms = 0
-
-        max_ts_ms = 0
-        for ts_ms, price, size in trades:
-            ts_ms = int(ts_ms)
-            max_ts_ms = max(max_ts_ms, ts_ms)
-            for ind in state.tick_indicators:
-                ind.on_tick(ts_ms, float(price), int(size))
-
-            # Compute every 1000ms
-            if last_compute_ms == 0:
-                last_compute_ms = ts_ms
-            elif ts_ms - last_compute_ms >= 1000:
-                factors: dict[str, float] = {}
-                for ind in state.tick_indicators:
-                    value = ind.compute(ts_ms)
-                    if value is not None:
-                        factors[ind.name] = value
-                if factors:
-                    snapshots.append(
-                        FactorSnapshot(
-                            symbol=symbol,
-                            timestamp_ns=ts_ms * 1_000_000,
-                            factors=factors,
-                        )
-                    )
-                last_compute_ms = ts_ms
-
-        # Track the last trade timestamp to avoid duplicate processing
-        # when real-time trades arrive via WebSocket
-        state.last_bootstrap_trade_ms = max_ts_ms
-        logger.debug(
-            f"_on_bootstrap_trades - {symbol}: last_bootstrap_trade_ms set to {max_ts_ms}"
-        )
-
-        # Signal that tick bootstrap is complete for this symbol
-        tick_evt = self._tick_bootstrap_events.get(symbol)
-        if tick_evt:
-            tick_evt.set()
-            logger.debug(f"_on_bootstrap_trades - {symbol}: tick bootstrap event set")
-
-        # Batch write tick-based factor snapshots to ClickHouse
-        if snapshots and self.storage:
-            # Create tuples with timeframe for write_batch
-            snapshots_with_tf = [(s, "tick") for s in snapshots]
-            count = self.storage.write_batch(snapshots_with_tf)
-            logger.info(
-                f"_on_bootstrap_trades - {symbol}: wrote {count} tick factor rows "
-                f"from {len(snapshots)} snapshots"
-            )
 
     def _bootstrap_bars_for_timeframe(
         self, symbol: str, timeframe: str, tf_state: "TimeframeState"
@@ -542,7 +681,7 @@ class FactorEngine:
             # 2. Bar-based indicator warmup from ClickHouse bars
             self._bootstrap_bars(symbol)
 
-            # 3. Wait for tick bootstrap to complete (via _on_bootstrap_trades callback)
+            # 3. Wait for tick bootstrap to complete (via EventBus TradesBackfillCompleted)
             # This ensures tick indicators are fully warmed up before we start
             # processing real-time ticks
             tick_evt = self._tick_bootstrap_events.get(symbol)

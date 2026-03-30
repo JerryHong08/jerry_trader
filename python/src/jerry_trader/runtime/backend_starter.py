@@ -346,6 +346,7 @@ class JerryTraderBackendStarter:
         # connection to the data provider via fan-out queues.
         self._shared_ws_manager = None
         self._shared_ws_loop = None
+        self._event_bus = None  # Created after Redis config is available
 
         if "BarsBuilder" in self.roles:
             from jerry_trader.services.bar_builder.bars_builder_service import (
@@ -436,6 +437,26 @@ class JerryTraderBackendStarter:
             if self._preload_list and self._tick_replayer is not None:
                 self._preload_tickers(self._preload_list)
 
+            # Create EventBus for inter-service communication
+            import redis as redis_lib
+
+            from jerry_trader.platform.messaging.event_bus import EventBus
+
+            role_cfg = self.roles["BarsBuilder"]
+            redis_cfg = role_cfg.get("redis", {})
+            redis_host = redis_cfg.get("host", "127.0.0.1")
+            redis_port = redis_cfg.get("port", 6379)
+            redis_db = redis_cfg.get("db", 0)
+            event_bus_redis = redis_lib.Redis(
+                host=redis_host, port=redis_port, db=redis_db, decode_responses=True
+            )
+            self._event_bus = EventBus(
+                redis_client=event_bus_redis,
+                session_id=self.session_id,
+                consumer_name="backend_starter",
+            )
+            logger.info(f"EventBus created for session {self.session_id}")
+
             self.bars_builder = BarsBuilderService(
                 session_id=self.session_id,
                 redis_config=role_cfg.get("redis"),
@@ -447,6 +468,7 @@ class JerryTraderBackendStarter:
                 bootstrap_idle_close_ms=role_cfg.get("bootstrap_idle_close_ms", 1),
                 ws_manager=self._shared_ws_manager,
                 ws_loop=self._shared_ws_loop,
+                event_bus=self._event_bus,
             )
             self._services.append(("BarsBuilder", self.bars_builder))
             logger.info(
@@ -470,6 +492,7 @@ class JerryTraderBackendStarter:
                     redis_config=role_cfg.get("redis"),
                     clickhouse_config=role_cfg.get("clickhouse"),
                     bars_builder=self.bars_builder,
+                    event_bus=self._event_bus,
                 )
             else:
                 logger.error(
@@ -520,14 +543,6 @@ class JerryTraderBackendStarter:
         if self.chart_bff and self.factor_engine:
             self.chart_bff.set_factor_engine(self.factor_engine)
             logger.info("Wired ChartBFF ← FactorEngine (bootstrap wait)")
-
-        # Wire FactorEngine ← ChartBFF ClickHouseClient for bar backfill observer
-        # This allows FactorEngine to retry bootstrap when bars become available
-        if self.chart_bff and self.factor_engine:
-            self.chart_bff.ch_client.register_bar_backfill_observer(
-                self.factor_engine._on_bar_backfill
-            )
-            logger.info("Wired FactorEngine ← ChartBFF (bar backfill observer)")
 
         if "AgentBFF" in self.roles:
             from jerry_trader.apps.news_app.server import AgentBFF
@@ -815,6 +830,29 @@ class JerryTraderBackendStarter:
         if self.replayer:
             self._start_async_worker_in_thread(self.replayer, "Replayer")
             logger.info("Replayer started")
+
+        # Start EventBus consumer if created
+        if self._event_bus:
+            # Subscribe FactorEngine to events
+            if self.factor_engine:
+                from jerry_trader.platform.messaging.event_bus import EventType
+
+                self._event_bus.subscribe(
+                    EventType.BAR_BACKFILL_COMPLETED,
+                    self.factor_engine._on_event_bar_backfill_completed,
+                )
+                self._event_bus.subscribe(
+                    EventType.TRADES_BACKFILL_COMPLETED,
+                    self.factor_engine._on_event_trades_backfill_completed,
+                )
+                self._event_bus.subscribe(
+                    EventType.BAR_CLOSED,
+                    self.factor_engine._on_event_bar_closed,
+                )
+                logger.info("FactorEngine subscribed to EventBus events")
+
+            self._event_bus.start()
+            logger.info("EventBus consumer started")
 
         # Start FactorEngine if enabled (it creates its own threads)
         if self.factor_engine:

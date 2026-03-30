@@ -50,6 +50,13 @@ class EventType(str, Enum):
     # Tick events
     TRADES_BACKFILL_COMPLETED = "trades_backfill_completed"
 
+    # Bootstrap events (BootstrapCoordinator)
+    BOOTSTRAP_START = "bootstrap_start"
+    TRADES_READY = "trades_ready"
+    TICK_WARMUP_DONE = "tick_warmup_done"
+    BAR_WARMUP_DONE = "bar_warmup_done"
+    TICKER_READY = "ticker_ready"
+
     # Future: more event types
     # TICK_SNAPSHOT = "tick_snapshot"
 

@@ -22,7 +22,7 @@ Stateful workers and use-case implementations.
 
 - [-] 3.2 StateEngine Python wrappers and integration
 - [~] [3.15](roadmap/event-bus-architecture.md) ~~EventBus for service communication (replace callbacks)~~ — superseded by 3.7 Bootstrap Coordinator
-- [ ] [3.7](roadmap/bootstrap-coordinator.md) Bootstrap Coordinator — unified orchestration for ticker subscribe pipeline
+- [-] [3.7](roadmap/bootstrap-coordinator.md) Bootstrap Coordinator — unified orchestration for ticker subscribe pipeline
 - [ ] 3.4 Real-time risk management engine with position limits
 - [ ] 3.5 Risk management rules and drawdown checks
 - [ ] 3.6 Risk engine integration with order execution

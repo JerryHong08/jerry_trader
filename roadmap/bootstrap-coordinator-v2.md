@@ -136,27 +136,29 @@ class BootstrapCoordinator:
 
 ### 实现计划（修订）
 
-#### Phase 1: Coordinator Core V2（当前）
-- [ ] 重构 BootstrapCoordinator，支持 per-timeframe 状态
-- [ ] 实现 `store_trades` / `get_trades` (Redis gzip)
-- [ ] 实现消费者注册与完成跟踪
+#### Phase 1: Coordinator Core V2 ✅
+- [x] 重构 BootstrapCoordinator，支持 per-timeframe 状态
+- [x] 实现 `store_trades` / `get_trades` (Redis gzip)
+- [x] 实现消费者注册与完成跟踪
 
-#### Phase 2: BarsBuilder 集成
-- [ ] 调用 `coordinator.store_trades()`
-- [ ] 调用 `coordinator.on_bars_ready()` per timeframe
-- [ ] 移除 `_bootstrap_events`（或保留兼容）
+#### Phase 2: BarsBuilder 集成 ✅
+- [x] 调用 `coordinator.store_trades()`
+- [x] 调用 `coordinator.on_bars_ready()` per timeframe
+- [x] 保留 `_bootstrap_events` 供 ChartBFF REST API 兼容
 
-#### Phase 3: ChartBFF 集成
-- [ ] 调用 `coordinator.start_bootstrap()`
-- [ ] 等待 `wait_for_ticker_ready()`
-- [ ] 条件触发 custom_bar_backfill（仅当 BarsBuilder 未构建）
+#### Phase 3: ChartBFF 集成 ✅
+- [x] 调用 `coordinator.start_bootstrap()`
+- [x] 等待 `wait_for_ticker_ready()`
+- [x] WebSocket subscribe 非阻塞等待 (fire-and-forget)
+- [x] REST API 阻塞等待直到 ready
 
-#### Phase 4: FactorEngine 集成
-- [ ] 从 Coordinator 读取 trades（tick warmup）
-- [ ] Per-timeframe bar warmup 从 ClickHouse
-- [ ] 报告各阶段完成
+#### Phase 4: FactorEngine 集成 ✅
+- [x] 从 Coordinator 读取 trades（tick warmup）
+- [x] Per-timeframe bar warmup 从 ClickHouse
+- [x] 报告各阶段完成 (report_done)
+- [x] 移除 legacy bootstrap 代码
 
-#### Phase 5: 测试
+#### Phase 5: 测试（待进行）
 - [ ] 场景1：新订阅 PRSO (10s + 1m)
 - [ ] 场景2：重新订阅（有历史数据）
 - [ ] 场景3：仅 1d（ws_only，无 bootstrap）
@@ -185,48 +187,61 @@ BOOTSTRAP_STRATEGIES = {
 }
 ```
 
-### 数据流（修订版）
+### 数据流（最终实现）
 
 ```
-ChartBFF.subscribe(AAPL, timeframes=["10s", "1m", "5m", "1d"])
+ChartBFF.ws_endpoint.subscribe(ticker="AAPL", timeframes=["1m", "5m"])
     │
-    ▼
-Coordinator.start_bootstrap("AAPL", ["10s", "1m", "5m", "1d"])
-    │
-    ├─▶ 分析 timeframe 需求
-    │   - 10s: needs trades → 触发 BarsBuilder
-    │   - 1m:  needs trades (meeting bar) + 可选 bars
-    │   - 5m:  needs trades (meeting bar) + 可选 bars
-    │   - 1d:  ws_only → 跳过 bootstrap
-    │
-    ├─▶ BarsBuilder.trades_backfill("AAPL", ["10s", "1m", "5m"])
+    ├─▶ Coordinator.start_bootstrap("AAPL", ["1m", "5m"])
     │       │
-    │       ├─▶ Fetch trades from Polygon/parquet
-    │       ├─▶ Build bars for 10s, 1m, 5m
-    │       ├─▶ Handle meeting bar detection & storage
-    │       ├─▶ Write bars to ClickHouse
-    │       ├─▶ Store trades in Coordinator (for FactorEngine)
-    │       └─▶ Report: trades_ready
+    │       └─▶ 分析 timeframe 需求，创建 bootstrap 计划
+    │           - 1m/5m: needs_trades=True, needs_bars=True
     │
-    ├─▶ ChartBFF.custom_bar_backfill("AAPL", "1m") [可选/并行]
-    │       │
-    │       ├─▶ 如果 1m bars 已在 ClickHouse (BarsBuilder 写入)，跳过
-    │       └─▶ 如果需要，从 Polygon 获取预聚合 bars
+    ├─▶ XADD factor_tasks: {"action": "add", "ticker": "AAPL", "timeframes": "1m,5m"}
     │
-    ▼
-FactorEngine 消费
+    └─▶ (async) Coordinator.wait_for_ticker_ready("AAPL") - 后台等待
+
+BarsBuilder._tasks_listener (收到 factor_tasks)
     │
-    ├─▶ 注册 tick_warmup 消费者 (if any timeframe needs trades)
-    │       │
-    │       ├─▶ 从 Coordinator 读取 trades
-    │       ├─▶ Feed to tick indicators
-    │       └─▶ Report: tick_warmup_done
-    │
-    └─▶ 注册 bar_warmup 消费者 (per timeframe)
+    └─▶ _add_ticker("AAPL", ["1m", "5m"])
+        │
+        └─▶ 如果是新 ticker: 启动 trades_backfill 线程
             │
-            ├─▶ 从 ClickHouse 读取 bars
-            ├─▶ Feed to bar indicators (EMA20)
-            └─▶ Report: bar_warmup_done for each tf
+            ├─▶ Fetch trades from Polygon/parquet (live/replay)
+            ├─▶ Build bars for all bootstrap_tfs (10s, 1m, 5m...)
+            ├─▶ Meeting bar detection & merge
+            ├─▶ Write bars to ClickHouse
+            ├─▶ Coordinator.store_trades("AAPL", trades) - 存储 trades
+            ├─▶ Coordinator.on_bars_ready("AAPL", "1m") - 通知 bars ready
+            └─▶ Coordinator.on_bars_ready("AAPL", "5m") - 每个 timeframe
+
+FactorEngine._tasks_listener (收到 factor_tasks)
+    │
+    └─▶ add_ticker("AAPL", ["1m", "5m"])
+        │
+        └─▶ 启动 _run_bootstrap 线程
+            │
+            ├─▶ 注册 tick_warmup 消费者 (如果 needs_trades)
+            │       │
+            │       ├─▶ 等待 trades available (coordinator.get_trades)
+            │       ├─▶ Feed trades to tick indicators (TradeRate)
+            │       └─▶ Coordinator.report_done("AAPL", "tick_warmup", "factor_engine")
+            │
+            └─▶ 注册 bar_warmup:1m 和 bar_warmup:5m 消费者
+                    │
+                    ├─▶ 等待 bars ready (poll coordinator state)
+                    ├─▶ Query bars from ClickHouse
+                    ├─▶ Feed bars to bar indicators (EMA20)
+                    └─▶ Coordinator.report_done("AAPL", "bar_warmup:1m", "factor_engine")
+
+ChartBFF REST API / WebSocket
+    │
+    └─▶ get_chart_bars("AAPL", "1m") / wait_bootstrap
+        │
+        └─▶ Coordinator.wait_for_ticker_ready("AAPL", timeout=30s)
+            │
+            ├─▶ 等待所有消费者完成 (tick_warmup + all bar_warmup)
+            └─▶ 返回 ready → 查询 ClickHouse 返回 bars
 ```
 
 ### 关键设计变更

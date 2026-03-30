@@ -256,7 +256,13 @@ class BootstrapCoordinator:
                 bootstrap.trades_state = TradesBootstrapState.NOT_NEEDED
 
             self._bootstraps[symbol] = bootstrap
-            self._ready_events[symbol] = threading.Event()
+            # Create or reset the Event for this bootstrap
+            # If re-subscribing after previous completion, create new Event
+            if symbol in self._ready_events:
+                # Clear any previous state for fresh bootstrap
+                self._ready_events[symbol].clear()
+            else:
+                self._ready_events[symbol] = threading.Event()
 
         logger.info(
             f"start_bootstrap - {symbol}: started with timeframes={timeframes}, "

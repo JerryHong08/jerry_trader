@@ -330,7 +330,8 @@ class ChartBFF:
             # If ClickHouse is missing historical coverage, backfill
             # from Polygon/local data and persist into ClickHouse.
             # Applies to both subscribed and unsubscribed tickers.
-            if self._needs_historical_backfill(
+            # Skip 10s - it can only be built from trades, not fetched from Polygon.
+            if ch_tf != "10s" and self._needs_historical_backfill(
                 ticker_upper,
                 ch_bars,
                 ch_tf,

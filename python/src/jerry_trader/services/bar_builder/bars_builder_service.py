@@ -44,6 +44,8 @@ from jerry_trader import clock as clock_mod
 from jerry_trader._rust import BarBuilder, load_trades_from_parquet
 from jerry_trader.platform.config.config import lake_data_dir
 from jerry_trader.platform.config.session import make_session_id, parse_session_id
+from jerry_trader.platform.messaging.event_bus import Event as BusEvent
+from jerry_trader.platform.messaging.event_bus import EventBus
 from jerry_trader.platform.storage.ohlcv_writer import write_bars
 from jerry_trader.services.bar_builder.bar_query_service import ClickHouseClient
 from jerry_trader.services.market_data.bootstrap.polygon_fetcher import (
@@ -96,6 +98,8 @@ class BarsBuilderService:
         ws_manager: Optional[UnifiedTickManager] = None,
         ws_loop: Optional[asyncio.AbstractEventLoop] = None,
         manager_type: Optional[str] = None,
+        event_bus: Optional[EventBus] = None,
+        coordinator=None,
     ):
         self.session_id = session_id or make_session_id()
         self.db_date, self.run_mode = parse_session_id(self.session_id)
@@ -238,8 +242,11 @@ class BarsBuilderService:
         self._bootstrap_done: Dict[str, set] = {}
         self._bootstrap_events: Dict[str, Event] = {}
 
-        # ── Trade observers (e.g., FactorEngine bootstrap) ────────
-        self._trade_observers: list = []
+        # ── EventBus (inter-service messaging) ──────────────────────
+        self._event_bus = event_bus
+
+        # ── BootstrapCoordinator integration ─────────────────────────
+        self._coordinator = coordinator
 
     # ════════════════════════════════════════════════════════════════════
     # Lifecycle
@@ -741,15 +748,6 @@ class BarsBuilderService:
                 logger.info(f"trades_backfill - {symbol}: no trades before WS start")
                 return
 
-            # Notify trade observers (e.g., FactorEngine bootstrap)
-            for observer in self._trade_observers:
-                try:
-                    observer(symbol, trades)
-                except Exception as e:
-                    logger.error(
-                        f"trades_backfill - {symbol}: trade observer error - {e}"
-                    )
-
             # ── Convert UTC → ET for Rust BarBuilder ─────────────────
             # Rust expects timestamps in US/Eastern time (handles session boundaries correctly)
             trades_et = [(self._utc_ms_to_et_ms(t), p, s) for t, p, s in trades]
@@ -855,6 +853,36 @@ class BarsBuilderService:
             # _flush_loop has a chance to drain _pending_bars, resulting
             # in stale / missing data served to the frontend.
             self._flush_to_clickhouse(caller="trades_backfill")
+
+            # Store trades in BootstrapCoordinator for FactorEngine to consume
+            # This replaces the old callback pattern with unified orchestration
+            if self._coordinator:
+                source = "polygon" if self.run_mode == "live" else "parquet"
+                first_ws_ts = self._first_ws_tick_ts.get(symbol)
+                trades_key = self._coordinator.store_trades(
+                    symbol=symbol,
+                    trades=trades,  # Original UTC timestamps
+                    from_ms=from_ms,
+                    first_ws_ts=first_ws_ts,
+                )
+                logger.info(
+                    f"trades_backfill - {symbol}: stored {len(trades)} trades "
+                    f"in coordinator at {trades_key}"
+                )
+
+            # Publish TradesBackfillCompleted event to EventBus (legacy)
+            if self._event_bus:
+                source = "polygon" if self.run_mode == "live" else "parquet"
+                first_ws_ts = self._first_ws_tick_ts.get(symbol)
+                self._event_bus.publish(
+                    BusEvent.trades_backfill_completed(
+                        symbol=symbol,
+                        trade_count=len(trades),
+                        source=source,
+                        from_ms=from_ms,
+                        first_ws_ts=first_ws_ts,
+                    )
+                )
         finally:
             # Signal that bootstrap is complete (success or failure)
             # so tickdata_server REST handler can stop waiting.
@@ -902,13 +930,6 @@ class BarsBuilderService:
         if evt is None:
             return True  # no bootstrap in progress
         return evt.wait(timeout=timeout)
-
-    def register_trade_observer(self, callback) -> None:
-        """Register callback to receive historical trades during bootstrap.
-
-        callback(symbol, trades) where trades = [(ts_ms_utc, price, size), ...]
-        """
-        self._trade_observers.append(callback)
 
     def _try_merge_meeting_bar(self, bar: dict) -> dict:
         """If this completed bar is a meeting bar with a stored REST partial,
@@ -1111,14 +1132,40 @@ class BarsBuilderService:
     # ════════════════════════════════════════════════════════════════════
 
     def _publish_bar(self, bar: dict) -> None:
-        """Publish a completed bar to a Redis channel for WebSocket fan-out."""
+        """Publish a completed bar to a Redis channel for WebSocket fan-out.
+
+        Also publishes BarClosed event to EventBus for inter-service communication
+        (e.g., FactorEngine for bar-based factor computation).
+        """
         import json
 
-        channel = f"bars:{bar['ticker']}:{bar['timeframe']}"
+        ticker = bar.get("ticker", "")
+        timeframe = bar.get("timeframe", "")
+        channel = f"bars:{ticker}:{timeframe}"
+
+        # Publish to Redis pub/sub (for ChartBFF WebSocket fan-out)
         try:
             self.redis_client.publish(channel, json.dumps(bar))
         except Exception as e:
             logger.error(f"Failed to publish bar on {channel}: {e}")
+
+        # Publish BarClosed event to EventBus (for FactorEngine, etc.)
+        if self._event_bus:
+            try:
+                self._event_bus.publish(
+                    BusEvent.bar_closed(
+                        symbol=ticker,
+                        timeframe=timeframe,
+                        bar_start=bar.get("bar_start", 0),
+                        open_price=bar.get("open", 0.0),
+                        high=bar.get("high", 0.0),
+                        low=bar.get("low", 0.0),
+                        close=bar.get("close", 0.0),
+                        volume=bar.get("volume", 0),
+                    )
+                )
+            except Exception as e:
+                logger.error(f"Failed to publish BarClosed event: {e}")
 
     # ════════════════════════════════════════════════════════════════════
     # ClickHouse flush loop

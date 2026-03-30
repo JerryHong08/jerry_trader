@@ -2,14 +2,16 @@
 
 from jerry_trader.services.orchestration.bootstrap_coordinator import (
     BootstrapCoordinator,
-    BootstrapEvent,
-    BootstrapEventType,
-    BootstrapState,
+    TimeframeState,
+    TradesBootstrapState,
+    get_coordinator,
+    set_coordinator,
 )
 
 __all__ = [
     "BootstrapCoordinator",
-    "BootstrapEvent",
-    "BootstrapEventType",
-    "BootstrapState",
+    "TimeframeState",
+    "TradesBootstrapState",
+    "get_coordinator",
+    "set_coordinator",
 ]

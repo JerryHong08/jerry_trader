@@ -12,10 +12,11 @@
 2. [Machine Topology](#2-machine-topology)
 3. [Current Python Layout](#3-current-python-layout)
 4. [Layer Definitions](#4-layer-definitions)
-5. [Rust Extension Layout](#5-rust-extension-layout)
-6. [Data Flow](#6-data-flow)
-7. [Stage 3 & 4 Roadmap](#7-stage-3--4-roadmap)
-8. [Development Guidelines](#8-development-guidelines)
+5. [Bootstrap Coordinator V2](#5-bootstrap-coordinator-v2)
+6. [Rust Extension Layout](#6-rust-extension-layout)
+7. [Data Flow](#7-data-flow)
+8. [Stage 3 & 4 Roadmap](#8-stage-3--4-roadmap)
+9. [Development Guidelines](#9-development-guidelines)
 
 ---
 
@@ -130,6 +131,8 @@ python/
 │       │
 │       ├── services/                    # ── SERVICE / USE-CASE LAYER ──────────────
 │       │   │                            #    Stateful workers, no HTTP/WS here
+│       │   ├── orchestration/           # BootstrapCoordinator (V2)
+│       │   │   └── bootstrap_coordinator.py
 │       │   ├── bar_builder/
 │       │   │   ├── bars_builder_service.py    # Main bar builder service
 │       │   │   ├── chart_data_service.py      # Chart data management
@@ -253,12 +256,134 @@ The codebase follows a **layered architecture** with strict dependency rules:
 - ✅ `backend_starter.py` moved to `runtime/`
 - ✅ `shared/logging/logger.py` moved from `shared/utils/`
 - ✅ Platform layer clean (no service imports)
+- ✅ **Bootstrap Coordinator V2** implemented (direct service calls, no Redis Streams)
 - ⚠️ Domain layer is placeholder (empty `__init__.py` files only)
 - ⚠️ `config_builder.py` still in `platform/config/` (should be merged with `config.py`)
 
 ---
 
-## 5. Rust Extension Layout
+## 5. Bootstrap Coordinator V2
+
+The **Bootstrap Coordinator** orchestrates the ticker subscription flow to ensure bars and factors are warmed up before serving data to the frontend.
+
+### Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        ChartBFF (WebSocket)                      │
+│                          apps/chart_app/                         │
+└──────────────────────────────┬──────────────────────────────────┘
+                               │ start_bootstrap(symbol, timeframes)
+                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    BootstrapCoordinator                          │
+│              services/orchestration/                             │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │  Per-symbol, per-timeframe state tracking                │   │
+│  │  - TimeframeState: PENDING → READY → DONE                │   │
+│  │  - TradesBootstrapState: NOT_NEEDED → FETCHING → READY   │   │
+│  └──────────────────────────────────────────────────────────┘   │
+└────────────┬───────────────────────────────┬────────────────────┘
+             │                               │
+   add_ticker()│                    add_ticker()│
+             ▼                               ▼
+┌─────────────────────────┐    ┌─────────────────────────┐
+│   BarsBuilderService    │    │     FactorEngine        │
+│   services/bar_builder/ │    │   services/factor/      │
+│                         │    │                         │
+│ • Fetch trades (Polygon │    │ • Register consumers    │
+│   or parquet)           │    │ • Wait for trades       │
+│ • Build bars (Rust)     │    │ • Tick warmup           │
+│ • Store to ClickHouse   │    │ • Wait for bars         │
+│ • Notify coordinator    │    │ • Bar warmup            │
+│   (on_bars_ready)       │    │ • Notify coordinator    │
+└───────────┬─────────────┘    └───────────┬─────────────┘
+            │                              │
+            ▼                              ▼
+     ┌──────────────┐             ┌──────────────┐
+     │  ClickHouse  │             │  ClickHouse  │
+     │  ohlcv_bars  │             │   factors    │
+     └──────────────┘             └──────────────┘
+```
+
+### BootstrapableService Protocol
+
+Services that participate in bootstrap implement the `BootstrapableService` protocol:
+
+```python
+class BootstrapableService(Protocol):
+    def add_ticker(self, symbol: str, timeframes: list[str]) -> bool:
+        """Add ticker for processing. Check ClickHouse first — if bars exist,
+        notify coordinator immediately."""
+        ...
+
+    def remove_ticker(self, symbol: str) -> bool:
+        """Remove ticker from processing."""
+        ...
+
+    def is_ready(self, symbol: str) -> bool:
+        """Check if ticker bootstrap is complete."""
+        ...
+```
+
+**Implementations:**
+- `BarsBuilderService` — fetches trades, builds bars, stores to ClickHouse
+- `FactorEngine` — waits for trades/bars, warms up indicators
+
+### Per-Timeframe State Tracking
+
+The coordinator tracks bootstrap state per symbol and timeframe:
+
+```python
+TimeframeState:
+  PENDING → FETCHING → READY → WARMUP → DONE
+              ↑           ↑
+              └─ BarsBuilder notifies
+                          └─ FactorEngine notifies
+
+TradesBootstrapState (shared across timeframes):
+  NOT_NEEDED → PENDING → FETCHING → READY → CONSUMING → DONE
+```
+
+### Key Design Decisions
+
+1. **Direct Method Calls** — Services register with coordinator; coordinator calls `add_ticker()` directly instead of using Redis Streams (more reliable, better timing control)
+
+2. **Incremental Bootstrap** — When switching timeframes on an existing ticker, only the new timeframes are bootstrapped (not a full re-bootstrap)
+
+3. **ClickHouse First Check** — Services check if bars already exist in ClickHouse before fetching; if they exist, bootstrap is skipped for that timeframe
+
+4. **Thread-Safe State** — All coordinator state changes are protected by `threading.Lock()`
+
+### Flow: New Ticker Subscription
+
+1. Frontend sends WebSocket subscribe request to ChartBFF
+2. ChartBFF calls `coordinator.start_bootstrap(symbol, timeframes)` in background thread
+3. Coordinator analyzes timeframes, creates `TickerBootstrap` state
+4. Coordinator calls `BarsBuilderService.add_ticker()` and `FactorEngine.add_ticker()` in background threads
+5. BarsBuilder checks ClickHouse — if no bars, fetches trades and builds bars
+6. BarsBuilder stores bars to ClickHouse, calls `coordinator.on_bars_ready(symbol, tf)`
+7. FactorEngine registers as consumer, waits for trades/bars via coordinator
+8. FactorEngine warms up indicators from historical data
+9. FactorEngine calls `coordinator.report_done(symbol, phase, consumer_id)`
+10. When all phases complete, coordinator sets ready event
+11. ChartBFF waits on `coordinator.wait_for_ticker_ready()` (30s timeout)
+12. ChartBFF serves bars from ClickHouse to frontend
+
+### Flow: Timeframe Switching
+
+When switching from 1m to 5m on an existing ticker:
+
+1. ChartBFF calls `coordinator.start_bootstrap(symbol, ["5m"])`
+2. Coordinator detects existing bootstrap, adds "5m" to timeframe states
+3. Coordinator calls `BarsBuilderService.add_ticker()` with just `["5m"]`
+4. BarsBuilder detects existing ticker, only bootstraps new timeframe
+5. Same for FactorEngine — only new timeframe is processed
+6. Existing 1m tick stream and bars continue uninterrupted
+
+---
+
+## 6. Rust Extension Layout
 
 ```
 rust/
@@ -287,24 +412,40 @@ rust/
 
 ---
 
-## 6. Data Flow
+## 7. Data Flow
 
-### Live Mode (Machine A)
+### Live Mode (Machine A) — Bootstrap Coordinator V2
 
 ```
 Polygon WebSocket
       │
       ▼
 UnifiedTickManager  ──fan-out──►  BarsBuilderService  ──► ClickHouse (OHLCV)
-      │                                  │
-      │                                  └──► Redis A (bar stream)
-      │                                            │
-      ▼                                            ▼
-  ChartBFF  ◄──────────────────────────── Frontend (WebSocket)
+      │                    │             │
+      │                    │             └──► BootstrapCoordinator
+      │                    │                      ▲
+      │                    │    on_bars_ready()   │
+      │                    │                      │
+      │                    └──► FactorEngine ─────┘
+      │                         (bar warmup)   report_done()
       │
-      └──► Redis A (tick stream)
+      └──► ChartBFF ◄────────── wait_for_ready()
+                │
+                ▼
+            Frontend (WebSocket)
 ```
 
+**Bootstrap Flow:**
+1. ChartBFF receives subscribe request from frontend
+2. ChartBFF calls `coordinator.start_bootstrap(symbol, timeframes)`
+3. Coordinator calls `BarsBuilderService.add_ticker()` and `FactorEngine.add_ticker()` directly
+4. BarsBuilder fetches trades → builds bars → stores in ClickHouse → `coordinator.on_bars_ready()`
+5. FactorEngine waits for bars → warms up indicators → `coordinator.report_done()`
+6. Coordinator signals "ready" → ChartBFF serves data
+
+**Key Design:** Direct method calls via `BootstrapableService` protocol, not Redis Streams.
+
+### Live Mode (Machine B)
 ### Live Mode (Machine B)
 
 ```
@@ -421,7 +562,7 @@ skills/                  ← Markdown skill instruction files (already at root)
 
 ---
 
-## 8. Development Guidelines
+## 9. Development Guidelines
 
 ### Adding New Services
 
@@ -458,5 +599,7 @@ skills/                  ← Markdown skill instruction files (already at root)
 
 ### Known Issues
 
+- ✅ **FIXED (Bootstrap Coordinator V2):** Timeframe switching no longer causes 30s blocking timeout. The coordinator now supports incremental bootstrap for new timeframes on existing tickers.
+
 - When switching frontend chart timespan [10s, 1m], newest bar may cover last bar's timespan duration (open/high/low)
-- Not fixed to avoid disrupting current tickdata orchestration
+  - Not fixed to avoid disrupting current tickdata orchestration

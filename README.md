@@ -93,13 +93,13 @@ Make sure Redis is running (`redis-server` or via Docker).
 
 ```bash
 # Start all backend services for a machine profile defined in config.yaml
-poetry run python -m jerry_trader.backend_starter --machine wsl2
+poetry run python -m jerry_trader.runtime.backend_starter --machine wsl2
 
 # Dry-run to see what would start
-poetry run python -m jerry_trader.backend_starter --machine wsl2 --dry-run
+poetry run python -m jerry_trader.runtime.backend_starter --machine wsl2 --dry-run
 
 # With replay mode (historical date)
-poetry run python -m jerry_trader.backend_starter --machine wsl2 --defaults.replay_date 20260115
+poetry run python -m jerry_trader.runtime.backend_starter --machine wsl2 --defaults.replay_date 20260115
 
 # ibkr order management backend
 uvicorn python.src.jerry_trader.apps.order_runtime.main:app --reload --port 8888
@@ -145,9 +145,9 @@ The proposed layout follows a **layered architecture** with strict dependency ru
 
 ## Data Flow
 
-### Live Mode (Machine A)
+### Live Mode (Machine A) — Bootstrap Coordinator V2
 
-```bash
+```
             Theta Data/Polygon/LocalSimulator tickdata WebSocket
                                     │
                                     ▼
@@ -159,26 +159,32 @@ The proposed layout follows a **layered architecture** with strict dependency ru
             BarsBuilderService  FactorEngine          ChartBFF
          (Single Bar Truth)    (Indicators)        (Orchestration)
                     │               │                    │
-                    │ trade observer│                    │
-                    │─(bootstrap)──►│                    │
-                    │               │                    │
-                    ▼               │                    │
-              ClickHouse ◄──────────┤              WebSocket + REST
-             (OHLCV bars)           │                    │
-                    │     bar warmup│                    │
-                    │               │──────►ClickHouse   │
-                    │               │     (factors bars) │
-                    │  Redis pub/sub│                    │
-                    │──(bars:*)────►│                    │
-                    │               │──(factors:*)──────►│
-                    │               │                    │
-                    │               │    wait_bootstrap  │
-                    │               │◄──────────────────►│
-                    │                                    │
-                    │                                    ▼
-                    │                                 Frontend
-                                               (Chart + FactorChart)
+                    │    ┌──────────┴──────────┐         │
+                    │    │                     │         │
+                    ▼    ▼                     ▼         ▼
+              ClickHouse      BootstrapCoordinator  WebSocket + REST
+             (OHLCV bars)      (orchestrates bars    (Frontend)
+                    │           & factor warmup)      │
+                    │                   ▲             │
+                    │   ┌───────────────┘             │
+                    │   │                               │
+                    ▼   │                               │
+              Redis pub/sub                             │
+           ┌─────────────────┐                          │
+           │ bars:{sym}:{tf} │──────────────────────────┤
+           │ factors:{sym}   │──────────────────────────┘
+           └─────────────────┘
 ```
+
+**Bootstrap Flow:**
+1. Frontend subscribes to ticker via ChartBFF WebSocket
+2. ChartBFF calls `coordinator.start_bootstrap(symbol, timeframes)`
+3. Coordinator calls `BarsBuilderService.add_ticker()` and `FactorEngine.add_ticker()` directly
+4. BarsBuilder fetches trades → builds bars → stores in ClickHouse → notifies coordinator
+5. FactorEngine waits for bars → warms up indicators → notifies coordinator
+6. Coordinator signals "ready" → ChartBFF serves bars + factors to frontend
+
+**Key Design:** No Redis Streams for bootstrap coordination — direct method calls via `BootstrapableService` protocol for reliability.
 
 ### Live Mode (Machine B)
 

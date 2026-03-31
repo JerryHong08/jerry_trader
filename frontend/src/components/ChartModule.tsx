@@ -56,6 +56,7 @@ export function ChartModule({
   onSymbolSelect,
   settings,
   onSettingsChange,
+  zoom = 1,
 }: ModuleProps) {
   // ── Symbol & subscription ──────────────────────────────────────────────
   const [symbol, setSymbol] = useState(selectedSymbol || '');
@@ -159,8 +160,21 @@ export function ChartModule({
     });
     ro.observe(chartContainerRef.current);
 
+    // Fix for browser zoom: redraw chart when devicePixelRatio changes
+    const mq = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+    const handleDprChange = () => {
+      if (chartContainerRef.current && chartRef.current) {
+        chartRef.current.applyOptions({
+          width: chartContainerRef.current.clientWidth,
+          height: chartContainerRef.current.clientHeight,
+        });
+      }
+    };
+    mq.addEventListener('change', handleDprChange);
+
     return () => {
       ro.disconnect();
+      mq.removeEventListener('change', handleDprChange);
       chart.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
@@ -685,8 +699,19 @@ export function ChartModule({
         </div>
       </div>
 
-      {/* Chart area */}
-      <div className="flex-1 min-h-0" ref={chartContainerRef} />
+      {/* Chart area with counter-zoom to fix mouse coordinates */}
+      <div className="flex-1 min-h-0 relative">
+        <div
+          className="absolute inset-x-0 top-0 bottom-2"
+          ref={chartContainerRef}
+          style={{
+            transform: zoom !== 1 ? `scale(${1 / zoom})` : undefined,
+            transformOrigin: 'top left',
+            width: zoom !== 1 ? `${zoom * 100}%` : undefined,
+            height: zoom !== 1 ? `${zoom * 100}%` : undefined,
+          }}
+        />
+      </div>
 
       {/* Empty state */}
       {!symbol && (

@@ -1,6 +1,10 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useImperativeHandle, forwardRef } from 'react';
 import { GridItem } from './GridItem';
 import type { GridItemConfig } from '../types';
+
+export interface GridContainerRef {
+  focusToFit: () => void;
+}
 
 interface GridContainerProps {
   items: GridItemConfig[];
@@ -21,7 +25,7 @@ const MAX_ZOOM = 3.0;
 const FOCUS_PADDING = 20; // px padding around focused area
 const ANIMATE_DURATION = 400; // ms for smooth focus transition
 
-export function GridContainer({
+export const GridContainer = forwardRef<GridContainerRef, GridContainerProps>(function GridContainer({
   items,
   onRemove,
   onUpdate,
@@ -33,7 +37,7 @@ export function GridContainer({
   onZoomChange,
   isLocked,
   onLockChange,
-}: GridContainerProps) {
+}: GridContainerProps, ref) {
   const [panOffset, setPanOffset] = useState(() => {
     try {
       const saved = localStorage.getItem('trading-system-pan');
@@ -221,6 +225,18 @@ export function GridContainer({
     setTimeout(() => setIsAnimating(false), ANIMATE_DURATION);
   }, [onZoomChange]);
 
+  // Expose imperative methods via ref
+  useImperativeHandle(ref, () => ({
+    focusToFit: () => {
+      if (items.length === 0) return;
+      const minX = Math.min(...items.map(i => i.position.x));
+      const minY = Math.min(...items.map(i => i.position.y));
+      const maxX = Math.max(...items.map(i => i.position.x + i.size.width));
+      const maxY = Math.max(...items.map(i => i.position.y + i.size.height));
+      focusOnBounds(minX, minY, maxX, maxY);
+    },
+  }), [items, focusOnBounds]);
+
   // Left-click drag: selection rectangle on canvas
   useEffect(() => {
     if (!isSelecting) return;
@@ -387,4 +403,4 @@ export function GridContainer({
 
     </div>
   );
-}
+});

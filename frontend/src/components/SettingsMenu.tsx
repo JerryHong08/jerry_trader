@@ -1,6 +1,5 @@
-import React, { useState } from 'react';
-import { Settings, X, Copy, Check, Upload, Download, Layout, Trash2 } from 'lucide-react';
-import { getAllTemplates } from '../config/layoutTemplates';
+import React, { useState, useEffect } from 'react';
+import { Settings, X, Copy, Check, Upload, Download, Trash2 } from 'lucide-react';
 import { clearAllCaches, getCacheStats } from '../hooks/useWebSocket';
 import type { GridItemConfig } from '../types';
 
@@ -9,14 +8,21 @@ interface SettingsMenuProps {
   onGridGapChange: (gap: number) => void;
   items: GridItemConfig[];
   onImportLayout: (items: GridItemConfig[]) => void;
-  currentTemplateId?: string;
-  onTemplateChange: (templateId: string) => void;
+  isOpen?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }
 
-export function SettingsMenu({ gridGap, onGridGapChange, items, onImportLayout, currentTemplateId, onTemplateChange }: SettingsMenuProps) {
-  const [isOpen, setIsOpen] = useState(false);
+export function SettingsMenu({ gridGap, onGridGapChange, items, onImportLayout, isOpen: controlledIsOpen, onOpenChange }: SettingsMenuProps) {
+  const [internalIsOpen, setInternalIsOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [importText, setImportText] = useState('');
+
+  // Support both controlled and uncontrolled modes
+  const isOpen = controlledIsOpen !== undefined ? controlledIsOpen : internalIsOpen;
+  const setIsOpen = (open: boolean) => {
+    setInternalIsOpen(open);
+    onOpenChange?.(open);
+  };
 
   const handleExport = () => {
     const layoutConfig = JSON.stringify(items, null, 2);
@@ -61,7 +67,7 @@ export function SettingsMenu({ gridGap, onGridGapChange, items, onImportLayout, 
       <button
         onClick={() => setIsOpen(true)}
         className="p-2 hover:bg-zinc-800 transition-colors"
-        title="Settings"
+        title="Settings (,)"
       >
         <Settings className="w-5 h-5" />
       </button>
@@ -165,45 +171,6 @@ export function SettingsMenu({ gridGap, onGridGapChange, items, onImportLayout, 
             </div>
           </div>
 
-          {/* Layout Templates */}
-          <div className="border-t border-zinc-800 pt-4">
-            <div className="flex items-center gap-2 mb-3">
-              <Layout className="w-4 h-4" />
-              <label className="text-sm">Layout Templates</label>
-            </div>
-            <div className="space-y-2">
-              {getAllTemplates().map(template => (
-                <button
-                  key={template.id}
-                  onClick={() => {
-                    onTemplateChange(template.id);
-                    setIsOpen(false);
-                    // if (confirm(`Load "${template.name}" template? This will replace your current layout.`)) {
-                    // }
-                  }}
-                  className={`w-full text-left p-3 border transition-colors ${
-                    currentTemplateId === template.id
-                      ? 'bg-blue-600 border-blue-500'
-                      : 'bg-zinc-800 border-zinc-700 hover:bg-zinc-700'
-                  }`}
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex-1">
-                      <div className="text-sm mb-1">{template.name}</div>
-                      <div className="text-xs text-gray-400">{template.description}</div>
-                    </div>
-                    {currentTemplateId === template.id && (
-                      <Check className="w-4 h-4 text-white shrink-0" />
-                    )}
-                  </div>
-                </button>
-              ))}
-            </div>
-            <p className="text-xs text-gray-500 mt-2">
-              Select a template to instantly apply a predefined layout. Your current layout will be replaced.
-            </p>
-          </div>
-
           {/* Data Cache Management */}
           <div className="border-t border-zinc-800 pt-4">
             <div className="flex items-center justify-between mb-2">
@@ -245,17 +212,6 @@ export function SettingsMenu({ gridGap, onGridGapChange, items, onImportLayout, 
             </p>
           </div>
 
-          {/* Instructions */}
-          <div className="border-t border-zinc-800 pt-4">
-            <h3 className="text-sm mb-2">How to Add Custom Template</h3>
-            <ol className="text-xs text-gray-400 space-y-1 list-decimal list-inside">
-              <li>Arrange your modules in the perfect layout</li>
-              <li>Click "Copy to Clipboard" to export the configuration</li>
-              <li>Create a new <code className="bg-zinc-800 px-1 py-0.5">.json</code> file in <code className="bg-zinc-800 px-1 py-0.5">src/config/templates/</code></li>
-              <li>Paste the layout array into the JSON with id, name, description, and layout fields</li>
-              <li>The template will be auto-registered on next build/reload</li>
-            </ol>
-          </div>
         </div>
       </div>
     </div>

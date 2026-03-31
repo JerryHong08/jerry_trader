@@ -569,6 +569,7 @@ export function GridItem({
             onSymbolSelect={onSymbolSelect}
             settings={item.settings}
             onSettingsChange={(settings) => onUpdate({ settings: { ...item.settings, ...settings } })}
+            zoom={zoom}
           />
         </div>
       </div>

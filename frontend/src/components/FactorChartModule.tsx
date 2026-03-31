@@ -50,12 +50,13 @@ export function FactorChartModule({
   selectedTimeframe,
   settings,
   onSettingsChange,
+  zoom = 1,
 }: ModuleProps) {
   // ── Symbol & Timeframe (follows ChartModule) ──────────────────────────
   const [symbol, setSymbol] = useState(selectedSymbol || '');
 
   // Timeframe from settings (independent mode)
-  const timeframe: ChartTimeframe = settings?.chart?.timeframe ?? '5m';
+  const timeframe: ChartTimeframe = settings?.chart?.timeframe ?? '10s';
 
   // Timeframe selector dropdown state
   const [showTfMenu, setShowTfMenu] = useState(false);
@@ -149,8 +150,21 @@ export function FactorChartModule({
     });
     ro.observe(chartContainerRef.current);
 
+    // Fix for browser zoom: redraw chart when devicePixelRatio changes
+    const mq = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+    const handleDprChange = () => {
+      if (chartContainerRef.current && chartRef.current) {
+        chartRef.current.applyOptions({
+          width: chartContainerRef.current.clientWidth,
+          height: chartContainerRef.current.clientHeight,
+        });
+      }
+    };
+    mq.addEventListener('change', handleDprChange);
+
     return () => {
       ro.disconnect();
+      mq.removeEventListener('change', handleDprChange);
       chart.remove();
       chartRef.current = null;
       seriesRefsRef.current = {};
@@ -361,9 +375,18 @@ export function FactorChartModule({
         </div>
       </div>
 
-      {/* Chart Container */}
+      {/* Chart Container with counter-zoom to fix mouse coordinates */}
       <div className="flex-1 relative bg-zinc-950 rounded border border-zinc-800">
-        <div ref={chartContainerRef} className="absolute inset-0" />
+        <div
+          ref={chartContainerRef}
+          className="absolute inset-0"
+          style={{
+            transform: zoom !== 1 ? `scale(${1 / zoom})` : undefined,
+            transformOrigin: 'top left',
+            width: zoom !== 1 ? `${zoom * 100}%` : undefined,
+            height: zoom !== 1 ? `${zoom * 100}%` : undefined,
+          }}
+        />
 
         {/* Loading/Error Overlay */}
         {(tickFactorState?.loading || barFactorState?.loading) && (

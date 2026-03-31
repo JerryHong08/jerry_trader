@@ -239,7 +239,8 @@ export function OverviewChartModule({
   selectedSymbol,
   onSymbolSelect,
   settings,
-  onSettingsChange
+  onSettingsChange,
+  zoom = 1,
 }: ModuleProps) {
   // Refs
   const chartContainerRef = useRef<HTMLDivElement>(null);
@@ -425,6 +426,18 @@ export function OverviewChartModule({
     });
     resizeObserverRef.current.observe(chartContainerRef.current);
 
+    // Fix for browser zoom: redraw chart when devicePixelRatio changes
+    const mq = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+    const handleDprChange = () => {
+      if (chartContainerRef.current && chartRef.current) {
+        chartRef.current.applyOptions({
+          width: chartContainerRef.current.clientWidth,
+          height: chartContainerRef.current.clientHeight,
+        });
+      }
+    };
+    mq.addEventListener('change', handleDprChange);
+
     // Listen for user scroll/drag interactions on the time scale
     // When user manually scrolls, disable "follow latest" mode
     chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
@@ -457,6 +470,7 @@ export function OverviewChartModule({
       container.removeEventListener('mouseup', handleMouseUp);
       container.removeEventListener('mouseleave', handleMouseUp);
       container.removeEventListener('wheel', handleWheel);
+      mq.removeEventListener('change', handleDprChange);
       chart.remove();
       chartRef.current = null;
       seriesMapRef.current.clear();
@@ -1113,12 +1127,18 @@ export function OverviewChartModule({
         </div>
       </div>
 
-      {/* Chart Container */}
+      {/* Chart Container with counter-zoom to fix mouse coordinates */}
       <div className="flex-1 relative overflow-hidden" style={{ minHeight: 0 }}>
         {/* Always render chart container, but show empty state overlay when no data */}
         <div
           ref={chartContainerCallback}
           className="w-full h-full"
+          style={{
+            transform: zoom !== 1 ? `scale(${1 / zoom})` : undefined,
+            transformOrigin: 'top left',
+            width: zoom !== 1 ? `${zoom * 100}%` : undefined,
+            height: zoom !== 1 ? `${zoom * 100}%` : undefined,
+          }}
         />
         {displayedRankData.length === 0 && (
           <div className="absolute inset-0 flex items-center justify-center text-gray-500 bg-zinc-900/80">

@@ -1,9 +1,8 @@
-import React, { useState, useEffect } from 'react';
-import { Plus, Undo2, Redo2, ZoomIn, ZoomOut, HelpCircle, Lock, Unlock } from 'lucide-react';
-import { GridContainer } from './components/GridContainer';
+import React, { useState, useEffect, useRef } from 'react';
+import { Plus, Undo2, Redo2, ZoomIn, ZoomOut, HelpCircle, Lock, Unlock, Settings, Layout } from 'lucide-react';
+import { GridContainer, type GridContainerRef } from './components/GridContainer';
 import { ModuleSidebar } from './components/ModuleSidebar';
-import { SettingsMenu } from './components/SettingsMenu';
-import { HelpPanel } from './components/HelpPanel';
+import { HelpPanel, type TabType } from './components/HelpPanel';
 import { TimelineClock } from './components/TimelineClock';
 import { moduleRegistry } from './config/moduleRegistry';
 import { LAYOUT_TEMPLATES, DEFAULT_TEMPLATE_ID } from './config/layoutTemplates';
@@ -165,11 +164,14 @@ export default function App() {
   });
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [helpInitialTab, setHelpInitialTab] = useState<TabType>('shortcuts');
   const [isLocked, setIsLocked] = useState(false);
   const [currentTemplateId, setCurrentTemplateId] = useState<string>(() => {
     return localStorage.getItem('trading-system-template') || '';
   });
   const [selectedSymbols, setSelectedSymbols] = useState<Record<string, string>>({});
+  const gridContainerRef = useRef<GridContainerRef>(null);
+  const initialFocusDoneRef = useRef(false);
 
   // Load initial layout from localStorage on mount
   useEffect(() => {
@@ -183,6 +185,17 @@ export default function App() {
       }
     }
   }, []);
+
+  // Auto focus-to-fit on initial load
+  useEffect(() => {
+    if (items.length > 0 && !initialFocusDoneRef.current) {
+      initialFocusDoneRef.current = true;
+      // Delay to ensure GridContainer has rendered
+      setTimeout(() => {
+        gridContainerRef.current?.focusToFit();
+      }, 100);
+    }
+  }, [items]);
 
   // Auto-save gap to localStorage
   useEffect(() => {
@@ -218,12 +231,34 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [undo, redo, canUndo, canRedo]);
 
-  // Keyboard shortcut: Ctrl+/ to toggle help panel
+  // Keyboard shortcuts for help panel, settings, and layout
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
+      // Ignore if user is typing in an input/textarea
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
+        return;
+      }
+
+      // Help: Ctrl+/ (toggle)
       if ((e.ctrlKey || e.metaKey) && e.key === '/') {
         e.preventDefault();
+        setHelpInitialTab('shortcuts');
         setHelpOpen(v => !v);
+      }
+
+      // Settings: comma (open or switch to settings tab)
+      if (e.key === ',' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        setHelpInitialTab('settings');
+        setHelpOpen(true);
+      }
+
+      // Layout: Shift+L (open or switch to layout tab)
+      if ((e.key === 'l' || e.key === 'L') && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        setHelpInitialTab('layout');
+        setHelpOpen(true);
       }
     };
     window.addEventListener('keydown', handleKey);
@@ -257,6 +292,14 @@ export default function App() {
       });
 
       useTickDataStore.setState({ connected: true });
+
+      // Demo mode: show layout panel on first visit
+      const hasSeenDemoLayout = localStorage.getItem('demo-layout-panel-shown');
+      if (!hasSeenDemoLayout) {
+        setHelpInitialTab('layout');
+        setHelpOpen(true);
+        localStorage.setItem('demo-layout-panel-shown', 'true');
+      }
 
       console.log('[Demo] Seeded stores with mock data for', tickers.length, 'tickers');
       return;
@@ -323,7 +366,17 @@ export default function App() {
       setItems(template.layout);
       setCurrentTemplateId(templateId);
       localStorage.setItem('trading-system-template', templateId);
+      // Trigger focus-to-fit after layout change (next tick to ensure items are rendered)
+      setTimeout(() => {
+        gridContainerRef.current?.focusToFit();
+      }, 50);
     }
+  };
+
+  // Open help panel with specific tab
+  const openHelpTab = (tab: TabType) => {
+    setHelpInitialTab(tab);
+    setHelpOpen(true);
   };
 
   return (
@@ -331,8 +384,17 @@ export default function App() {
       {/* Privacy PIN dialog (global) */}
       <PinDialog />
 
-      {/* Help Panel */}
-      <HelpPanel open={helpOpen} onClose={() => setHelpOpen(false)} />
+      {/* Help Panel (unified with tabs) */}
+      <HelpPanel
+        open={helpOpen}
+        onClose={() => setHelpOpen(false)}
+        initialTab={helpInitialTab}
+        items={items}
+        onImportLayout={handleImportLayout}
+        currentTemplateId={currentTemplateId}
+        onTemplateChange={handleTemplateChange}
+        onFocusToFit={() => gridContainerRef.current?.focusToFit()}
+      />
 
       {/* Sidebar */}
       <ModuleSidebar
@@ -417,21 +479,34 @@ export default function App() {
                 <ZoomIn className="w-4 h-4" />
               </button>
             </div>
+
+            {/* Help Button - opens help panel with shortcuts tab */}
             <button
-              onClick={() => setHelpOpen(v => !v)}
+              onClick={() => openHelpTab('shortcuts')}
               className="p-2 hover:bg-zinc-700 transition-colors rounded"
               title="Help (Ctrl+/)"
             >
-              <HelpCircle className="w-4 h-4" />
+              <HelpCircle className="w-5 h-5" />
             </button>
-            <SettingsMenu
-              gridGap={gridGap}
-              onGridGapChange={setGridGap}
-              items={items}
-              onImportLayout={handleImportLayout}
-              onTemplateChange={handleTemplateChange}
-              currentTemplateId={currentTemplateId}
-            />
+
+            {/* Layout Button - opens help panel with layout tab */}
+            <button
+              onClick={() => openHelpTab('layout')}
+              className="p-2 hover:bg-zinc-700 transition-colors rounded"
+              title="Layout Templates (Shift+L)"
+            >
+              <Layout className="w-5 h-5" />
+            </button>
+
+            {/* Settings Button - opens help panel with settings tab */}
+            <button
+              onClick={() => openHelpTab('settings')}
+              className="p-2 hover:bg-zinc-700 transition-colors rounded"
+              title="Settings (,)"
+            >
+              <Settings className="w-5 h-5" />
+            </button>
+
             <button
               onClick={() => setSidebarOpen(true)}
               className="flex items-center gap-2 px-4 py-2 bg-white text-black hover:bg-gray-200 transition-colors"
@@ -443,6 +518,7 @@ export default function App() {
         </div>
 
         <GridContainer
+          ref={gridContainerRef}
           items={items}
           onRemove={removeModule}
           onUpdate={updateItem}

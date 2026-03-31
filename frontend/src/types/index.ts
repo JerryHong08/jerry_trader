@@ -110,6 +110,7 @@ export interface ModuleProps {
     orderManagement?: OrderManagementModuleSettings;
   };
   onSettingsChange?: (settings: any) => void;
+  zoom?: number; // Canvas zoom level for coordinate fix
 }
 
 export interface Order {

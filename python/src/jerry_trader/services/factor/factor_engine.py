@@ -10,12 +10,14 @@ Publishes factors to Redis pub/sub for SignalsEngine and ChartBFF.
 import asyncio
 import json
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 import redis
+from redis.exceptions import ResponseError
 
 import jerry_trader.clock as clock_mod
 from jerry_trader.domain.factor import FactorSnapshot
@@ -37,19 +39,22 @@ from jerry_trader.services.market_data.feeds.unified_tick_manager import (
     UnifiedTickManager,
 )
 from jerry_trader.services.orchestration.bootstrap_coordinator import (
+    BOOTSTRAP_TIMEFRAMES,
     BootstrapCoordinator,
+    TimeframeState,
+    TradesBootstrapState,
     get_coordinator,
 )
 from jerry_trader.shared.logging.logger import setup_logger
 
-logger = setup_logger("factor_engine", log_to_file=True, level=logging.DEBUG)
+logger = setup_logger("factor_engine", log_to_file=True, level=logging.INFO)
 
 # Constants
 COMPUTE_INTERVAL_SEC = 1.0  # Tick indicator compute interval
 
 
 @dataclass
-class TimeframeState:
+class FactorTimeframeState:
     """Per-timeframe indicator state for a ticker."""
 
     timeframe: str
@@ -68,7 +73,7 @@ class TickerState:
     """Per-ticker indicator state across all timeframes."""
 
     symbol: str
-    timeframe_states: dict[str, TimeframeState] = field(default_factory=dict)
+    timeframe_states: dict[str, FactorTimeframeState] = field(default_factory=dict)
     tick_indicators: list[TickIndicator] = field(default_factory=list)
     quote_indicators: list[QuoteIndicator] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -400,15 +405,40 @@ class FactorEngine:
     # Ticker Management
     # ═══════════════════════════════════════════════════════════════════════════
 
-    def add_ticker(self, symbol: str, timeframes: list[str] | None = None) -> None:
+    def is_ready(self, symbol: str) -> bool:
+        """Check if ticker has completed bootstrap.
+
+        Part of BootstrapableService protocol.
+        """
+        return symbol in self._bootstrap_done
+
+    def add_ticker(self, symbol: str, timeframes: list[str] | None = None) -> bool:
         """Start tracking a ticker for factor computation.
+
+        Part of BootstrapableService protocol. Called by Coordinator directly.
+        Queries ClickHouse first to check if bars exist - if so, skips waiting
+        for bootstrap and warms up immediately.
 
         Args:
             symbol: Ticker symbol to track
             timeframes: List of timeframes to compute bar-based factors for.
-                       Defaults to [self._default_timeframe] if not specified.
+                       If None, uses Coordinator's timeframes or falls back to default.
+
+        Returns:
+            True if successfully started (or immediately complete)
         """
+        # If no timeframes provided, use all bootstrap timeframes from config
+        if timeframes is None:
+            timeframes = list(BOOTSTRAP_TIMEFRAMES)
+            logger.info(
+                f"add_ticker - {symbol}: using all bootstrap timeframes: {timeframes}"
+            )
+
+        # Fallback to default if still None
         timeframes = timeframes or [self._default_timeframe]
+
+        # Track new timeframes that need bootstrap for existing tickers
+        new_timeframes_for_existing: list[str] = []
 
         with self._states_lock:
             if symbol in self.ticker_states:
@@ -417,57 +447,159 @@ class FactorEngine:
                 state = self.ticker_states[symbol]
                 for tf in timeframes:
                     if tf not in state.timeframe_states:
-                        state.timeframe_states[tf] = TimeframeState(
+                        state.timeframe_states[tf] = FactorTimeframeState(
                             timeframe=tf, bar_indicators=[EMA(period=20)]
                         )
                         self._subscribe_bars_for_timeframe(symbol, tf)
-                return
+                        new_timeframes_for_existing.append(tf)
 
-            # Create timeframe states for each timeframe
-            timeframe_states: dict[str, TimeframeState] = {}
-            for tf in timeframes:
-                timeframe_states[tf] = TimeframeState(
-                    timeframe=tf, bar_indicators=[EMA(period=20)]
+                # If no new timeframes, just return
+                if not new_timeframes_for_existing:
+                    return True
+
+                # Continue to bootstrap logic for new timeframes only
+                logger.info(
+                    f"FactorEngine: {symbol} adding new timeframes {new_timeframes_for_existing}"
                 )
 
-            # Create indicator instances
-            state = TickerState(
-                symbol=symbol,
-                timeframe_states=timeframe_states,
-                tick_indicators=[TradeRate(window_ms=20_000, min_trades=5)],
-                quote_indicators=[],
-            )
-            self.ticker_states[symbol] = state
+                # Only bootstrap the new timeframes, not all of them
+                tfs_to_process = new_timeframes_for_existing
+                state = self.ticker_states[symbol]
 
-        # Create bootstrap Events
-        if symbol not in self._bootstrap_events:
-            self._bootstrap_events[symbol] = threading.Event()
-        if symbol not in self._tick_bootstrap_events:
-            self._tick_bootstrap_events[symbol] = threading.Event()
+                # Create bootstrap events if needed (might be already done)
+                if symbol not in self._bootstrap_events:
+                    self._bootstrap_events[symbol] = threading.Event()
+                    self._bootstrap_events[
+                        symbol
+                    ].set()  # Already done for existing ticker
+                if symbol not in self._tick_bootstrap_events:
+                    self._tick_bootstrap_events[symbol] = threading.Event()
+                    self._tick_bootstrap_events[symbol].set()  # Already done
+            else:
+                # Create timeframe states for each timeframe (new ticker case)
+                timeframe_states: dict[str, FactorTimeframeState] = {}
+                for tf in timeframes:
+                    timeframe_states[tf] = FactorTimeframeState(
+                        timeframe=tf, bar_indicators=[EMA(period=20)]
+                    )
 
-        # Subscribe to bar pub/sub channels for all timeframes
-        for tf in timeframes:
-            self._subscribe_bars_for_timeframe(symbol, tf)
+                # Create indicator instances
+                state = TickerState(
+                    symbol=symbol,
+                    timeframe_states=timeframe_states,
+                    tick_indicators=[TradeRate(window_ms=20_000, min_trades=5)],
+                    quote_indicators=[],
+                )
+                self.ticker_states[symbol] = state
 
-        # Subscribe to tick stream (timeframe-agnostic)
-        self._subscribe_ticks(symbol)
+                tfs_to_process = timeframes
 
-        # Start bootstrap in background thread using BootstrapCoordinator
-        t = threading.Thread(
-            target=self._run_bootstrap,
-            args=(symbol, timeframes),
-            daemon=True,
-            name=f"FactorEngine-Bootstrap-{symbol}",
-        )
-        t.start()
+                # Create bootstrap Events (new ticker case)
+                if symbol not in self._bootstrap_events:
+                    self._bootstrap_events[symbol] = threading.Event()
+                if symbol not in self._tick_bootstrap_events:
+                    self._tick_bootstrap_events[symbol] = threading.Event()
+
+                # Subscribe to tick stream (timeframe-agnostic) - only for new tickers
+                self._subscribe_ticks(symbol)
+
+            # Subscribe to bar pub/sub channels for timeframes being processed
+            for tf in tfs_to_process:
+                self._subscribe_bars_for_timeframe(symbol, tf)
+
+            # Check if bars already exist in ClickHouse - if so, warmup immediately
+            all_tfs_have_bars = True
+            for tf in tfs_to_process:
+                if not self._check_bars_exist(symbol, tf):
+                    all_tfs_have_bars = False
+                    logger.info(
+                        f"add_ticker - {symbol}/{tf}: no bars found, will wait for bootstrap"
+                    )
+                    break
+
+            if all_tfs_have_bars:
+                logger.info(
+                    f"add_ticker - {symbol}: all TFs have bars, running immediate warmup"
+                )
+                # Run warmup immediately without waiting for coordinator
+                for tf in tfs_to_process:
+                    tf_state = state.timeframe_states.get(tf)
+                    if tf_state and tf_state.bar_indicators:
+                        self._bootstrap_bars_for_timeframe(symbol, tf, tf_state)
+                # For new tickers, mark as done since we've warmed up from existing bars
+                if not new_timeframes_for_existing:
+                    self._bootstrap_done.add(symbol)
+                    evt = self._bootstrap_events.get(symbol)
+                    if evt:
+                        evt.set()
+                    tick_evt = self._tick_bootstrap_events.get(symbol)
+                    if tick_evt:
+                        tick_evt.set()
+                logger.info(f"add_ticker - {symbol}: immediate warmup complete")
+            else:
+                # Start bootstrap in background thread using BootstrapCoordinator
+                # For existing tickers with new TFs, we need to wait for bars
+                t = threading.Thread(
+                    target=self._run_bootstrap,
+                    args=(symbol, tfs_to_process),
+                    daemon=True,
+                    name=f"FactorEngine-Bootstrap-{symbol}",
+                )
+                t.start()
 
         logger.info(f"FactorEngine: tracking {symbol} with timeframes={timeframes}")
+        return True
 
-    def remove_ticker(self, symbol: str) -> None:
-        """Stop tracking a ticker."""
+    def _check_bars_exist(self, symbol: str, timeframe: str) -> bool:
+        """Check if bars exist in ClickHouse for this symbol/timeframe.
+
+        Args:
+            symbol: Ticker symbol
+            timeframe: Timeframe string
+
+        Returns:
+            True if at least one bar exists
+        """
+        try:
+            ch_client = get_clickhouse_client(self._ch_config)
+            if not ch_client:
+                return False
+
+            # Query for any bars today
+            import jerry_trader.clock as clock_mod
+            from jerry_trader.platform.storage.clickhouse import query_ohlcv_bars
+
+            end_ms = clock_mod.now_ms()
+            start_ms = end_ms - (24 * 60 * 60 * 1000)  # Look back 1 day
+
+            result = query_ohlcv_bars(ch_client, symbol, timeframe, start_ms, end_ms)
+            has_bars = result is not None and len(result.get("bars", [])) > 0
+
+            if has_bars:
+                logger.debug(
+                    f"_check_bars_exist - {symbol}/{timeframe}: found {len(result['bars'])} bars"
+                )
+            else:
+                logger.debug(f"_check_bars_exist - {symbol}/{timeframe}: no bars found")
+
+            return has_bars
+        except Exception as e:
+            logger.warning(
+                f"_check_bars_exist - {symbol}/{timeframe}: error checking - {e}"
+            )
+            return False
+
+    def remove_ticker(self, symbol: str) -> bool:
+        """Stop tracking a ticker.
+
+        Part of BootstrapableService protocol.
+
+        Returns:
+            True if successfully removed (or wasn't tracked)
+        """
         with self._states_lock:
             if symbol not in self.ticker_states:
-                return
+                return True
             state = self.ticker_states[symbol]
             timeframes = list(state.timeframe_states.keys())
             del self.ticker_states[symbol]
@@ -485,6 +617,7 @@ class FactorEngine:
         self._unsubscribe_ticks(symbol)
 
         logger.info(f"FactorEngine: stopped tracking {symbol}")
+        return True
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Bootstrap
@@ -502,7 +635,7 @@ class FactorEngine:
         logger.info(f"FactorEngine: coordinator {'set' if coordinator else 'cleared'}")
 
     def _bootstrap_bars_for_timeframe(
-        self, symbol: str, timeframe: str, tf_state: "TimeframeState"
+        self, symbol: str, timeframe: str, tf_state: "FactorTimeframeState"
     ) -> None:
         """Warm up bar-based indicators for a specific timeframe from ClickHouse."""
         # Create per-thread ClickHouse client to avoid concurrent query issues
@@ -598,33 +731,44 @@ class FactorEngine:
             return
 
         try:
-            # 1. Register as consumer with coordinator
-            logger.info(f"_run_bootstrap - {symbol}: registering consumers")
+            # Wait for coordinator to start bootstrap (it may not have started yet)
+            # ChartBFF and FactorEngine run in parallel, so we need to wait
+            tf_bootstrap_info = None
+            for _ in range(100):  # 10 seconds (100ms * 100)
+                tf_bootstrap_info = coordinator.get_bootstrap(symbol)
+                if tf_bootstrap_info:
+                    break
+                time.sleep(0.1)
+
+            if not tf_bootstrap_info:
+                logger.error(
+                    f"_run_bootstrap - {symbol}: no bootstrap info in coordinator after timeout"
+                )
+                return
+
+            # Use coordinator's timeframes, not FactorEngine's timeframes
+            all_timeframes = list(tf_bootstrap_info.timeframes.keys())
+            logger.info(
+                f"_run_bootstrap - {symbol}: registering consumers for {all_timeframes}"
+            )
 
             # Register tick warmup consumer if trades are needed
-            needs_tick_warmup = False
-            for tf in timeframes:
-                tf_bootstrap = coordinator.get_bootstrap(symbol)
-                if (
-                    tf_bootstrap
-                    and tf_bootstrap.trades_state
-                    != coordinator.TradesBootstrapState.NOT_NEEDED
-                ):
-                    needs_tick_warmup = True
-                    break
+            needs_tick_warmup = (
+                tf_bootstrap_info.trades_state != TradesBootstrapState.NOT_NEEDED
+            )
 
             if needs_tick_warmup:
                 coordinator.register_consumer(symbol, "tick_warmup", "factor_engine")
-                logger.debug(
+                logger.info(
                     f"_run_bootstrap - {symbol}: registered tick_warmup consumer"
                 )
 
-            # Register bar warmup consumers for each timeframe
-            for tf in timeframes:
+            # Register bar warmup consumers for ALL coordinator timeframes
+            for tf in all_timeframes:
                 coordinator.register_consumer(
                     symbol, f"bar_warmup:{tf}", "factor_engine"
                 )
-                logger.debug(
+                logger.info(
                     f"_run_bootstrap - {symbol}/{tf}: registered bar_warmup consumer"
                 )
 
@@ -656,7 +800,19 @@ class FactorEngine:
             # 3. Wait for bars ready and process bar warmup per timeframe
             state = self.ticker_states.get(symbol)
             if state:
-                for tf in timeframes:
+                for tf in all_timeframes:
+                    # Check if FactorEngine has indicators for this timeframe
+                    tf_state = state.timeframe_states.get(tf)
+                    if not tf_state or not tf_state.bar_indicators:
+                        # No bar indicators for this timeframe, just report done
+                        coordinator.report_done(
+                            symbol, f"bar_warmup:{tf}", "factor_engine"
+                        )
+                        logger.info(
+                            f"_run_bootstrap - {symbol}/{tf}: no bar indicators, skipped"
+                        )
+                        continue
+
                     # Wait for bars to be ready (poll bootstrap state)
                     logger.info(f"_run_bootstrap - {symbol}/{tf}: waiting for bars")
                     bars_ready = False
@@ -664,20 +820,18 @@ class FactorEngine:
                         tf_bootstrap = coordinator.get_bootstrap(symbol)
                         if tf_bootstrap and tf in tf_bootstrap.timeframes:
                             if tf_bootstrap.timeframes[tf].state in (
-                                coordinator.TimeframeState.READY,
-                                coordinator.TimeframeState.DONE,
+                                TimeframeState.READY,
+                                TimeframeState.DONE,
                             ):
                                 bars_ready = True
                                 break
                         time.sleep(0.1)
 
                     if bars_ready:
-                        tf_state = state.timeframe_states.get(tf)
-                        if tf_state:
-                            logger.info(
-                                f"_run_bootstrap - {symbol}/{tf}: bars ready, running bar warmup"
-                            )
-                            self._bootstrap_bars_for_timeframe(symbol, tf, tf_state)
+                        logger.info(
+                            f"_run_bootstrap - {symbol}/{tf}: bars ready, running bar warmup"
+                        )
+                        self._bootstrap_bars_for_timeframe(symbol, tf, tf_state)
 
                     # Report bar warmup done for this timeframe
                     coordinator.report_done(symbol, f"bar_warmup:{tf}", "factor_engine")
@@ -717,12 +871,18 @@ class FactorEngine:
         was not pre-registered (indicating FactorEngine hasn't started processing).
         """
         if symbol in self._bootstrap_done:
+            logger.debug(f"wait_for_bootstrap - {symbol}: already in _bootstrap_done")
             return True
 
         # Check if bootstrap was pre-registered (events exist)
         # If not, FactorEngine hasn't started processing this ticker yet
         evt = self._bootstrap_events.get(symbol)
         tick_evt = self._tick_bootstrap_events.get(symbol)
+
+        logger.debug(
+            f"wait_for_bootstrap - {symbol}: initial check evt={evt is not None}, "
+            f"tick_evt={tick_evt is not None}, _bootstrap_done={symbol in self._bootstrap_done}"
+        )
 
         if evt is None and tick_evt is None:
             # Bootstrap not pre-registered yet, wait briefly for it to appear
@@ -734,6 +894,10 @@ class FactorEngine:
                 evt = self._bootstrap_events.get(symbol)
                 tick_evt = self._tick_bootstrap_events.get(symbol)
                 if evt is not None or tick_evt is not None:
+                    logger.debug(
+                        f"wait_for_bootstrap - {symbol}: events appeared after wait, "
+                        f"evt={evt is not None}, tick_evt={tick_evt is not None}"
+                    )
                     break
             if evt is None and tick_evt is None:
                 logger.warning(
@@ -743,21 +907,33 @@ class FactorEngine:
 
         # Wait for bar bootstrap
         if evt is not None:
+            logger.debug(
+                f"wait_for_bootstrap - {symbol}: waiting for bar bootstrap (timeout={timeout}s)"
+            )
             if not evt.wait(timeout=timeout):
                 logger.warning(
-                    f"wait_for_bootstrap - {symbol}: bar bootstrap timed out"
+                    f"wait_for_bootstrap - {symbol}: bar bootstrap timed out after {timeout}s, "
+                    f"evt.is_set()={evt.is_set()}"
                 )
                 return False
+            logger.debug(f"wait_for_bootstrap - {symbol}: bar bootstrap completed")
 
         # Wait for tick bootstrap (trade observer callback)
         if tick_evt is not None:
+            logger.debug(
+                f"wait_for_bootstrap - {symbol}: waiting for tick bootstrap (timeout={timeout}s)"
+            )
             if not tick_evt.wait(timeout=timeout):
                 logger.warning(
-                    f"wait_for_bootstrap - {symbol}: tick bootstrap timed out"
+                    f"wait_for_bootstrap - {symbol}: tick bootstrap timed out after {timeout}s, "
+                    f"tick_evt.is_set()={tick_evt.is_set()}"
                 )
                 return False
+            logger.debug(f"wait_for_bootstrap - {symbol}: tick bootstrap completed")
 
-        logger.debug(f"wait_for_bootstrap - {symbol}: bootstrap complete")
+        logger.debug(
+            f"wait_for_bootstrap - {symbol}: all bootstrap completed successfully"
+        )
         return True
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -1135,62 +1311,6 @@ class FactorEngine:
             logger.error(f"FactorEngine: write failed for {symbol} - {e}")
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # Tasks Listener (Redis stream for add/remove ticker)
-    # ═══════════════════════════════════════════════════════════════════════════
-
-    def _tasks_listener(self) -> None:
-        """Listen to factor_tasks Redis stream for ticker commands."""
-        stream_key = f"factor_tasks:{self.session_id}"
-        last_id = "0"
-
-        logger.info(f"FactorEngine: tasks listener started on {stream_key}")
-
-        while self._running:
-            try:
-                result = self.redis_client.xread(
-                    {stream_key: last_id}, count=10, block=1000
-                )
-
-                if not result:
-                    continue
-
-                for stream_name, messages in result:
-                    for msg_id, msg_data in messages:
-                        last_id = msg_id
-                        try:
-                            action = msg_data.get("action")
-                            ticker = msg_data.get("ticker")
-
-                            if not ticker:
-                                continue
-
-                            if action == "add":
-                                # Parse timeframes from message (e.g., "10s,1m,5m")
-                                timeframes_str = msg_data.get("timeframes", "")
-                                if timeframes_str:
-                                    timeframes = [
-                                        tf.strip()
-                                        for tf in timeframes_str.split(",")
-                                        if tf.strip()
-                                    ]
-                                else:
-                                    timeframes = None  # Use default
-                                self.add_ticker(ticker, timeframes)
-                            elif action == "remove":
-                                self.remove_ticker(ticker)
-                            else:
-                                logger.warning(f"FactorEngine: Unknown action {action}")
-                        except Exception as e:
-                            logger.error(f"FactorEngine: task error - {e}")
-
-            except Exception as e:
-                if self._running:
-                    logger.error(f"FactorEngine: tasks listener error - {e}")
-                    time.sleep(1.0)
-
-        logger.info("FactorEngine: tasks listener stopped")
-
-    # ═══════════════════════════════════════════════════════════════════════════
     # Lifecycle
     # ═══════════════════════════════════════════════════════════════════════════
 
@@ -1226,13 +1346,9 @@ class FactorEngine:
         )
         self._bars_thread.start()
 
-        # Start tasks listener thread
-        self._tasks_thread = threading.Thread(
-            target=self._tasks_listener,
-            name="FactorEngine-Tasks",
-            daemon=True,
-        )
-        self._tasks_thread.start()
+        # Register with coordinator if available (new design: direct calls instead of Redis Stream)
+        if self._coordinator:
+            self._coordinator.register_service("factor_engine", self)
 
         # Start compute loop thread
         self._compute_thread = threading.Thread(

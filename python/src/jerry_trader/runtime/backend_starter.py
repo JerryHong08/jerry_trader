@@ -547,6 +547,9 @@ class JerryTraderBackendStarter:
         #     self.chart_bff._bars_builder = self.bars_builder
 
         # Wire BootstrapCoordinator to FactorEngine and BarsBuilder
+        logger.info(
+            f"Wiring coordinator: coordinator={'set' if self._bootstrap_coordinator else 'None'}, chart_bff={'set' if self.chart_bff else 'None'}"
+        )
         if self._bootstrap_coordinator:
             if self.factor_engine:
                 self.factor_engine.set_coordinator(self._bootstrap_coordinator)
@@ -554,11 +557,19 @@ class JerryTraderBackendStarter:
             if self.bars_builder:
                 self.bars_builder.set_coordinator(self._bootstrap_coordinator)
                 logger.info("Wired BootstrapCoordinator → BarsBuilder")
+            if self.chart_bff:
+                self.chart_bff.set_coordinator(self._bootstrap_coordinator)
+                logger.info("Wired BootstrapCoordinator → ChartBFF")
 
         # Pass factor_engine to ChartBFF for bootstrap wait
         if self.chart_bff and self.factor_engine:
             self.chart_bff.set_factor_engine(self.factor_engine)
             logger.info("Wired ChartBFF ← FactorEngine (bootstrap wait)")
+
+        # Pass bars_builder to ChartBFF for partial bar appends
+        if self.chart_bff and self.bars_builder:
+            self.chart_bff.set_bars_builder(self.bars_builder)
+            logger.info("Wired ChartBFF ← BarsBuilder (partial bar appends)")
 
         if "AgentBFF" in self.roles:
             from jerry_trader.apps.news_app.server import AgentBFF

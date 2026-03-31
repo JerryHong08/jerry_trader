@@ -36,7 +36,9 @@ from jerry_trader.services.bar_builder.bar_query_service import ClickHouseClient
 from jerry_trader.services.market_data.feeds.unified_tick_manager import (
     UnifiedTickManager,
 )
-from jerry_trader.shared.ids.redis_keys import factor_tasks_stream
+from jerry_trader.services.orchestration.bootstrap_coordinator import (
+    BOOTSTRAP_TIMEFRAMES,
+)
 from jerry_trader.shared.logging.logger import setup_logger
 from jerry_trader.shared.time.timezone import ms_to_readable
 
@@ -124,13 +126,12 @@ class ChartBFF:
 
         logger.info(f"🚀 ChartBFF using {self.manager.provider.upper()} data manager")
 
-        # Redis for factor_tasks stream
+        # Redis for pub/sub (factor updates)
         redis_cfg = redis_config or {}
         redis_host = redis_cfg.get("host", "127.0.0.1")
         redis_port = redis_cfg.get("port", 6379)
         redis_db = redis_cfg.get("db", 0)
         self.r = redis.Redis(host=redis_host, port=redis_port, db=redis_db)
-        self.FACTOR_TASKS_STREAM = factor_tasks_stream(self.session_id)
 
         # Track subscribed tickers for backfill decisions
         self.subscribed_tickers: Set[str] = set()
@@ -190,6 +191,9 @@ class ChartBFF:
 
         # BootstrapCoordinator for unified orchestration
         self._coordinator = coordinator
+        logger.info(
+            f"ChartBFF __init__: coordinator={'set' if coordinator else 'None'}"
+        )
 
     def set_factor_engine(self, engine) -> None:
         """Set FactorEngine reference for bootstrap wait."""
@@ -200,12 +204,16 @@ class ChartBFF:
         self._coordinator = coordinator
         logger.info(f"ChartBFF: coordinator {'set' if coordinator else 'cleared'}")
 
+    def set_bars_builder(self, bars_builder) -> None:
+        """Set BarsBuilder reference for partial bar appends."""
+        self.ch_client._bars_builder = bars_builder
+        logger.info(f"ChartBFF: BarsBuilder {'set' if bars_builder else 'cleared'}")
+
     def _setup_routes(self):
         """Setup FastAPI routes and WebSocket endpoints."""
 
         manager = self.manager
         r = self.r
-        FACTOR_TASKS_STREAM = self.FACTOR_TASKS_STREAM
 
         # --- Startup event (only start stream_forever if we own the manager) ---
         if self._owns_manager:
@@ -506,6 +514,7 @@ class ChartBFF:
                                 manager,
                                 consumer_tasks,
                                 current_streams,
+                                factor_subscriptions,
                             )
 
                     except json.JSONDecodeError as e:
@@ -573,14 +582,18 @@ class ChartBFF:
                 # so re-subscribe skips redundant Polygon/local
                 # data fetch (data hasn't changed).
                 self.subscribed_tickers.discard(sym)
-                try:
-                    self.r.xadd(
-                        self.FACTOR_TASKS_STREAM,
-                        {"action": "remove", "ticker": sym},
-                    )
-                    logger.debug(f"📤 XADD factor_tasks: remove {sym}")
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to XADD remove {sym}: {e}")
+
+                # Clean up coordinator state on unsubscribe
+                # This ensures fresh bootstrap on re-subscribe
+                if self._coordinator is not None:
+                    try:
+                        loop = asyncio.get_event_loop()
+                        await loop.run_in_executor(None, self._coordinator.cleanup, sym)
+                        logger.debug(f"📤 Coordinator cleanup for {sym}")
+                    except Exception as e:
+                        logger.warning(
+                            f"⚠️ Failed to cleanup coordinator for {sym}: {e}"
+                        )
 
     async def _handle_subscribe(
         self,
@@ -589,6 +602,7 @@ class ChartBFF:
         manager: UnifiedTickManager,
         consumer_tasks: dict,
         current_streams: Set[str],
+        factor_subscriptions: Set[str],
     ) -> None:
         """Handle subscribe requests from WebSocket clients.
 
@@ -598,6 +612,7 @@ class ChartBFF:
             manager: UnifiedTickManager instance
             consumer_tasks: Dict of stream_key -> asyncio.Task
             current_streams: Set of currently active stream keys
+            factor_subscriptions: Set of currently subscribed factor symbols
         """
         subscriptions = data.get("subscriptions", [])
 
@@ -635,8 +650,71 @@ class ChartBFF:
 
         logger.info(f"📥 Subscribe request: {subscriptions}")
 
-        # Subscribe using unified interface
+        # Extract symbols and start bootstrap FIRST (before manager.subscribe which may block)
+        symbols_to_bootstrap = []
+        for sub in subscriptions:
+            sym = sub.get("symbol", "").upper()
+            if sym:
+                symbols_to_bootstrap.append((sym, sub.get("timeframe", "")))
+                self.subscribed_tickers.add(sym)
+
+        # Start bootstrap coordination for each symbol (in background to not block)
+        async def run_bootstrap_for_symbol(symbol: str, timeframe: str):
+            """Run bootstrap for a symbol in background."""
+            if self._coordinator is None:
+                logger.warning(
+                    f"📥 Subscribe: coordinator not ready yet, skipping bootstrap for {symbol}"
+                )
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "message": "Server initializing, please retry",
+                        "code": "NOT_READY",
+                    }
+                )
+                return
+
+            logger.debug(f"📥 Subscribe: starting bootstrap for {symbol}")
+            all_bootstrap_tfs = list(BOOTSTRAP_TIMEFRAMES)
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None,
+                self._coordinator.start_bootstrap,
+                symbol,
+                all_bootstrap_tfs,
+            )
+            logger.info(f"📥 Subscribe: started bootstrap for {symbol} via coordinator")
+
+            # Wait for bootstrap completion
+            ready = await loop.run_in_executor(
+                None,
+                self._coordinator.wait_for_ticker_ready,
+                symbol,
+                60.0,
+            )
+            if ready:
+                logger.info(f"✅ Subscribe: {symbol} bootstrap ready")
+            else:
+                logger.warning(f"⏱️ Subscribe: {symbol} bootstrap timeout")
+
+            # Auto-subscribe to factors
+            actual_timeframe = timeframe if timeframe else "tick"
+            await self._auto_subscribe_factors(
+                websocket,
+                symbol,
+                actual_timeframe,
+                consumer_tasks,
+                factor_subscriptions,
+            )
+
+        # Start bootstrap tasks in background (don't block on manager.subscribe)
+        for sym, tf in symbols_to_bootstrap:
+            asyncio.create_task(run_bootstrap_for_symbol(sym, tf))
+
+        # Subscribe using unified interface (this may block, but bootstrap is already running)
+        logger.info(f"🔍 DEBUG: Before manager.subscribe")
         await manager.subscribe(websocket, subscriptions=subscriptions)
+        logger.info(f"🔍 DEBUG: After manager.subscribe")
 
         # Generate stream keys and create consumer tasks
         new_streams = manager.generate_stream_keys(subscriptions=subscriptions)
@@ -648,70 +726,7 @@ class ChartBFF:
             logger.debug(f"📡 Created consumer task for {sk}")
 
         current_streams.update(to_add)
-
-        # Start bootstrap coordination for each subscription
-        for sub in subscriptions:
-            sym = sub.get("symbol", "").upper()
-            timeframe = sub.get("timeframe", "")
-            if not sym:
-                continue
-
-            # Add to subscribed tickers set
-            self.subscribed_tickers.add(sym)
-
-            # Use BootstrapCoordinator for unified orchestration
-            if self._coordinator is not None and timeframe:
-                # Start bootstrap plan
-                self._coordinator.start_bootstrap(sym, [timeframe])
-                logger.info(
-                    f"📥 Subscribe: started bootstrap for {sym}/{timeframe} via coordinator"
-                )
-
-                # Notify FactorEngine via Redis stream (it will coordinate via coordinator)
-                try:
-                    self.r.xadd(
-                        self.FACTOR_TASKS_STREAM,
-                        {
-                            "action": "add",
-                            "ticker": sym,
-                            "timeframes": timeframe,
-                        },
-                    )
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to XADD add {sym}: {e}")
-
-                # Wait for bootstrap completion in background
-                async def wait_bootstrap(symbol: str):
-                    loop = asyncio.get_event_loop()
-                    # Run blocking wait in thread pool
-                    ready = await loop.run_in_executor(
-                        None,  # default executor
-                        self._coordinator.wait_for_ticker_ready,
-                        symbol,
-                        60.0,  # timeout
-                    )
-                    if ready:
-                        logger.info(f"✅ Subscribe: {symbol} bootstrap ready")
-                    else:
-                        logger.warning(f"⏱️ Subscribe: {symbol} bootstrap timeout")
-
-                # Fire-and-forget wait task (logs only, doesn't block WebSocket)
-                asyncio.create_task(wait_bootstrap(sym))
-            elif timeframe:
-                # No coordinator: just notify FactorEngine directly
-                try:
-                    self.r.xadd(
-                        self.FACTOR_TASKS_STREAM,
-                        {
-                            "action": "add",
-                            "ticker": sym,
-                            "timeframes": timeframe,
-                        },
-                    )
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to XADD add {sym}: {e}")
-
-                self._trigger_custom_bar_backfill(sym)
+        logger.info(f"🔍 DEBUG: After stream update, streams={current_streams}")
 
     async def _handle_factor_subscribe(
         self,
@@ -764,34 +779,25 @@ class ChartBFF:
             factor_subscriptions.add(sub_key)
             logger.info(f"📊 Subscribed to factors for {sub_key}")
 
-            # Use coordinator for bootstrap if available
+            # Use coordinator for bootstrap if available (run in thread pool)
             if self._coordinator is not None:
-                # Use "tick" timeframe for tick-based factors, otherwise use specified timeframe
-                tf_for_bootstrap = ["tick"] if timeframe == "tick" else [timeframe]
-                self._coordinator.start_bootstrap(symbol, tf_for_bootstrap)
+                # Bootstrap all intraday timeframes since BarsBuilder builds all of them
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    None,
+                    self._coordinator.start_bootstrap,
+                    symbol,
+                    list(BOOTSTRAP_TIMEFRAMES),
+                )
 
-            # Pre-register bootstrap Event for legacy compatibility
+            # Pre-register bootstrap Event for legacy compatibility (run in thread pool)
             if self._factor_engine is not None:
-                self._factor_engine.pre_register_bootstrap(symbol)
-
-            # Notify FactorEngine to add this symbol
-            # For bar-based factors, include the timeframe for indicator computation.
-            # For tick-based factors, use empty timeframes (FactorEngine uses defaults).
-            try:
-                timeframes = timeframe if timeframe != "tick" else ""
-                self.r.xadd(
-                    self.FACTOR_TASKS_STREAM,
-                    {
-                        "action": "add",
-                        "ticker": symbol,
-                        "timeframes": timeframes,
-                    },
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    None,
+                    self._factor_engine.pre_register_bootstrap,
+                    symbol,
                 )
-                logger.debug(
-                    f"📥 XADD factor_tasks: add {symbol} timeframes={timeframes}"
-                )
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to XADD add {symbol}: {e}")
 
     async def _handle_factor_unsubscribe(
         self,
@@ -837,6 +843,60 @@ class ChartBFF:
                 del consumer_tasks[task_key]
             factor_subscriptions.discard(sub_key)
             logger.info(f"📊 Unsubscribed from factors for {sub_key}")
+
+    async def _auto_subscribe_factors(
+        self,
+        websocket: WebSocket,
+        symbol: str,
+        timeframe: str,
+        consumer_tasks: dict,
+        factor_subscriptions: Set[str],
+    ) -> None:
+        """Auto-subscribe to factors when a bar subscription comes in.
+
+        This ensures FactorEngine receives the subscription after
+        unsubscribe/resubscribe cycles, fixing the bug where factors
+        don't re-subscribe after unsubscribing.
+
+        Args:
+            websocket: WebSocket connection
+            symbol: Ticker symbol
+            timeframe: Timeframe from the bar subscription (e.g., "10s", "1m", "5m")
+            consumer_tasks: Dict of task_key -> asyncio.Task
+            factor_subscriptions: Set of currently subscribed symbols (with timeframe)
+        """
+        sub_key = f"{symbol}:{timeframe}"
+        if sub_key in factor_subscriptions:
+            logger.debug(f"📊 Already auto-subscribed to factors for {sub_key}")
+            return
+
+        # Create Redis pub/sub consumer task for this timeframe's factors
+        task_key = f"factors:{symbol}:{timeframe}"
+        task = asyncio.create_task(
+            self._consume_factor_stream(websocket, symbol, timeframe)
+        )
+        consumer_tasks[task_key] = task
+        factor_subscriptions.add(sub_key)
+        logger.info(f"📊 Auto-subscribed to factors for {sub_key}")
+
+        # Use coordinator for bootstrap if available (run in thread pool to avoid blocking)
+        if self._coordinator is not None:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None,
+                self._coordinator.start_bootstrap,
+                symbol,
+                list(BOOTSTRAP_TIMEFRAMES),
+            )
+
+        # Pre-register bootstrap Event for legacy compatibility (run in thread pool)
+        if self._factor_engine is not None:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None,
+                self._factor_engine.pre_register_bootstrap,
+                symbol,
+            )
 
     async def _consume_factor_stream(
         self,

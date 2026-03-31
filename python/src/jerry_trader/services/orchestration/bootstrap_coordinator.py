@@ -44,7 +44,7 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 import redis
 
@@ -52,7 +52,38 @@ from jerry_trader import clock as clock_mod
 from jerry_trader.platform.messaging.event_bus import Event, EventBus, EventType
 from jerry_trader.shared.logging.logger import setup_logger
 
-logger = setup_logger("bootstrap_coordinator", log_to_file=True, level=logging.DEBUG)
+
+class BootstrapableService(Protocol):
+    """Protocol for services that can be managed by BootstrapCoordinator.
+
+    Implementations:
+    - BarsBuilderService: builds bars from trades
+    - FactorEngine: computes factors from ticks and bars
+    """
+
+    def add_ticker(self, symbol: str, timeframes: list[str]) -> bool:
+        """Add a ticker for processing.
+
+        The service should:
+        1. Check if data already exists (e.g., in ClickHouse)
+        2. If exists, notify coordinator immediately via on_bars_ready
+        3. If not, start fetching/building data
+
+        Returns:
+            True if successfully started (or immediately complete)
+        """
+        ...
+
+    def remove_ticker(self, symbol: str) -> bool:
+        """Remove a ticker from processing."""
+        ...
+
+    def is_ready(self, symbol: str) -> bool:
+        """Check if ticker is ready (has all required data)."""
+        ...
+
+
+logger = setup_logger("bootstrap_coordinator", log_to_file=True, level=logging.INFO)
 
 # Intraday timeframes that support trades bootstrap
 # 10s: only from trades
@@ -188,7 +219,24 @@ class BootstrapCoordinator:
         # Completion events: symbol -> threading.Event
         self._ready_events: dict[str, threading.Event] = {}
 
+        # Registered services for direct method calls
+        # name -> service instance (BootstrapableService)
+        self._services: dict[str, BootstrapableService] = {}
+
         logger.info("BootstrapCoordinator V2 initialized")
+
+    def register_service(self, name: str, service: BootstrapableService) -> None:
+        """Register a service to be managed by the coordinator.
+
+        Services are called directly during start_bootstrap instead of
+        using Redis Streams for better reliability and timing control.
+
+        Args:
+            name: Service name (e.g., "bars_builder", "factor_engine")
+            service: Service instance implementing BootstrapableService protocol
+        """
+        self._services[name] = service
+        logger.info(f"BootstrapCoordinator: registered service '{name}'")
 
     def start_bootstrap(self, symbol: str, timeframes: list[str]) -> TickerBootstrap:
         """Start bootstrap for a ticker.
@@ -206,63 +254,189 @@ class BootstrapCoordinator:
             TickerBootstrap plan
         """
         with self._lock:
-            # Check if already in progress
+            # Check if already in progress or exists
             if symbol in self._bootstraps:
                 bootstrap = self._bootstraps[symbol]
                 if not bootstrap.is_ready():
-                    logger.warning(f"start_bootstrap - {symbol}: already in progress")
-                    return bootstrap
-
-            # Create new bootstrap plan
-            bootstrap = TickerBootstrap(
-                symbol=symbol,
-                start_time_ns=clock_mod.now_ns(),
-            )
-
-            # Analyze each timeframe
-            needs_trades = False
-            for tf in timeframes:
-                if tf in TRADES_ONLY_TIMEFRAMES:
-                    # 10s: only trades can build
-                    tf_bootstrap = TimeframeBootstrap(
-                        timeframe=tf,
-                        state=TimeframeState.PENDING,
-                        needs_trades=True,
-                        bar_source="trades_only",
-                    )
-                    needs_trades = True
-                elif tf in BOOTSTRAP_TIMEFRAMES:
-                    # 1m-4h: trades (with meeting bar) or clickhouse
-                    tf_bootstrap = TimeframeBootstrap(
-                        timeframe=tf,
-                        state=TimeframeState.PENDING,
-                        needs_trades=True,
-                        bar_source="trades_or_clickhouse",
-                    )
-                    needs_trades = True
+                    # Check if new timeframes need to be added
+                    existing_tfs = set(bootstrap.timeframes.keys())
+                    new_tfs = set(timeframes) - existing_tfs
+                    if new_tfs:
+                        logger.info(
+                            f"start_bootstrap - {symbol}: adding new timeframes {list(new_tfs)} "
+                            f"to existing bootstrap"
+                        )
+                        # Add new timeframes to existing bootstrap
+                        for tf in new_tfs:
+                            if tf in TRADES_ONLY_TIMEFRAMES:
+                                tf_bootstrap = TimeframeBootstrap(
+                                    timeframe=tf,
+                                    state=TimeframeState.PENDING,
+                                    needs_trades=True,
+                                    bar_source="trades_only",
+                                )
+                                if (
+                                    bootstrap.trades_state
+                                    == TradesBootstrapState.NOT_NEEDED
+                                ):
+                                    bootstrap.trades_state = (
+                                        TradesBootstrapState.PENDING
+                                    )
+                            elif tf in BOOTSTRAP_TIMEFRAMES:
+                                tf_bootstrap = TimeframeBootstrap(
+                                    timeframe=tf,
+                                    state=TimeframeState.PENDING,
+                                    needs_trades=True,
+                                    bar_source="trades_or_clickhouse",
+                                )
+                                if (
+                                    bootstrap.trades_state
+                                    == TradesBootstrapState.NOT_NEEDED
+                                ):
+                                    bootstrap.trades_state = (
+                                        TradesBootstrapState.PENDING
+                                    )
+                            else:
+                                tf_bootstrap = TimeframeBootstrap(
+                                    timeframe=tf,
+                                    state=TimeframeState.WS_ONLY,
+                                    needs_trades=False,
+                                    bar_source="ws_only",
+                                )
+                            bootstrap.timeframes[tf] = tf_bootstrap
+                        # Reset the ready event since we have new work
+                        if symbol in self._ready_events:
+                            self._ready_events[symbol].clear()
+                        # Fall through to call services with new timeframes
+                    else:
+                        logger.debug(
+                            f"start_bootstrap - {symbol}: already in progress with same timeframes"
+                        )
+                        return bootstrap
                 else:
-                    # 1d/1w: ws_only
-                    tf_bootstrap = TimeframeBootstrap(
-                        timeframe=tf,
-                        state=TimeframeState.WS_ONLY,
-                        needs_trades=False,
-                        bar_source="ws_only",
+                    # Bootstrap is ready, check if we need new timeframes
+                    existing_tfs = set(bootstrap.timeframes.keys())
+                    new_tfs = set(timeframes) - existing_tfs
+                    if not new_tfs:
+                        logger.debug(
+                            f"start_bootstrap - {symbol}: already ready with all requested timeframes"
+                        )
+                        return bootstrap
+                    # Has new timeframes, reset and add them
+                    logger.info(
+                        f"start_bootstrap - {symbol}: adding new timeframes {list(new_tfs)} "
+                        f"to completed bootstrap (resetting)"
                     )
+                    # Reset bootstrap for new timeframes
+                    bootstrap.end_time_ns = 0
+                    for tf in new_tfs:
+                        if tf in TRADES_ONLY_TIMEFRAMES:
+                            tf_bootstrap = TimeframeBootstrap(
+                                timeframe=tf,
+                                state=TimeframeState.PENDING,
+                                needs_trades=True,
+                                bar_source="trades_only",
+                            )
+                            if (
+                                bootstrap.trades_state
+                                == TradesBootstrapState.NOT_NEEDED
+                            ):
+                                bootstrap.trades_state = TradesBootstrapState.PENDING
+                        elif tf in BOOTSTRAP_TIMEFRAMES:
+                            tf_bootstrap = TimeframeBootstrap(
+                                timeframe=tf,
+                                state=TimeframeState.PENDING,
+                                needs_trades=True,
+                                bar_source="trades_or_clickhouse",
+                            )
+                            if (
+                                bootstrap.trades_state
+                                == TradesBootstrapState.NOT_NEEDED
+                            ):
+                                bootstrap.trades_state = TradesBootstrapState.PENDING
+                        else:
+                            tf_bootstrap = TimeframeBootstrap(
+                                timeframe=tf,
+                                state=TimeframeState.WS_ONLY,
+                                needs_trades=False,
+                                bar_source="ws_only",
+                            )
+                        bootstrap.timeframes[tf] = tf_bootstrap
+                    if symbol in self._ready_events:
+                        self._ready_events[symbol].clear()
+                    # Fall through to call services with new timeframes
 
-                bootstrap.timeframes[tf] = tf_bootstrap
-
-            # Set trades state
-            if not needs_trades:
-                bootstrap.trades_state = TradesBootstrapState.NOT_NEEDED
-
-            self._bootstraps[symbol] = bootstrap
-            # Create or reset the Event for this bootstrap
-            # If re-subscribing after previous completion, create new Event
-            if symbol in self._ready_events:
-                # Clear any previous state for fresh bootstrap
-                self._ready_events[symbol].clear()
             else:
+                # Create new bootstrap plan
+                bootstrap = TickerBootstrap(
+                    symbol=symbol,
+                    start_time_ns=clock_mod.now_ns(),
+                )
+                # The rest of timeframe initialization will happen below
+
+        # Initialize new bootstrap if symbol doesn't exist
+        with self._lock:
+            if symbol not in self._bootstraps:
+                bootstrap = TickerBootstrap(
+                    symbol=symbol,
+                    start_time_ns=clock_mod.now_ns(),
+                )
+                is_new_bootstrap = True
+            else:
+                bootstrap = self._bootstraps[symbol]
+                is_new_bootstrap = False
+
+            # Only initialize timeframes that don't already exist
+            existing_tfs = set(bootstrap.timeframes.keys())
+            tfs_to_init = set(timeframes) - existing_tfs
+            needs_trades = False
+
+            if tfs_to_init:
+                # Analyze each new timeframe
+                for tf in tfs_to_init:
+                    if tf in TRADES_ONLY_TIMEFRAMES:
+                        # 10s: only trades can build
+                        tf_bootstrap = TimeframeBootstrap(
+                            timeframe=tf,
+                            state=TimeframeState.PENDING,
+                            needs_trades=True,
+                            bar_source="trades_only",
+                        )
+                        needs_trades = True
+                    elif tf in BOOTSTRAP_TIMEFRAMES:
+                        # 1m-4h: trades (with meeting bar) or clickhouse
+                        tf_bootstrap = TimeframeBootstrap(
+                            timeframe=tf,
+                            state=TimeframeState.PENDING,
+                            needs_trades=True,
+                            bar_source="trades_or_clickhouse",
+                        )
+                        needs_trades = True
+                    else:
+                        # 1d/1w: ws_only
+                        tf_bootstrap = TimeframeBootstrap(
+                            timeframe=tf,
+                            state=TimeframeState.WS_ONLY,
+                            needs_trades=False,
+                            bar_source="ws_only",
+                        )
+
+                    bootstrap.timeframes[tf] = tf_bootstrap
+
+                # Set/update trades state
+                if (
+                    needs_trades
+                    and bootstrap.trades_state == TradesBootstrapState.NOT_NEEDED
+                ):
+                    bootstrap.trades_state = TradesBootstrapState.PENDING
+
+            # Store the bootstrap reference
+            self._bootstraps[symbol] = bootstrap
+
+            # Create ready event if needed
+            if is_new_bootstrap:
                 self._ready_events[symbol] = threading.Event()
+            # Note: if adding to existing, the event was already cleared above
 
         logger.info(
             f"start_bootstrap - {symbol}: started with timeframes={timeframes}, "
@@ -279,6 +453,35 @@ class BootstrapCoordinator:
                     data={"timeframes": timeframes, "needs_trades": needs_trades},
                 )
             )
+
+        # Call registered services directly (instead of using Redis Streams)
+        # This ensures reliable, synchronous coordination
+        for name, service in self._services.items():
+            try:
+                logger.debug(f"start_bootstrap - {symbol}: calling {name}.add_ticker()")
+
+                # Run in background thread to avoid blocking
+                def run_service(
+                    svc: BootstrapableService, sym: str, tfs: list[str], svc_name: str
+                ) -> None:
+                    try:
+                        svc.add_ticker(sym, tfs)
+                    except Exception as e:
+                        logger.error(
+                            f"start_bootstrap - {sym}: {svc_name}.add_ticker() failed - {e}"
+                        )
+
+                t = threading.Thread(
+                    target=run_service,
+                    args=(service, symbol, timeframes, name),
+                    name=f"bootstrap-{name}-{symbol}",
+                    daemon=True,
+                )
+                t.start()
+            except Exception as e:
+                logger.error(
+                    f"start_bootstrap - {symbol}: failed to call {name}.add_ticker() - {e}"
+                )
 
         return bootstrap
 

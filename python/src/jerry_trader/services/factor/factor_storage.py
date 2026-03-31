@@ -196,7 +196,7 @@ class FactorStorage:
                     "factor_value",
                 ],
             )
-            logger.debug(f"FactorStorage: Batch wrote {len(rows)} factor rows")
+            logger.debug(f"FactorStorage: Batch wrote {len(rows)} rows")
             return len(rows)
         except Exception as e:
             logger.error(f"FactorStorage: Batch write failed - {e}")

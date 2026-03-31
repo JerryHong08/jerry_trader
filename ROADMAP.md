@@ -14,19 +14,21 @@ Foundation pure business logic value objects.
 Performance-critical components rewritten in Rust.
 
 - [-] 2.1 StateEngine rewrite in Rust
-- [ ] 2.2 FactorEngine rewrite in Rust
+- [-] 2.2 FactorEngine rewrite in Rust
 
 ## 3. Services Layer
 
 Stateful workers and use-case implementations.
 
 - [-] 3.2 StateEngine Python wrappers and integration
-- [~] [3.15](roadmap/event-bus-architecture.md) ~~EventBus for service communication (replace callbacks)~~ — superseded by 3.7 Bootstrap Coordinator
-- [-] [3.7](roadmap/bootstrap-coordinator-v2.md) Bootstrap Coordinator V2 — per-timeframe orchestration with trades sharing
 - [ ] 3.4 Real-time risk management engine with position limits
 - [ ] 3.5 Risk management rules and drawdown checks
 - [ ] 3.6 Risk engine integration with order execution
 
+- [ ] 3.17 Factor Registry - 预配置 Factor 系统（启动时加载）
+- [ ] 3.18 FactorEngine 重构 - 懒加载 + 多 timeframe 管理
+- [ ] 3.19 增量更新 - Timeframe 切换时历史数据 merge
+- [ ] 3.20 智能默认 - Factor-Timeframe 映射配置
 ## 4. ML Pipeline
 
 Machine learning for breakout-compute-analyze context model.
@@ -49,10 +51,18 @@ React/TradingView UI modules and UX improvements.
 System-wide coordination and backtest infrastructure.
 
 - [ ] 6.2 Configurable timeframe switch and bootstrap computation
+  - [x] 6.2.1 简化 Bootstrap 架构：删除 Redis Stream，使用 Coordinator 直接管理服务生命周期
+  - [ ] 6.2.1.1 Phase 2: 修改 BootstrapCoordinator - 添加服务注册接口
+  - [ ] 6.2.1.2 Phase 3: 修改 BarsBuilderService - 实现 BootstrapableService 接口
+  - [ ] 6.2.1.3 Phase 4: 修改 FactorEngine - 实现 BootstrapableService 接口
+  - [ ] 6.2.1.4 Phase 5: 修改 ChartBFF - 删除 XADD 逻辑
+  - [ ] 6.2.1.5 Phase 6: 清理 - 删除 Redis Stream 相关代码
 - [ ] 6.4 Tickers pre-location fitting strategy/conditions
 - [ ] 6.5 Strategy pre-locate orchestrator with auto-sequenced jumps
 - [ ] 6.6 Pre-located tickers pipeline backtest visualization and validation
 
+- [x] 6.7 Fix timeframe switching blocking - coordinator should add new timeframes to existing bootstrap instead of returning early
+  - [x] 6.7.1 Fix FactorEngine and BarsBuilderService to bootstrap new timeframes on existing tickers
 ## 7. AI Agent Layer
 
 Event-driven AI agent system with generative UI capabilities.
@@ -95,7 +105,5 @@ Architectural decisions needing discussion.
 ## Open Issues
 
 Known issues and bugs requiring attention.
-
-_Inbox empty - add new issues as they arise_
 
 - [ ] Maybe we should constrain what timeframes of each bar based factor need. e.g. for ema20 it may only need 10s and 1m bar.

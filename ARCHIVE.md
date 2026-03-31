@@ -28,6 +28,11 @@ Stateful workers and use-case implementations.
 
 - [x] [3.14](roadmap/bar-backfill-observer.md) Add bar backfill observer for FactorEngine bootstrap
 
+- [~] [3.15](roadmap/event-bus-architecture.md) ~~EventBus for service communication (replace callbacks)~~ — superseded by 3.7 Bootstrap Coordinator
+- [x] [3.7](roadmap/bootstrap-coordinator-v2.md) Bootstrap Coordinator V2 — per-timeframe orchestration with trades sharing
+
+- [x] 3.16 Bootstrap Coordinator V2 集成测试：10s/1m bar + 10s factor 完整流程
+
 ## 5. Frontend
 React/TradingView UI modules and UX improvements.
 
@@ -39,6 +44,11 @@ React/TradingView UI modules and UX improvements.
 - [x] 5.8 Fix chart timespan switch: newest bar covers last bar's open/high/low
 - [~] 5.3 Abstract all search boxes into unified component
 
+- [x] 5.9 HelpPanel 组件风格统一 - Shortcuts/Layouts/Settings 三栏风格统一
+- [x] 5.10 Layout Templates Tab 样式优化 - 分割线、选中状态绿色文字、白色指示器
+- [x] 5.11 Settings Tab 重构 - Export/Import Layout 水平并列，Storage 区块上移
+- [x] 5.12 Demo 模式首次访问自动弹出 Layout Panel
+- [x] 5.13 页面刷新后默认全局视图 (focus-to-fit)
 
 ## 6. Orchestration
 

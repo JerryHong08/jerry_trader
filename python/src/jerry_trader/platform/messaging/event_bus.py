@@ -37,7 +37,7 @@ import redis
 from jerry_trader.shared.ids.redis_keys import events_stream
 from jerry_trader.shared.logging.logger import setup_logger
 
-logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
+logger = setup_logger(__name__, log_to_file=True, level=logging.INFO)
 
 
 class EventType(str, Enum):

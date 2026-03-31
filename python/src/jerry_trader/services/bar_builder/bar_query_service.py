@@ -129,9 +129,9 @@ class ClickHouseClient:
         real-time trade-tick stream.
         """
         if not self._bars_builder:
-            logger.warning(
+            logger.debug(
                 f"_append_partial_bar - {ticker}/{builder_tf}: "
-                f"BarsBuilder not available, skipping pending/partial bar append"
+                f"BarsBuilder not available (expected for remote ChartBFF)"
             )
             return
 

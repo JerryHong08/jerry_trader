@@ -1,6 +1,10 @@
-"""Market domain models"""
+"""Market domain models — bar, tick, and related value objects.
 
-from jerry_trader.domain.market.bar import Bar
+These are pure data classes with no I/O dependencies. They mirror the
+Rust CompletedBar struct but provide Pythonic ergonomics and type safety.
+"""
+
+from jerry_trader.domain.market.bar import Bar, BarPeriod, Session, Timeframe
 from jerry_trader.domain.market.snapshot import (
     FloatShares,
     FloatSourceData,
@@ -15,6 +19,9 @@ __all__ = [
     "Quote",
     # Bar data
     "Bar",
+    "BarPeriod",
+    "Session",
+    "Timeframe",
     # Snapshot data
     "SnapshotMessage",
     "FloatShares",

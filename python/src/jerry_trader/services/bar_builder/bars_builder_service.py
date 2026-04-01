@@ -429,37 +429,34 @@ class BarsBuilderService:
                 self._bootstrap_events[symbol] = evt
 
                 # Check if bars already exist in ClickHouse
-                all_tfs_have_bars = True
+                # per_tf_starts is used for dedup: skip bars already written
                 per_tf_starts: Dict[str, int] = {}
                 for tf in bootstrap_tfs:
                     last_start = self._get_last_bar_start_today(symbol, tf)
-                    if last_start is None:
-                        all_tfs_have_bars = False
-                        logger.info(
-                            f"add_ticker - {symbol}: {tf} has no bars today, "
-                            f"bootstrapping all TFs from session start"
-                        )
-                        break
-                    per_tf_starts[tf] = last_start
+                    if last_start is not None:
+                        per_tf_starts[tf] = last_start
 
-                if all_tfs_have_bars:
-                    # All timeframes already have bars - notify coordinator immediately
+                if per_tf_starts:
                     logger.info(
-                        f"add_ticker - {symbol}: all TFs have bars, skipping trades_backfill"
+                        f"add_ticker - {symbol}: re-subscribe with existing bars, "
+                        f"will gap-fill and dedup: {per_tf_starts}"
                     )
-                    if self._coordinator:
-                        for tf in bootstrap_tfs:
-                            self._coordinator.on_bars_ready(symbol, tf)
                 else:
-                    # Need to fetch trades - start backfill
-                    from_ms = None
-                    per_tf_starts = {}
-                    Thread(
-                        target=self.trades_backfill,
-                        args=(symbol, bootstrap_tfs, from_ms, per_tf_starts),
-                        daemon=True,
-                        name=f"bootstrap-{symbol}",
-                    ).start()
+                    logger.info(
+                        f"add_ticker - {symbol}: first subscribe, "
+                        f"bootstrapping all TFs from session start"
+                    )
+
+                # Always run trades_backfill:
+                # - First subscribe: from_ms=None, per_tf_starts={}
+                # - Re-subscribe: from_ms=None, per_tf_starts={tf: last_bar_start}
+                # The backfill will fetch all trades and dedup based on per_tf_starts
+                Thread(
+                    target=self.trades_backfill,
+                    args=(symbol, bootstrap_tfs, None, per_tf_starts),
+                    daemon=True,
+                    name=f"bootstrap-{symbol}",
+                ).start()
 
         # Track all timeframes for this ticker
         new_timeframes_added = False
@@ -476,32 +473,33 @@ class BarsBuilderService:
 
         # If new timeframes were added to an existing ticker, check if they need bootstrap
         if not is_new_ticker and new_timeframes_added:
-            # Find bootstrap timeframes that don't have bars yet
-            tfs_needing_bootstrap = []
+            # Find bootstrap timeframes that need processing
+            tfs_to_bootstrap = []
+            per_tf_starts_new: Dict[str, int] = {}
             for tf in timeframes:
                 if (
                     tf in self._bootstrap_tfs_set
                     and tf not in self._bootstrap_done.get(symbol, set())
                 ):
                     last_start = self._get_last_bar_start_today(symbol, tf)
-                    if last_start is None:
-                        tfs_needing_bootstrap.append(tf)
-                        logger.info(
-                            f"add_ticker - {symbol}/{tf}: new timeframe needs bootstrap"
-                        )
+                    if last_start is not None:
+                        per_tf_starts_new[tf] = last_start
+                    tfs_to_bootstrap.append(tf)
+                    logger.info(
+                        f"add_ticker - {symbol}/{tf}: new timeframe, "
+                        f"last_bar_start={last_start}"
+                    )
 
-            if tfs_needing_bootstrap:
+            if tfs_to_bootstrap:
                 # Start bootstrap for the new timeframes
                 evt = self._bootstrap_events.get(symbol)
                 if evt is None or evt.is_set():
                     evt = Event()
                     self._bootstrap_events[symbol] = evt
 
-                from_ms = None
-                per_tf_starts = {}
                 Thread(
                     target=self.trades_backfill,
-                    args=(symbol, tfs_needing_bootstrap, from_ms, per_tf_starts),
+                    args=(symbol, tfs_to_bootstrap, None, per_tf_starts_new),
                     daemon=True,
                     name=f"bootstrap-{symbol}-new-tfs",
                 ).start()

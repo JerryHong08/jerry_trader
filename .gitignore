@@ -126,3 +126,4 @@ docs/_build/
 skills-lock.json
 
 .topology.json
+.topology/*

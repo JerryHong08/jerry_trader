@@ -27,7 +27,7 @@ Stateful workers and use-case implementations.
 
 - [x] 3.17 Factor Registry - 预配置 Factor 系统（启动时加载）
 - [x] 3.18 FactorEngine 重构 - 使用 Registry 创建 indicators
-- [ ] 3.19 增量更新 - Timeframe 切换时历史数据 merge
+- [~] 3.19 增量更新 - Dropped（前端缓存复杂度高，性价比低）
 - [ ] 3.20 智能默认 - Factor-Timeframe 映射配置
 ## 4. ML Pipeline
 
@@ -43,7 +43,7 @@ Machine learning for breakout-compute-analyze context model.
 React/TradingView UI modules and UX improvements.
 
 - [x] 5.4 Unify bar chart and factor chart styles
-- [ ] 5.5 Frame group feature
+- [~] 5.5 Frame group feature (dropped - low ROI)
 - [ ] 5.6 Better UX improvements
 
 - [x] [5.14](roadmap/panel-chart-system.md) TradingView-style panel chart system
@@ -68,6 +68,7 @@ System-wide coordination and backtest infrastructure.
 - [x] 6.7 Fix timeframe switching blocking - coordinator should add new timeframes to existing bootstrap instead of returning early
   - [x] 6.7.1 Fix FactorEngine and BarsBuilderService to bootstrap new timeframes on existing tickers
 - [x] 6.8 Cleanup flow - coordinator.cleanup() notifies all services to stop tracking ticker
+- [x] [6.9](roadmap/re-subscribe-gap-fill.md) Fix re-subscribe gap fill - use per_tf_starts for dedup
 ## 7. AI Agent Layer
 
 Event-driven AI agent system with generative UI capabilities.

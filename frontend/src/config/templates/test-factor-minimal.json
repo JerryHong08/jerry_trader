@@ -1,0 +1,77 @@
+{
+  "id": "06",
+  "name": "Test-factor-minimal",
+  "description": "layout for test factor for laptop monitor",
+  "layout": [
+  {
+    "id": "chart-1773117208665",
+    "moduleType": "chart",
+    "position": {
+      "x": -640,
+      "y": 370
+    },
+    "size": {
+      "width": 1660,
+      "height": 370
+    },
+    "syncGroup": "group-2",
+    "settings": {
+      "chart": {
+        "timeframe": "10s",
+        "panels": [
+          {
+            "id": "price",
+            "type": "price",
+            "collapsed": false,
+            "visible": true,
+            "overlays": [
+              "ema_20"
+            ]
+          },
+          {
+            "id": "trade_rate",
+            "type": "panel",
+            "collapsed": false,
+            "visible": false
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "chart-1773212923947",
+    "moduleType": "chart",
+    "position": {
+      "x": -640,
+      "y": 750
+    },
+    "size": {
+      "width": 1660,
+      "height": 550
+    },
+    "syncGroup": "group-2",
+    "settings": {
+      "chart": {
+        "timeframe": "1m",
+        "panels": [
+          {
+            "id": "price",
+            "type": "price",
+            "collapsed": false,
+            "visible": true,
+            "overlays": [
+              "ema_20"
+            ]
+          },
+          {
+            "id": "trade_rate",
+            "type": "panel",
+            "collapsed": false,
+            "visible": true
+          }
+        ]
+      }
+    }
+  }
+]
+}

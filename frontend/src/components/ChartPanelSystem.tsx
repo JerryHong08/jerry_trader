@@ -770,7 +770,8 @@ function FactorPanel({
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const hasFitContentRef = useRef<boolean>(false);
-  const lastDataLengthRef = useRef<number>(0);
+  const lastRenderedTimeRef = useRef<number>(0);  // Track last rendered timestamp
+  const dataVersionRef = useRef<number>(0);  // Track data version for reset detection
 
   // Determine factor type for data fetching
   const factorType = factorSpec?.type || 'bar';
@@ -830,13 +831,15 @@ function FactorPanel({
       chartRef.current = null;
       seriesRef.current = null;
       hasFitContentRef.current = false;
-      lastDataLengthRef.current = 0;
+      lastRenderedTimeRef.current = 0;
+      dataVersionRef.current = 0;
     };
   }, []);
 
   // Reset state when symbol/timeframe changes
   useEffect(() => {
-    lastDataLengthRef.current = 0;
+    lastRenderedTimeRef.current = 0;
+    dataVersionRef.current = 0;
     hasFitContentRef.current = false;
   }, [symbol, factorTimeframe]);
 
@@ -854,37 +857,45 @@ function FactorPanel({
       seriesRef.current = series;
     }
 
-    if (seriesRef.current) {
-      const currentLength = factorData.length;
-      const previousLength = lastDataLengthRef.current;
+    if (seriesRef.current && factorData.length > 0) {
+      // Track data version to detect reset (e.g., refetch)
+      const currentVersion = factorState?.lastFetchTime || 0;
+      const isReset = currentVersion !== dataVersionRef.current || lastRenderedTimeRef.current === 0;
 
-      // Initial load or data reset (less data than before) - use setData
-      if (previousLength === 0 || currentLength <= previousLength) {
+      if (isReset) {
+        // Initial load or reset - use setData
         const lineData = factorData.map((point: any) => ({
           time: point.time as Time,
           value: point.value,
         }));
         seriesRef.current.setData(lineData);
 
-        // Only fit content once on initial data load
+        // Update tracking refs
+        const lastPoint = factorData[factorData.length - 1];
+        const lastTime = typeof lastPoint.time === 'number' ? lastPoint.time : parseInt(String(lastPoint.time));
+        lastRenderedTimeRef.current = lastTime;
+        dataVersionRef.current = currentVersion;
+
+        // Fit content on initial load
         if (!hasFitContentRef.current) {
           chartRef.current.timeScale().fitContent();
           hasFitContentRef.current = true;
         }
       } else {
-        // Incremental update - only update new points
-        for (let i = previousLength; i < currentLength; i++) {
-          const point = factorData[i];
-          seriesRef.current.update({
-            time: point.time as Time,
-            value: point.value,
-          });
+        // Incremental update - only update points newer than last rendered
+        for (const point of factorData) {
+          const pointTime = typeof point.time === 'number' ? point.time : parseInt(String(point.time));
+          if (pointTime > lastRenderedTimeRef.current) {
+            seriesRef.current.update({
+              time: pointTime as Time,
+              value: point.value,
+            });
+            lastRenderedTimeRef.current = pointTime;
+          }
         }
       }
-
-      lastDataLengthRef.current = currentLength;
     }
-  }, [factorData, factorSpec]);
+  }, [factorData, factorSpec, factorState?.lastFetchTime]);
 
   return (
     <div

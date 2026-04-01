@@ -814,13 +814,14 @@ class ChartBFF:
                     list(BOOTSTRAP_TIMEFRAMES),
                 )
 
-            # Pre-register bootstrap Event for legacy compatibility (run in thread pool)
+            # Pre-register bootstrap Event for the specific timeframe
             if self._factor_engine is not None:
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(
                     None,
                     self._factor_engine.pre_register_bootstrap,
                     symbol,
+                    timeframe,  # Pass timeframe for bar-based factors
                 )
 
     async def _handle_factor_unsubscribe(
@@ -913,13 +914,14 @@ class ChartBFF:
                 list(BOOTSTRAP_TIMEFRAMES),
             )
 
-        # Pre-register bootstrap Event for legacy compatibility (run in thread pool)
+        # Pre-register bootstrap Event for the specific timeframe
         if self._factor_engine is not None:
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(
                 None,
                 self._factor_engine.pre_register_bootstrap,
                 symbol,
+                timeframe,  # Pass timeframe for bar-based factors
             )
 
     async def _consume_factor_stream(

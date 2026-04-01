@@ -47,7 +47,7 @@ export interface SymbolFactorState {
 }
 
 /** Build the composite store key: "moduleId::TICKER::TIMEFRAME" */
-export function factorStoreKey(moduleId: string, ticker: string, timeframe: string = 'tick'): string {
+export function factorStoreKey(moduleId: string, ticker: string, timeframe: string = 'trade'): string {
   return `${moduleId}::${ticker.toUpperCase()}::${timeframe}`;
 }
 
@@ -61,7 +61,8 @@ type FactorDataState = {
     ticker: string,
     fromMs?: number,
     toMs?: number,
-    factorNames?: string[]
+    factorNames?: string[],
+    timeframe?: string
   ) => Promise<void>;
 
   updateFactor: (
@@ -109,7 +110,7 @@ export const useFactorDataStore = create<FactorDataState>((set, get) => ({
     fromMs?: number,
     toMs?: number,
     factorNames?: string[],
-    timeframe: string = 'tick'
+    timeframe: string = 'trade'
   ) => {
     const key = factorStoreKey(moduleId, ticker, timeframe);
     const tickerUpper = ticker.toUpperCase();
@@ -186,7 +187,7 @@ export const useFactorDataStore = create<FactorDataState>((set, get) => ({
     }
   },
 
-  updateFactor: (moduleId: string, ticker: string, factorName: string, point: FactorPoint, timeframe: string = 'tick') => {
+  updateFactor: (moduleId: string, ticker: string, factorName: string, point: FactorPoint, timeframe: string = 'trade') => {
     const key = factorStoreKey(moduleId, ticker, timeframe);
 
     set((state) => {
@@ -227,7 +228,7 @@ export const useFactorDataStore = create<FactorDataState>((set, get) => ({
     ticker: string,
     timestamp_ns: number,
     factors: Record<string, number>,
-    timeframe: string = 'tick'
+    timeframe: string = 'trade'
   ) => {
     const time = Math.floor(timestamp_ns / 1_000_000_000); // ns to seconds
 
@@ -236,7 +237,7 @@ export const useFactorDataStore = create<FactorDataState>((set, get) => ({
     }
   },
 
-  clearFactors: (moduleId: string, ticker: string, timeframe: string = 'tick') => {
+  clearFactors: (moduleId: string, ticker: string, timeframe: string = 'trade') => {
     const key = factorStoreKey(moduleId, ticker, timeframe);
     set((state) => {
       const { [key]: _, ...rest } = state.symbolFactors;

@@ -25,8 +25,8 @@ Stateful workers and use-case implementations.
 - [ ] 3.5 Risk management rules and drawdown checks
 - [ ] 3.6 Risk engine integration with order execution
 
-- [ ] 3.17 Factor Registry - 预配置 Factor 系统（启动时加载）
-- [ ] 3.18 FactorEngine 重构 - 懒加载 + 多 timeframe 管理
+- [x] 3.17 Factor Registry - 预配置 Factor 系统（启动时加载）
+- [x] 3.18 FactorEngine 重构 - 使用 Registry 创建 indicators
 - [ ] 3.19 增量更新 - Timeframe 切换时历史数据 merge
 - [ ] 3.20 智能默认 - Factor-Timeframe 映射配置
 ## 4. ML Pipeline
@@ -46,6 +46,10 @@ React/TradingView UI modules and UX improvements.
 - [ ] 5.5 Frame group feature
 - [ ] 5.6 Better UX improvements
 
+- [x] [5.14](roadmap/panel-chart-system.md) TradingView-style panel chart system
+  - [x] 5.14.1 Real-time price chart updates from trade ticks
+  - [x] 5.14.2 TradeRate canvas stability (single fitContent)
+  - [x] 5.14.3 Overlay factor rendering timing fix
 ## 6. Orchestration
 
 System-wide coordination and backtest infrastructure.

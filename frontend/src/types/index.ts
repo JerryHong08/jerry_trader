@@ -37,7 +37,31 @@ export interface AccountInfo {
 
 export interface ChartModuleSettings {
   timeframe: ChartTimeframe;
+  panels?: ChartPanel[];  // Panel configuration for chart
 }
+
+/**
+ * ChartPanel - A panel within the unified chart system.
+ *
+ * - Price panel: OHLCV bars + optional overlay factors (EMA, VWAP)
+ * - Factor panel: Standalone factor chart (TradeRate, RSI, etc.)
+ */
+export interface ChartPanel {
+  id: string;              // 'price' or factor id (e.g., 'trade_rate', 'rsi_14')
+  type: 'price' | 'panel';
+  collapsed: boolean;      // true = show only header
+  visible: boolean;        // false = closed/removed
+  overlays?: string[];     // For price panel: factor ids to overlay (e.g., ['ema_20', 'vwap'])
+  height?: number;         // Optional height ratio (0-1, relative to total height)
+}
+
+/**
+ * Default panel configuration.
+ */
+export const DEFAULT_PANELS: ChartPanel[] = [
+  { id: 'price', type: 'price', collapsed: false, visible: true, overlays: ['ema_20'] },
+  { id: 'trade_rate', type: 'panel', collapsed: false, visible: true },
+];
 
 export interface OverviewChartModuleSettings {
   selectedStates: TickerState[];

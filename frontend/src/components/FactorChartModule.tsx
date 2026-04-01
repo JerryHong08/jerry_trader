@@ -20,8 +20,33 @@ import { useTickDataStore } from '../stores/tickDataStore';
 import type { ModuleProps, ChartTimeframe } from '../types';
 
 // ============================================================================
-// Constants
+// Types
 // ============================================================================
+
+interface FactorDisplay {
+  name: string;
+  description: string;
+  color: string;
+  priceScale: 'left' | 'right';
+  mode: 'overlay' | 'panel';
+}
+
+interface FactorSpec {
+  id: string;
+  type: 'bar' | 'trade' | 'quote';
+  display: FactorDisplay;
+  timeframes: string[];
+}
+
+interface FactorConfig {
+  name: string;
+  displayName: string;
+  color: string;
+  priceScaleId: 'left' | 'right';
+  visible: boolean;
+  type: 'bar' | 'trade' | 'quote';
+  mode: 'overlay' | 'panel';
+}
 
 const TIMEFRAMES: ChartTimeframe[] = ['10s', '1m', '5m', '15m', '30m', '1h', '4h', '1D', '1W', '1M'];
 
@@ -31,14 +56,6 @@ const BFF_HTTP_URL =
     : 'http://localhost:8000';
 
 const BFF_URL_RESOLVED = BFF_HTTP_URL || 'http://localhost:8000';
-
-interface FactorConfig {
-  name: string;
-  displayName: string;
-  color: string;
-  priceScaleId: 'left' | 'right';
-  visible: boolean;
-}
 
 // ============================================================================
 // Component
@@ -122,23 +139,66 @@ export function FactorChartModule({
     onSymbolSelect?.(sym);
   };
 
-  // ── Factor Configuration ───────────────────────────────────────────────
-  const [factorConfigs, setFactorConfigs] = useState<Record<string, FactorConfig>>({
-    ema_20: {
-      name: 'ema_20',
-      displayName: 'EMA(20)',
-      color: '#3b82f6', // blue
-      priceScaleId: 'left',   // Price-level indicator on left
-      visible: true,
-    },
-    trade_rate: {
-      name: 'trade_rate',
-      displayName: 'TradeRate',
-      color: '#f97316', // orange
-      priceScaleId: 'right',  // Rate indicator on right (different scale)
-      visible: true,
-    },
-  });
+  // ── Factor Configuration (loaded from API) ───────────────────────────────────────
+  const [factorConfigs, setFactorConfigs] = useState<Record<string, FactorConfig>>({});
+  const [configsLoaded, setConfigsLoaded] = useState(false);
+
+  // Fetch factor specs from API on mount
+  useEffect(() => {
+    const fetchFactorSpecs = async () => {
+      try {
+        const response = await fetch(`${BFF_URL_RESOLVED}/api/factors/specs`);
+        if (!response.ok) {
+          throw new Error('Failed to fetch factor specs');
+        }
+        const data = await response.json();
+        const specs: FactorSpec[] = data.factors || [];
+
+        // Convert specs to factorConfigs
+        const configs: Record<string, FactorConfig> = {};
+        for (const spec of specs) {
+          configs[spec.id] = {
+            name: spec.id,
+            displayName: spec.display.name,
+            color: spec.display.color,
+            priceScaleId: spec.display.priceScale as 'left' | 'right',
+            visible: true,
+            type: spec.type,
+            mode: spec.display.mode as 'overlay' | 'panel',
+          };
+        }
+
+        setFactorConfigs(configs);
+        setConfigsLoaded(true);
+      } catch (err) {
+        console.error('[FactorChart] Failed to load factor specs:', err);
+        // Fallback to hardcoded defaults
+        setFactorConfigs({
+          ema_20: {
+            name: 'ema_20',
+            displayName: 'EMA(20)',
+            color: '#3b82f6',
+            priceScaleId: 'left',
+            visible: true,
+            type: 'bar',
+            mode: 'overlay',
+          },
+          trade_rate: {
+            name: 'trade_rate',
+            displayName: 'TradeRate',
+            color: '#f97316',
+            priceScaleId: 'right',
+            visible: true,
+            type: 'trade',
+            mode: 'panel',
+          },
+        });
+        setConfigsLoaded(true);
+      }
+    };
+
+    fetchFactorSpecs();
+  }, []);
 
   // ── Chart refs ─────────────────────────────────────────────────────────
   const chartContainerRef = useRef<HTMLDivElement>(null);
@@ -149,10 +209,10 @@ export function FactorChartModule({
   const fetchFactors = useFactorDataStore((s) => s.fetchFactors);
   const symbolFactors = useFactorDataStore((s) => s.symbolFactors);
   // Get factor state for this module + symbol + timeframe
-  // We need both tick-based (TradeRate) and bar-based (EMA) factors for the current timeframe
-  const tickFactorKey = factorStoreKey(moduleId, symbol, 'tick');
+  // We need both trade-based (TradeRate) and bar-based (EMA) factors for the current timeframe
+  const tradeFactorKey = factorStoreKey(moduleId, symbol, 'trade');
   const barFactorKey = symbol ? factorStoreKey(moduleId, symbol, timeframe) : null;
-  const tickFactorState = symbol ? symbolFactors[tickFactorKey] : undefined;
+  const tradeFactorState = symbol ? symbolFactors[tradeFactorKey] : undefined;
   const barFactorState = barFactorKey ? symbolFactors[barFactorKey] : undefined;
 
   // ── Initialize chart ───────────────────────────────────────────────────
@@ -255,17 +315,17 @@ export function FactorChartModule({
   // This effect updates data without recreating series or resetting view
   useEffect(() => {
     const chart = chartRef.current;
-    const isLoading = tickFactorState?.loading || barFactorState?.loading;
+    const isLoading = tradeFactorState?.loading || barFactorState?.loading;
     if (!chart || isLoading) return;
 
-    // Check if timeframe changed - if so, don't clear tick-based data
+    // Check if timeframe changed - if so, don't clear trade-based data
     const timeframeChanged = prevTimeframeRef.current !== timeframe;
     prevTimeframeRef.current = timeframe;
 
-    // Merge factors from both tick-based and bar-based states
+    // Merge factors from both trade-based and bar-based states
     const mergedFactors: Record<string, { time: number; value: number }[]> = {};
-    if (tickFactorState?.factors) {
-      Object.entries(tickFactorState.factors).forEach(([name, points]) => {
+    if (tradeFactorState?.factors) {
+      Object.entries(tradeFactorState.factors).forEach(([name, points]) => {
         mergedFactors[name] = points;
       });
     }
@@ -282,7 +342,7 @@ export function FactorChartModule({
 
       const points = mergedFactors[config.name] || [];
       if (points.length === 0) {
-        // Only clear bar-based series on timeframe change, keep tick-based
+        // Only clear bar-based series on timeframe change, keep trade-based
         if (timeframeChanged && config.name !== 'trade_rate') {
           try {
             series.setData([]);
@@ -302,7 +362,7 @@ export function FactorChartModule({
         console.error(`[FactorChart] Failed to update series for ${config.name}:`, e);
       }
     });
-  }, [tickFactorState, barFactorState, timeframe]); // Include timeframe to detect changes
+  }, [tradeFactorState, barFactorState, timeframe]); // Include timeframe to detect changes
 
   // ── Sync series visibility with config ─────────────────────────────────
   useEffect(() => {
@@ -320,17 +380,17 @@ export function FactorChartModule({
 
     const symbolUpper = symbol.toUpperCase();
 
-    // Fetch historical factors for both tick-based and bar-based
+    // Fetch historical factors for both trade-based and bar-based
     // Don't specify time range - backend returns all available data
     // This works for both live mode and replay mode with historical dates
-    fetchFactors(moduleId, symbolUpper, undefined, undefined, undefined, 'tick'); // TradeRate
+    fetchFactors(moduleId, symbolUpper, undefined, undefined, undefined, 'trade'); // TradeRate
     fetchFactors(moduleId, symbolUpper, undefined, undefined, undefined, timeframe); // EMA
 
     // Subscribe to real-time updates via tickDataStore
     // Note: No need for cleanup unsubscribe - backend coordinator.cleanup() handles it
     // when the symbol is unsubscribed from ticks/quotes
     const tickStore = useTickDataStore.getState();
-    tickStore.subscribeFactors(symbolUpper, 'tick'); // TradeRate and tick-based
+    tickStore.subscribeFactors(symbolUpper, 'trade'); // TradeRate and trade-based
     tickStore.subscribeFactors(symbolUpper, timeframe); // EMA and bar-based for this timeframe
   }, [symbol, timeframe, moduleId, fetchFactors]);
 
@@ -470,15 +530,15 @@ export function FactorChartModule({
         />
 
         {/* Loading/Error Overlay */}
-        {(tickFactorState?.loading || barFactorState?.loading) && (
+        {(tradeFactorState?.loading || barFactorState?.loading) && (
           <div className="absolute inset-0 flex items-center justify-center bg-zinc-950/80 pointer-events-none">
             <div className="text-sm text-zinc-400">Loading factors...</div>
           </div>
         )}
-        {(tickFactorState?.error || barFactorState?.error) && (
+        {(tradeFactorState?.error || barFactorState?.error) && (
           <div className="absolute inset-0 flex items-center justify-center bg-zinc-950/80 pointer-events-none">
             <div className="text-sm text-red-400">
-              Error: {tickFactorState?.error || barFactorState?.error}
+              Error: {tradeFactorState?.error || barFactorState?.error}
             </div>
           </div>
         )}

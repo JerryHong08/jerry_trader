@@ -1,0 +1,106 @@
+# Factor Registry Configuration
+#
+# Defines all available factors for the system.
+# Each factor specifies its class, type, parameters, and display metadata.
+#
+# Types:
+#   - bar:   Updated on bar close (requires historical bars for warmup)
+#   - trade: Updated on each trade execution (requires trade stream)
+#   - quote: Updated on quote updates (requires bid/ask stream)
+
+factors:
+  # ────────────────────────────────────────────────────────────────────────
+  # Bar-based Indicators
+  # ────────────────────────────────────────────────────────────────────────
+
+  ema_20:
+    class: EMA
+    type: bar
+    params:
+      period: 20
+    display:
+      name: EMA(20)
+      description: Exponential Moving Average with 20-period
+      color: "#3b82f6"  # blue
+      priceScale: left
+      mode: overlay    # Render on price chart
+    timeframes:
+      - 10s
+      - 1m
+      - 5m
+      - 15m
+      - 30m
+      - 1h
+      - 4h
+      - 1D
+      - 1W
+      - 1M
+
+  # ema_50:
+  #   class: EMA
+  #   type: bar
+  #   params:
+  #     period: 50
+  #   display:
+  #     name: EMA(50)
+  #     description: Exponential Moving Average with 50-period
+  #     color: "#8b5cf6"  # purple
+  #     priceScale: left
+  #   timeframes:
+  #     - 1m
+  #     - 5m
+  #     - 15m
+  #     - 1h
+  #     - 4h
+  #     - 1D
+
+  # ────────────────────────────────────────────────────────────────────────
+  # Tick-based Indicators
+  # ────────────────────────────────────────────────────────────────────────
+
+  trade_rate:
+    class: TradeRate
+    type: trade
+    params:
+      window_ms: 20000  # 20 second rolling window
+      min_trades: 5     # Minimum trades before computing rate
+    display:
+      name: TradeRate
+      description: Trade rate (trades per second)
+      color: "#f97316"  # orange
+      priceScale: right
+      mode: panel      # Separate panel below price
+    # trade-based factors apply to all timeframes (computed independently)
+    timeframes:
+      - trade
+
+  # ────────────────────────────────────────────────────────────────────────
+  # Future Indicators (examples)
+  # ────────────────────────────────────────────────────────────────────────
+
+  # vwap_deviation:
+  #   class: VWAPDeviation
+  #   type: tick
+  #   params:
+  #     anchor: session_start
+  #   display:
+  #     name: VWAP Dev
+  #     description: Price deviation from VWAP in percent
+  #     color: "#10b981"
+  #     priceScale: right
+  #   timeframes:
+  #     - tick
+
+  # relative_volume:
+  #   class: RelativeVolume
+  #   type: bar
+  #   params:
+  #     lookback_periods: 20
+  #   display:
+  #     name: RelVol
+  #     description: Volume relative to 20-period average
+  #     color: "#f59e0b"
+  #     priceScale: right
+  #   timeframes:
+  #     - 1m
+  #     - 5m

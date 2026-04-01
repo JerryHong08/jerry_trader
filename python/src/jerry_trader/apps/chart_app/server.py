@@ -258,6 +258,26 @@ class ChartBFF:
                     "session_id": self.session_id,
                 }
 
+        # ============ Factor Specs API (for FactorChartModule) ============
+
+        @self.app.get("/api/factors/specs")
+        async def get_factor_specs():
+            """Get all factor specifications for frontend configuration.
+
+            Returns factor metadata including display name, color, priceScale,
+            and applicable timeframes. Frontend uses this to dynamically
+            configure factor charts instead of hardcoding.
+
+            Returns:
+                JSON array of factor specs:
+                [{id, type, display: {name, description, color, priceScale}, timeframes}]
+            """
+            from jerry_trader.services.factor.factor_registry import get_factor_registry
+
+            registry = get_factor_registry()
+            specs = registry.get_specs_for_api()
+            return {"factors": specs, "count": len(specs)}
+
         # ============ Chart Bars API (for ChartModule) ============
 
         @self.app.get("/api/chart/bars/{ticker}")
@@ -396,7 +416,7 @@ class ChartBFF:
                 from_ms: Start timestamp in milliseconds (default: 1 hour ago)
                 to_ms: End timestamp in milliseconds (default: now)
                 factors: Comma-separated factor names to filter (default: all)
-                timeframe: Timeframe filter (e.g., 'tick', '1m', '5m'). Default: all timeframes.
+                timeframe: Timeframe filter (e.g., 'trade', '1m', '5m'). Default: all timeframes.
 
             Returns:
                 JSON with factors dict: {factor_name: [{time, value}, ...]}
@@ -412,12 +432,16 @@ class ChartBFF:
             # Pre-register bootstrap if FactorEngine exists (ensures wait_for_bootstrap
             # has an event to wait on even if this REST call happens before WebSocket
             # subscription triggers FactorEngine to start processing)
+            # Pass the timeframe so bootstrap waits for the correct timeframe's data
             if self._factor_engine is not None:
-                self._factor_engine.pre_register_bootstrap(ticker_upper)
+                self._factor_engine.pre_register_bootstrap(ticker_upper, timeframe)
 
             # Wait for factor bootstrap before querying
+            # Pass the timeframe to wait for the specific timeframe's bootstrap
             if self._factor_engine is not None:
-                self._factor_engine.wait_for_bootstrap(ticker_upper, timeout=60.0)
+                self._factor_engine.wait_for_bootstrap(
+                    ticker_upper, timeframe, timeout=60.0
+                )
 
             factor_names = factors.split(",") if factors else None
 
@@ -698,7 +722,7 @@ class ChartBFF:
                 logger.warning(f"⏱️ Subscribe: {symbol} bootstrap timeout")
 
             # Auto-subscribe to factors
-            actual_timeframe = timeframe if timeframe else "tick"
+            actual_timeframe = timeframe if timeframe else "trade"
             await self._auto_subscribe_factors(
                 websocket,
                 symbol,
@@ -742,7 +766,7 @@ class ChartBFF:
             data: Parsed JSON message {
                 "action": "subscribe_factors",
                 "symbols": ["AAPL", "TSLA"],
-                "timeframe": "5m"  // optional, defaults to tick-based factors
+                "timeframe": "5m"  // optional, defaults to trade-based factors
             }
             consumer_tasks: Dict of task_key -> asyncio.Task
             factor_subscriptions: Set of currently subscribed symbols (with timeframe)
@@ -754,8 +778,8 @@ class ChartBFF:
             symbols = [s.upper() for s in symbols if s]
 
         # Timeframe for bar-based factors (e.g., "1m", "5m")
-        # Use "tick" for tick-based factors (TradeRate, etc.)
-        timeframe = data.get("timeframe", "tick")
+        # Use "trade" for trade-based factors (TradeRate, etc.)
+        timeframe = data.get("timeframe", "trade")
 
         if not symbols:
             logger.warning("⚠️ No symbols in factor subscribe request")
@@ -813,7 +837,7 @@ class ChartBFF:
             data: Parsed JSON message {
                 "action": "unsubscribe_factors",
                 "symbols": ["AAPL"],
-                "timeframe": "5m"  // optional, defaults to tick-based factors
+                "timeframe": "5m"  // optional, defaults to trade-based factors
             }
             consumer_tasks: Dict of task_key -> asyncio.Task
             factor_subscriptions: Set of currently subscribed symbols (with timeframe)
@@ -824,7 +848,7 @@ class ChartBFF:
         else:
             symbols = [s.upper() for s in symbols if s]
 
-        timeframe = data.get("timeframe", "tick")
+        timeframe = data.get("timeframe", "trade")
 
         if not symbols:
             logger.warning("⚠️ No symbols in factor unsubscribe request")
@@ -902,14 +926,14 @@ class ChartBFF:
         self,
         websocket: WebSocket,
         symbol: str,
-        timeframe: str = "tick",
+        timeframe: str = "trade",
     ) -> None:
         """Consume factor updates from Redis pub/sub and forward to WebSocket.
 
         Args:
             websocket: WebSocket connection
             symbol: Ticker symbol
-            timeframe: Timeframe for factors (e.g., "1m", "5m", "tick")
+            timeframe: Timeframe for factors (e.g., "1m", "5m", "trade")
         """
         # Wait for factor bootstrap to complete before consuming real-time updates
         # This prevents receiving real-time factors before historical bootstrap is ready

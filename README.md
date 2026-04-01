@@ -2,6 +2,30 @@
 
 this file has my trading system module summary and the roadmap from very early experimental stage to planned.
 
+### frontend preview
+
+#### Overview layout Set
+
+<p align="center">
+  <img src="./assets/JerryTrader.png" alt="JerryTrader" width="600">
+  <br><em>Portfolio, order history and chart are using mock data</em>
+</p>
+
+#### Trade layout Set
+
+<p align="center">
+  <img src="./assets/trade_layout01.png" alt="trade_layout01" width="800">
+</p>
+
+#### real-time Bar&Factor chart modules preview
+
+<p align="center">
+  <img src="./assets/bar&factor.png" alt="bar&factor"
+  width="800">
+</p>
+
+>You can customize your layout in setting.
+
 Architecture in [ARCHITECTURE.md](ARCHITECTURE.md)
 
 Detailed Document in [Jerry_Trader.pdf](docs/jerry_trader.pdf) (not refactored yet.)
@@ -9,6 +33,8 @@ Detailed Document in [Jerry_Trader.pdf](docs/jerry_trader.pdf) (not refactored y
 Roadmap in [ROADMAP.md](ROADMAP.md)
 
 Changelod in [CHANGELOG.md](CHANGELOG.md)
+
+I use my self-built human agent task management system [Topology](https://github.com/JerryHong08/topology) to develop this project.
 
 ## Installation & Quick Start
 
@@ -167,12 +193,12 @@ The proposed layout follows a **layered architecture** with strict dependency ru
                     │           & factor warmup)      │
                     │                   ▲             │
                     │   ┌───────────────┘             │
-                    │   │                               │
-                    ▼   │                               │
-              Redis pub/sub                             │
-           ┌─────────────────┐                          │
-           │ bars:{sym}:{tf} │──────────────────────────┤
-           │ factors:{sym}   │──────────────────────────┘
+                    │   │                             │
+                    ▼   │                             │
+              Redis pub/sub                           │
+           ┌─────────────────┐                        │
+           │ bars:{sym}:{tf} │────────────────────────┤
+           │ factors:{sym}   │────────────────────────┘
            └─────────────────┘
 ```
 
@@ -238,20 +264,3 @@ Postgres (classified results)  ──► Redis B (news events)
       ▼
 AgentBFF ──► Frontend / [Stage4] AgentRuntime
 ```
-
-### Current frontend preview
-
-#### Overview Layout Set
-
-<p align="center">
-  <img src="./assets/JerryTrader.png" alt="JerryTrader" width="600">
-  <br><em>Portfolio, order history and chart are using mock data</em>
-</p>
-
-#### Trade Layout Set
-
-<p align="center">
-  <img src="./assets/trade_layout01.png" alt="trade_layout01" width="800">
-</p>
-
->You can customize your layout in setting.

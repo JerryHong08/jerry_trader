@@ -1,11 +1,12 @@
 import { OrderManagement } from '../components/OrderManagement';
 import { RankList } from '../components/RankList';
-import { ChartModule } from '../components/ChartModule';
+import { ChartModule } from '../components/ChartModule'; // Legacy - kept for reference
 import { OverviewChartModule } from '../components/OverviewChartModule';
 import { StockDetail } from '../components/StockDetail';
 import { PortfolioModule } from '../components/PortfolioModule';
 import NewsRoom from '../components/NewsRoom';
-import { FactorChartModule } from '../components/FactorChartModule';
+import { FactorChartModule } from '../components/FactorChartModule'; // Legacy - kept for reference
+import ChartPanelSystem from '../components/ChartPanelSystem';
 import type { ModuleConfig, ModuleType } from '../types';
 
 export const moduleRegistry: Record<ModuleType, ModuleConfig> = {
@@ -28,9 +29,9 @@ export const moduleRegistry: Record<ModuleType, ModuleConfig> = {
   'chart': {
     type: 'chart',
     name: 'Chart',
-    description: 'TradingView candlestick chart',
-    component: ChartModule,
-    defaultSize: { width: 600, height: 400 },
+    description: 'TradingView-style panel chart with overlays and indicators',
+    component: ChartPanelSystem,
+    defaultSize: { width: 600, height: 500 },
     supportSync: true,
     supportSearch: true,
   },
@@ -70,7 +71,7 @@ export const moduleRegistry: Record<ModuleType, ModuleConfig> = {
   'factor-chart': {
     type: 'factor-chart',
     name: 'Factor Chart',
-    description: 'Real-time factor visualization (EMA, TradeRate)',
+    description: 'Legacy factor chart (use Chart panel instead)',
     component: FactorChartModule,
     defaultSize: { width: 800, height: 500 },
     supportSync: true,

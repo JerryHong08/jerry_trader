@@ -14,6 +14,7 @@
 
 import { create } from 'zustand';
 import { IS_DEMO } from '../data/mockData';
+import { useFactorDataStore } from './factorDataStore';
 
 // ============================================================================
 // Types
@@ -175,38 +176,32 @@ export const useTickDataStore = create<TickDataState>()((set, get) => ({
 
       // Handle factor updates - broadcast to all modules with this symbol and timeframe
       if (data.type === 'factor_update') {
-        import('./factorDataStore').then(({ useFactorDataStore }) => {
-          const factorStore = useFactorDataStore.getState();
-          const { symbol, timestamp_ns, factors, timeframe } = data.data || {};
+        const factorStore = useFactorDataStore.getState();
+        const { symbol, timestamp_ns, factors, timeframe } = data.data || {};
 
-          if (symbol && timestamp_ns && factors) {
-            // timeframe from backend (e.g., 'tick', '1m', '5m')
-            const tf = timeframe || 'tick';
+        if (symbol && timestamp_ns && factors) {
+          // timeframe from backend (e.g., 'trade', '1m', '5m')
+          const tf = timeframe || 'trade';
 
-            // Find all moduleIds that have factor data for this symbol AND timeframe
-            // Keys are formatted as "{moduleId}::{ticker}::{timeframe}"
-            const keySuffix = `::${symbol.toUpperCase()}::${tf}`;
-            const matchingKeys = Object.keys(factorStore.symbolFactors).filter((key) =>
-              key.endsWith(keySuffix)
-            );
+          // Find all moduleIds that have factor data for this symbol AND timeframe
+          // Keys are formatted as "{moduleId}::{ticker}::{timeframe}"
+          const keySuffix = `::${symbol.toUpperCase()}::${tf}`;
+          const matchingKeys = Object.keys(factorStore.symbolFactors).filter((key) =>
+            key.endsWith(keySuffix)
+          );
 
-            if (matchingKeys.length === 0) {
-              // No active factor charts for this symbol+timeframe yet - update will be lost
-              // This is expected if user hasn't opened a factor chart for this timeframe
-              console.debug(`[TickData] No factor modules for ${symbol}/${tf}, skipping update`);
-              return;
-            }
-
-            // Broadcast to all matching modules
-            for (const key of matchingKeys) {
-              const moduleId = key.split('::')[0];
-              factorStore.updateFactors(moduleId, symbol, timestamp_ns, factors, tf);
-            }
-            console.debug(
-              `[TickData] Factor update broadcast to ${matchingKeys.length} module(s) for ${symbol}/${tf}`
-            );
+          if (matchingKeys.length === 0) {
+            // No active factor charts for this symbol+timeframe yet - update will be lost
+            // This is expected if user hasn't opened a factor chart for this timeframe
+            return;
           }
-        });
+
+          // Broadcast to all matching modules synchronously
+          for (const key of matchingKeys) {
+            const moduleId = key.split('::')[0];
+            factorStore.updateFactors(moduleId, symbol, timestamp_ns, factors, tf);
+          }
+        }
         return;
       }
 
@@ -299,7 +294,7 @@ export const useTickDataStore = create<TickDataState>()((set, get) => ({
   // Factor Subscriptions (for FactorChartModule)
   // ========================================================================
 
-  subscribeFactors: (symbols: string | string[], timeframe: string = 'tick') => {
+  subscribeFactors: (symbols: string | string[], timeframe: string = 'trade') => {
     const symbolArray = Array.isArray(symbols) ? symbols : [symbols];
     if (ws?.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({
@@ -313,7 +308,7 @@ export const useTickDataStore = create<TickDataState>()((set, get) => ({
     }
   },
 
-  unsubscribeFactors: (symbols: string | string[], timeframe: string = 'tick') => {
+  unsubscribeFactors: (symbols: string | string[], timeframe: string = 'trade') => {
     const symbolArray = Array.isArray(symbols) ? symbols : [symbols];
     if (ws?.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({

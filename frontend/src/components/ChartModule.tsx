@@ -578,7 +578,7 @@ export function ChartModule({
   return (
     <div className="h-full flex flex-col bg-zinc-900 relative">
       {/* Header bar */}
-      <div className="p-2 border-b border-zinc-800 flex flex-col gap-1">
+      <div className="px-2 py-1.5 border-b border-zinc-800 flex flex-col gap-1 bg-zinc-900/50">
         {/* Row 1: Connection + Symbol tabs + Add input */}
         <div className="flex items-center gap-2 flex-wrap">
           {connected ? (
@@ -632,16 +632,16 @@ export function ChartModule({
 
         {/* Row 2: Timeframe selector + Chart mode toggle + Price info */}
         <div className="flex items-center gap-2 flex-wrap">
-          {/* Timeframe buttons */}
-          <div className="flex items-center gap-0.5">
+          {/* Timeframe pills */}
+          <div className="flex items-center gap-0.5 bg-zinc-950/50 rounded-md p-0.5">
             {TIMEFRAMES.map((tf) => (
               <button
                 key={tf}
                 onClick={() => handleTimeframeChange(tf)}
-                className={`px-1.5 py-0.5 text-[10px] font-mono transition-colors ${
+                className={`px-2 py-0.5 text-[10px] font-mono rounded transition-all ${
                   tf === timeframe
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-zinc-800 hover:bg-zinc-700 text-gray-400'
+                    ? 'bg-zinc-700 text-zinc-100 shadow-sm'
+                    : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50'
                 }`}
               >
                 {tf}

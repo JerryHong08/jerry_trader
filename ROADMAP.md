@@ -4,10 +4,10 @@
 
 Foundation pure business logic value objects.
 
-- [ ] 1.1 Populate domain/market/ with Tick, Bar, Snapshot models
-- [ ] 1.2 Populate domain/order/ with Order, Fill, Contract models
+- [x] 1.1 Populate domain/market/ with Bar, BarPeriod models (Tick, Snapshot pending)
+- [x] 1.2 Populate domain/order/ with Order, OrderState, Fill models
 - [ ] 1.3 Populate domain/strategy/ with Signal, Risk models
-- [ ] 1.4 Populate domain/factor/ with Factor value objects
+- [x] 1.4 Populate domain/factor/ with FactorSnapshot value object
 
 ## 2. Rust Core
 
@@ -42,7 +42,7 @@ Machine learning for breakout-compute-analyze context model.
 
 React/TradingView UI modules and UX improvements.
 
-- [ ] 5.4 Unify bar chart and factor chart styles
+- [x] 5.4 Unify bar chart and factor chart styles
 - [ ] 5.5 Frame group feature
 - [ ] 5.6 Better UX improvements
 
@@ -50,19 +50,20 @@ React/TradingView UI modules and UX improvements.
 
 System-wide coordination and backtest infrastructure.
 
-- [ ] 6.2 Configurable timeframe switch and bootstrap computation
+- [x] 6.2 Configurable timeframe switch and bootstrap computation
   - [x] 6.2.1 简化 Bootstrap 架构：删除 Redis Stream，使用 Coordinator 直接管理服务生命周期
-  - [ ] 6.2.1.1 Phase 2: 修改 BootstrapCoordinator - 添加服务注册接口
-  - [ ] 6.2.1.2 Phase 3: 修改 BarsBuilderService - 实现 BootstrapableService 接口
-  - [ ] 6.2.1.3 Phase 4: 修改 FactorEngine - 实现 BootstrapableService 接口
-  - [ ] 6.2.1.4 Phase 5: 修改 ChartBFF - 删除 XADD 逻辑
-  - [ ] 6.2.1.5 Phase 6: 清理 - 删除 Redis Stream 相关代码
+  - [x] 6.2.1.1 Phase 2: 修改 BootstrapCoordinator - 添加服务注册接口
+  - [x] 6.2.1.2 Phase 3: 修改 BarsBuilderService - 实现 BootstrapableService 接口
+  - [x] 6.2.1.3 Phase 4: 修改 FactorEngine - 实现 BootstrapableService 接口
+  - [x] 6.2.1.4 Phase 5: 修改 ChartBFF - 删除 XADD 逻辑
+  - [x] 6.2.1.5 Phase 6: 清理 - 删除 Redis Stream 相关代码
 - [ ] 6.4 Tickers pre-location fitting strategy/conditions
 - [ ] 6.5 Strategy pre-locate orchestrator with auto-sequenced jumps
 - [ ] 6.6 Pre-located tickers pipeline backtest visualization and validation
 
 - [x] 6.7 Fix timeframe switching blocking - coordinator should add new timeframes to existing bootstrap instead of returning early
   - [x] 6.7.1 Fix FactorEngine and BarsBuilderService to bootstrap new timeframes on existing tickers
+- [x] 6.8 Cleanup flow - coordinator.cleanup() notifies all services to stop tracking ticker
 ## 7. AI Agent Layer
 
 Event-driven AI agent system with generative UI capabilities.

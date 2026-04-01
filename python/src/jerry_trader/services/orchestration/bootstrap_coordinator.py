@@ -693,7 +693,11 @@ class BootstrapCoordinator:
         return bootstrap is not None and bootstrap.is_ready()
 
     def cleanup(self, symbol: str) -> None:
-        """Clean up bootstrap state and stored trades."""
+        """Clean up bootstrap state, stored trades, and notify services to stop tracking.
+
+        This should be called when a ticker is unsubscribed to stop all background
+        processing (bars building, factor computation, etc.).
+        """
         with self._lock:
             if symbol in self._bootstraps:
                 bootstrap = self._bootstraps[symbol]
@@ -706,6 +710,14 @@ class BootstrapCoordinator:
 
         if symbol in self._ready_events:
             del self._ready_events[symbol]
+
+        # Notify all registered services to stop tracking this symbol
+        for name, service in self._services.items():
+            try:
+                service.remove_ticker(symbol)
+                logger.debug(f"cleanup - {symbol}: called remove_ticker on {name}")
+            except Exception as e:
+                logger.warning(f"cleanup - {symbol}: failed to remove from {name}: {e}")
 
         logger.debug(f"cleanup - {symbol}: bootstrap state cleaned")
 

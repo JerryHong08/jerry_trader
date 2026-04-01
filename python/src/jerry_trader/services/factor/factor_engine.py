@@ -21,7 +21,7 @@ from redis.exceptions import ResponseError
 
 import jerry_trader.clock as clock_mod
 from jerry_trader.domain.factor import FactorSnapshot
-from jerry_trader.domain.market import Bar
+from jerry_trader.domain.market import Bar, BarPeriod
 from jerry_trader.platform.storage.clickhouse import (
     get_clickhouse_client,
     query_ohlcv_bars,
@@ -277,13 +277,17 @@ class FactorEngine:
         # Convert event data to Bar domain model
         bar = Bar(
             symbol=symbol,
-            timestamp_ns=bar_start_ms * 1_000_000,  # ms to ns
-            timespan=timeframe,
+            timeframe=timeframe,
             open=event.data.get("open", 0.0),
             high=event.data.get("high", 0.0),
             low=event.data.get("low", 0.0),
             close=event.data.get("close", 0.0),
-            volume=int(event.data.get("volume", 0)),
+            volume=float(event.data.get("volume", 0)),
+            trade_count=event.data.get("trade_count", 0),
+            vwap=event.data.get("vwap", 0.0),
+            bar_start=bar_start_ms,
+            bar_end=BarPeriod(timeframe, bar_start_ms).end_ms,
+            session=event.data.get("session", "regular"),
         )
 
         # Update bar indicators for this timeframe
@@ -295,7 +299,7 @@ class FactorEngine:
 
         # Write bar-based factors to ClickHouse
         if factors:
-            self._write_factors(symbol, bar.timestamp_ns, factors, timeframe)
+            self._write_factors(symbol, bar.bar_start * 1_000_000, factors, timeframe)
 
     def _process_bootstrap_trades(
         self, symbol: str, trades: list[tuple[int, float, int]]
@@ -669,17 +673,20 @@ class FactorEngine:
         snapshots: list[FactorSnapshot] = []
         for bar_dict in bars:
             # query_ohlcv_bars returns bars with "time" (epoch seconds)
+            bar_start_ms = bar_dict["time"] * 1000  # seconds to ms
             bar = Bar(
                 symbol=symbol,
-                timestamp_ns=bar_dict["time"] * 1_000_000_000,  # seconds to ns
-                timespan=timeframe,
+                timeframe=timeframe,
                 open=bar_dict["open"],
                 high=bar_dict["high"],
                 low=bar_dict["low"],
                 close=bar_dict["close"],
-                volume=int(bar_dict.get("volume", 0)),
-                vwap=bar_dict.get("vwap"),
-                trade_count=bar_dict.get("trade_count"),
+                volume=float(bar_dict.get("volume", 0)),
+                trade_count=bar_dict.get("trade_count", 0),
+                vwap=bar_dict.get("vwap", 0.0),
+                bar_start=bar_start_ms,
+                bar_end=BarPeriod(timeframe, bar_start_ms).end_ms,
+                session=bar_dict.get("session", "regular"),
             )
 
             factors: dict[str, float] = {}
@@ -692,7 +699,7 @@ class FactorEngine:
                 snapshots.append(
                     FactorSnapshot(
                         symbol=symbol,
-                        timestamp_ns=bar.timestamp_ns,
+                        timestamp_ns=bar.bar_start * 1_000_000,  # ms to ns
                         factors=factors,
                     )
                 )
@@ -1024,15 +1031,17 @@ class FactorEngine:
         # Convert to Bar domain model
         bar = Bar(
             symbol=symbol,
-            timestamp_ns=bar_dict["bar_start"] * 1_000_000,  # ms to ns
-            timespan=timeframe,
+            timeframe=timeframe,
             open=bar_dict["open"],
             high=bar_dict["high"],
             low=bar_dict["low"],
             close=bar_dict["close"],
-            volume=int(bar_dict.get("volume", 0)),
-            vwap=bar_dict.get("vwap"),
-            trade_count=bar_dict.get("trade_count"),
+            volume=float(bar_dict.get("volume", 0)),
+            trade_count=bar_dict.get("trade_count", 0),
+            vwap=bar_dict.get("vwap", 0.0),
+            bar_start=bar_start_ms,
+            bar_end=BarPeriod(timeframe, bar_start_ms).end_ms,
+            session=bar_dict.get("session", "regular"),
         )
 
         # Update bar indicators for this timeframe
@@ -1052,7 +1061,7 @@ class FactorEngine:
 
         # Write bar-based factors to ClickHouse with timeframe
         if factors:
-            self._write_factors(symbol, bar.timestamp_ns, factors, timeframe)
+            self._write_factors(symbol, bar.bar_start * 1_000_000, factors, timeframe)
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Tick Subscription (UnifiedTickManager)

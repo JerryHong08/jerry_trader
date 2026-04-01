@@ -2,11 +2,11 @@
  * FactorChartModule - Real-time Factor Visualization
  *
  * Displays computed factors (EMA, TradeRate) using TradingView Lightweight Charts.
- * Follows the ChartModule's symbol and timeframe (passive/sub-follower mode).
+ * Fully synced with ChartModule via sync group (same symbol and timeframe).
  *
  * Features:
- * - Syncs symbol from selectedSymbol prop (follows ChartModule)
- * - Syncs timeframe from settings (sub-follower of ChartModule)
+ * - Syncs symbol and timeframe from sync group (just like a second BarChart)
+ * - Displays factors for the current symbol/timeframe instead of OHLCV bars
  * - Dual Y-axis for different factor scales (EMA ~price, TradeRate ~rate)
  * - Toggle visibility for each factor
  * - Auto-subscribe/unsubscribe on symbol/timeframe change
@@ -14,7 +14,7 @@
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { createChart, IChartApi, ISeriesApi, LineSeries, ColorType, CrosshairMode } from 'lightweight-charts';
-import { Eye, EyeOff, TrendingUp, ChevronDown } from 'lucide-react';
+import { TrendingUp, Wifi, WifiOff, RefreshCw } from 'lucide-react';
 import { useFactorDataStore, factorStoreKey } from '../stores/factorDataStore';
 import { useTickDataStore } from '../stores/tickDataStore';
 import type { ModuleProps, ChartTimeframe } from '../types';
@@ -22,6 +22,8 @@ import type { ModuleProps, ChartTimeframe } from '../types';
 // ============================================================================
 // Constants
 // ============================================================================
+
+const TIMEFRAMES: ChartTimeframe[] = ['10s', '1m', '5m', '15m', '30m', '1h', '4h', '1D', '1W', '1M'];
 
 const BFF_HTTP_URL =
   typeof import.meta !== 'undefined' && import.meta.env?.VITE_CHART_BFF_URL
@@ -52,27 +54,73 @@ export function FactorChartModule({
   onSettingsChange,
   zoom = 1,
 }: ModuleProps) {
-  // ── Symbol & Timeframe (follows ChartModule) ──────────────────────────
+  // ── Symbol & Timeframe (synced initially, then independent like a 2nd BarChart) ──────────────
   const [symbol, setSymbol] = useState(selectedSymbol || '');
+  const [timeframe, setTimeframe] = useState<ChartTimeframe>(selectedTimeframe ?? '10s');
+  const [input, setInput] = useState('');
 
-  // Timeframe from settings (independent mode)
-  const timeframe: ChartTimeframe = settings?.chart?.timeframe ?? '10s';
+  // Track previous symbol to detect changes
+  const prevSymbolRef = useRef(selectedSymbol);
 
-  // Timeframe selector dropdown state
-  const [showTfMenu, setShowTfMenu] = useState(false);
-  const TIMEFRAMES: ChartTimeframe[] = ['10s', '1m', '5m', '15m', '30m', '1h', '4h', '1D'];
+  // Get symbol management from tickDataStore (shared with ChartModule)
+  const symbols = useTickDataStore((s) => s.symbols);
+  const connected = useTickDataStore((s) => s.connected);
+  const addSymbols = useTickDataStore((s) => s.addSymbols);
+  const removeSymbolFromStore = useTickDataStore((s) => s.removeSymbol);
+  const reconnect = useTickDataStore((s) => s.reconnect);
 
-  const handleTimeframeChange = (tf: ChartTimeframe) => {
-    onSettingsChange?.({ chart: { timeframe: tf } });
-    setShowTfMenu(false);
-  };
-
-  // Sync symbol from external sync group (ChartModule)
+  // Sync symbol from external sync group
   useEffect(() => {
     if (selectedSymbol && selectedSymbol !== symbol) {
       setSymbol(selectedSymbol);
     }
   }, [selectedSymbol]);
+
+  // When symbol changes, sync timeframe to follow the main chart (like 2nd BarChart behavior)
+  useEffect(() => {
+    if (selectedSymbol && prevSymbolRef.current !== selectedSymbol) {
+      // Symbol changed - sync timeframe to main chart
+      if (selectedTimeframe) {
+        setTimeframe(selectedTimeframe);
+      }
+      prevSymbolRef.current = selectedSymbol;
+    }
+  }, [selectedSymbol, selectedTimeframe]);
+
+  const handleTimeframeChange = (tf: ChartTimeframe) => {
+    setTimeframe(tf);
+    onSettingsChange?.({ chart: { timeframe: tf } });
+  };
+
+  // ── Symbol management (like ChartModule) ────────────────────────────────
+  const handleAdd = () => {
+    const newSyms = input
+      .split(',')
+      .map((s) => s.trim().toUpperCase())
+      .filter(Boolean);
+    if (newSyms.length > 0) {
+      addSymbols(newSyms, ['Q', 'T']);
+      const last = newSyms[newSyms.length - 1];
+      setSymbol(last);
+      onSymbolSelect?.(last);
+    }
+    setInput('');
+  };
+
+  const handleRemove = (sym: string) => {
+    removeSymbolFromStore(sym);
+    if (sym === symbol) {
+      const remaining = symbols.filter((s) => s !== sym);
+      const next = remaining.length > 0 ? remaining[remaining.length - 1] : '';
+      setSymbol(next);
+      if (next) onSymbolSelect?.(next);
+    }
+  };
+
+  const handleSelectSymbol = (sym: string) => {
+    setSymbol(sym);
+    onSymbolSelect?.(sym);
+  };
 
   // ── Factor Configuration ───────────────────────────────────────────────
   const [factorConfigs, setFactorConfigs] = useState<Record<string, FactorConfig>>({
@@ -80,14 +128,14 @@ export function FactorChartModule({
       name: 'ema_20',
       displayName: 'EMA(20)',
       color: '#3b82f6', // blue
-      priceScaleId: 'left',
+      priceScaleId: 'left',   // Price-level indicator on left
       visible: true,
     },
     trade_rate: {
       name: 'trade_rate',
       displayName: 'TradeRate',
       color: '#f97316', // orange
-      priceScaleId: 'right',
+      priceScaleId: 'right',  // Rate indicator on right (different scale)
       visible: true,
     },
   });
@@ -279,15 +327,11 @@ export function FactorChartModule({
     fetchFactors(moduleId, symbolUpper, undefined, undefined, undefined, timeframe); // EMA
 
     // Subscribe to real-time updates via tickDataStore
-    // Subscribe to BOTH tick-based factors (TradeRate) and bar-based factors (EMA) for current timeframe
+    // Note: No need for cleanup unsubscribe - backend coordinator.cleanup() handles it
+    // when the symbol is unsubscribed from ticks/quotes
     const tickStore = useTickDataStore.getState();
     tickStore.subscribeFactors(symbolUpper, 'tick'); // TradeRate and tick-based
     tickStore.subscribeFactors(symbolUpper, timeframe); // EMA and bar-based for this timeframe
-
-    return () => {
-      tickStore.unsubscribeFactors(symbolUpper, 'tick');
-      tickStore.unsubscribeFactors(symbolUpper, timeframe);
-    };
   }, [symbol, timeframe, moduleId, fetchFactors]);
 
   // ── Toggle factor visibility ───────────────────────────────────────────
@@ -313,73 +357,110 @@ export function FactorChartModule({
 
   // ── Render ─────────────────────────────────────────────────────────────
   return (
-    <div className="flex flex-col h-full bg-zinc-900 text-zinc-100 p-3">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <TrendingUp className="w-5 h-5 text-blue-400" />
-          <h3 className="text-sm font-semibold">
-            Factor Chart {symbol && `- ${symbol}`}
-          </h3>
-        </div>
-
-        {/* Timeframe selector dropdown for easy debugging */}
-        <div className="relative">
-          <button
-            onClick={() => setShowTfMenu(!showTfMenu)}
-            className="flex items-center gap-1 px-2 py-1 text-xs font-medium rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 transition-colors"
-          >
-            {timeframe}
-            <ChevronDown className="w-3 h-3" />
-          </button>
-          {showTfMenu && (
-            <div className="absolute top-full left-0 mt-1 bg-zinc-800 border border-zinc-700 rounded shadow-xl z-50 min-w-[80px]">
-              {TIMEFRAMES.map((tf) => (
-                <button
-                  key={tf}
-                  onClick={() => handleTimeframeChange(tf)}
-                  className={`w-full text-left px-2 py-1 text-xs hover:bg-zinc-700 ${
-                    tf === timeframe ? 'bg-blue-600 text-white' : 'text-zinc-400'
-                  }`}
-                >
-                  {tf}
-                </button>
-              ))}
-            </div>
+    <div className="flex flex-col h-full bg-zinc-900 text-zinc-100">
+      {/* Header - Two rows like ChartModule */}
+      <div className="px-2 py-1.5 border-b border-zinc-800 flex flex-col gap-1 bg-zinc-900/50">
+        {/* Row 1: Connection + Symbol tabs + Add input */}
+        <div className="flex items-center gap-2 flex-wrap">
+          {connected ? (
+            <Wifi className="w-3.5 h-3.5 text-green-500 flex-shrink-0" />
+          ) : (
+            <WifiOff className="w-3.5 h-3.5 text-red-500 flex-shrink-0" />
           )}
+
+          <button
+            onClick={reconnect}
+            className="p-0.5 hover:bg-zinc-800 transition-colors rounded"
+            title="Reconnect WebSocket"
+          >
+            <RefreshCw className="w-3.5 h-3.5 text-gray-400" />
+          </button>
+
+          {symbols.map((s) => (
+            <button
+              key={s}
+              onClick={() => handleSelectSymbol(s)}
+              className={`px-2 py-0.5 text-xs transition-colors ${
+                s === symbol
+                  ? 'bg-white text-black'
+                  : 'bg-zinc-800 hover:bg-zinc-700 text-gray-300'
+              }`}
+            >
+              {s}
+              <span
+                className="ml-1 text-red-400 hover:text-red-300 cursor-pointer"
+                onClick={(e) => { e.stopPropagation(); handleRemove(s); }}
+              >
+                ✕
+              </span>
+            </button>
+          ))}
+
+          <input
+            className="bg-black border border-zinc-700 px-2 py-0.5 text-xs w-28 focus:outline-none focus:border-zinc-500"
+            placeholder="AAPL, NVDA"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
+          />
+          <button
+            onClick={handleAdd}
+            className="px-2 py-0.5 text-xs bg-blue-600 hover:bg-blue-700 transition-colors"
+          >
+            Add
+          </button>
         </div>
 
-        {/* Factor Toggles with timeframe labels */}
-        <div className="flex gap-2">
-          {Object.values(factorConfigs).map((config) => {
-            // Show timeframe for each factor: EMA uses bar timeframe, TradeRate uses tick
-            const factorTimeframe = config.name === 'trade_rate' ? 'tick' : timeframe;
-            return (
+        {/* Row 2: Timeframe selector + Factor toggles */}
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          {/* Timeframe Pills */}
+          <div className="flex items-center gap-0.5 bg-zinc-950/50 rounded-md p-0.5">
+            {TIMEFRAMES.map((tf) => (
+              <button
+                key={tf}
+                onClick={() => handleTimeframeChange(tf)}
+                className={`px-2 py-0.5 text-[10px] font-mono rounded transition-all ${
+                  tf === timeframe
+                    ? 'bg-zinc-700 text-zinc-100 shadow-sm'
+                    : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50'
+                }`}
+              >
+                {tf}
+              </button>
+            ))}
+          </div>
+
+          {/* Factor Toggles */}
+          <div className="flex items-center gap-1">
+            {Object.values(factorConfigs).map((config) => (
               <button
                 key={config.name}
                 onClick={() => toggleFactorVisibility(config.name)}
-                className="flex items-center gap-1.5 px-2 py-1 text-xs font-medium rounded transition-colors bg-zinc-800 hover:bg-zinc-700"
-                style={{ color: config.visible ? config.color : '#71717a' }}
-                title={`${config.displayName} (${factorTimeframe})`}
+                className={`flex items-center gap-1.5 px-2 py-0.5 text-[10px] rounded-md transition-all ${
+                  config.visible
+                    ? 'bg-zinc-800 text-zinc-200'
+                    : 'bg-transparent text-zinc-600 hover:text-zinc-400'
+                }`}
               >
-                {config.visible ? (
-                  <Eye className="w-3.5 h-3.5" />
-                ) : (
-                  <EyeOff className="w-3.5 h-3.5" />
-                )}
-                {config.displayName}
-                <span className="text-[10px] opacity-60 ml-0.5">({factorTimeframe})</span>
+                {/* Color Dot */}
+                <span
+                  className={`w-1.5 h-1.5 rounded-full transition-all ${
+                    config.visible ? 'opacity-100' : 'opacity-30'
+                  }`}
+                  style={{ backgroundColor: config.color }}
+                />
+                <span className="font-medium">{config.displayName}</span>
               </button>
-            );
-          })}
+            ))}
+          </div>
         </div>
       </div>
 
-      {/* Chart Container with counter-zoom to fix mouse coordinates */}
-      <div className="flex-1 relative bg-zinc-950 rounded border border-zinc-800">
+      {/* Chart Container - fills entire space like ChartModule */}
+      <div className="flex-1 min-h-0 relative">
         <div
-          ref={chartContainerRef}
           className="absolute inset-0"
+          ref={chartContainerRef}
           style={{
             transform: zoom !== 1 ? `scale(${1 / zoom})` : undefined,
             transformOrigin: 'top left',
@@ -390,58 +471,21 @@ export function FactorChartModule({
 
         {/* Loading/Error Overlay */}
         {(tickFactorState?.loading || barFactorState?.loading) && (
-          <div className="absolute inset-0 flex items-center justify-center bg-zinc-950/80">
+          <div className="absolute inset-0 flex items-center justify-center bg-zinc-950/80 pointer-events-none">
             <div className="text-sm text-zinc-400">Loading factors...</div>
           </div>
         )}
         {(tickFactorState?.error || barFactorState?.error) && (
-          <div className="absolute inset-0 flex items-center justify-center bg-zinc-950/80">
+          <div className="absolute inset-0 flex items-center justify-center bg-zinc-950/80 pointer-events-none">
             <div className="text-sm text-red-400">
               Error: {tickFactorState?.error || barFactorState?.error}
             </div>
           </div>
         )}
         {!symbol && (
-          <div className="absolute inset-0 flex items-center justify-center bg-zinc-950/80">
-            <div className="text-sm text-zinc-500">
-              Waiting for symbol from Chart module...
-            </div>
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+            <span className="text-gray-600 text-sm">Add a symbol to see factors</span>
           </div>
-        )}
-      </div>
-
-      {/* Footer Info */}
-      <div className="mt-3 text-xs text-zinc-500">
-        {symbol && (
-          <>
-            <span className="font-medium text-zinc-400">{symbol}</span>
-            <span className="ml-2 text-zinc-600">•</span>
-            <span className="ml-2">{timeframe}</span>
-            {/* Merge factors from both states for display */}
-            {(() => {
-              const mergedFactors: Record<string, { time: number; value: number }[]> = {};
-              if (tickFactorState?.factors) {
-                Object.entries(tickFactorState.factors).forEach(([name, points]) => {
-                  mergedFactors[name] = points;
-                });
-              }
-              if (barFactorState?.factors) {
-                Object.entries(barFactorState.factors).forEach(([name, points]) => {
-                  mergedFactors[name] = points;
-                });
-              }
-              const factorCount = Object.keys(mergedFactors).length;
-              const pointCount = Object.values(mergedFactors).reduce((sum, points) => sum + points.length, 0);
-              return factorCount > 0 ? (
-                <>
-                  <span className="ml-2 text-zinc-600">•</span>
-                  <span className="ml-2">
-                    {factorCount} factors • {pointCount} points
-                  </span>
-                </>
-              ) : null;
-            })()}
-          </>
         )}
       </div>
     </div>

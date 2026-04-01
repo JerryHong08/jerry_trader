@@ -151,3 +151,6 @@ Machine roles are configured in `config.yaml`. See `config.yaml.example` for the
 
 ## Roadmap
 the detailed roadmap can be found in [ROADMAP.md](ROADMAP.md)
+
+
+Do not use `git` unless asked to commit.

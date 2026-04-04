@@ -146,6 +146,23 @@ class BarBuilder:
 
     def __repr__(self) -> str: ...
 
+class SharedTimeHandle:
+    """A handle for reading the ReplayClock time without GIL contention.
+
+    Created by `ReplayClock.get_shared_time()` and passed to other
+    Rust components (e.g., TickDataReplayer) that need to read the clock.
+    """
+
+    def now_ns(self) -> int:
+        """Read the current clock time (epoch nanoseconds)."""
+        ...
+
+    def now_ms(self) -> int:
+        """Read the current clock time (epoch milliseconds)."""
+        ...
+
+    def __repr__(self) -> str: ...
+
 class ReplayClock:
     """Monotonic, drift-free virtual clock for replay mode.
 
@@ -209,21 +226,48 @@ class ReplayClock:
         """The current data-start anchor (epoch ns)."""
         ...
 
+    def get_shared_time(self) -> SharedTimeHandle:
+        """Get a shared time handle for zero-GIL time reads.
+
+        The handle can be passed to other Rust components (e.g.,
+        TickDataReplayer) so they can read the clock time without
+        acquiring the GIL.
+
+        Returns:
+            SharedTimeHandle: A handle for reading the clock time.
+        """
+        ...
+
     def __repr__(self) -> str: ...
 
 class TickDataReplayer:
     """Tick-level data replayer, embedded in the Python process.
 
     Reads Parquet files from the data lake, replays quotes and trades
-    at the correct pace using a virtual timeline, and delivers payloads
+    at the correct pace using a shared virtual timeline, and delivers payloads
     to a Python callback.
 
-    Example::
+    **Clock Synchronization:**
+    When created with `shared_time`, the replayer uses the same clock
+    as the ReplayClock, ensuring all components see the same time without drift.
+
+    Example (shared time mode - recommended)::
+
+        clock = ReplayClock(data_start_ts_ns=..., speed=1.0)
+        replayer = TickDataReplayer(
+            replay_date="20251113",
+            lake_data_dir="/mnt/data/lake",
+            shared_time=clock.get_shared_time(),
+        )
+        replayer.subscribe("AAPL", ["Q", "T"], on_tick)
+
+    Example (legacy mode - standalone timeline)::
 
         replayer = TickDataReplayer(
             replay_date="20251113",
             lake_data_dir="/mnt/data/lake",
             data_start_ts_ns=clock.data_start_ts_ns,
+            speed=1.0,
         )
         replayer.subscribe("AAPL", ["Q", "T"], on_tick)
     """
@@ -232,18 +276,29 @@ class TickDataReplayer:
         self,
         replay_date: str,
         lake_data_dir: str,
-        data_start_ts_ns: int,
+        shared_time: Optional[SharedTimeHandle] = None,
+        data_start_ts_ns: int = 0,
         speed: float = 1.0,
         start_time: Optional[str] = None,
         max_gap_ms: Optional[int] = None,
     ) -> None:
         """Create a new replayer.
 
+        **Recommended (shared time mode):**
+            Pass `shared_time` from `ReplayClock.get_shared_time()` to
+            synchronize the replayer with the master clock.
+
+        **Legacy (standalone timeline):**
+            Pass `data_start_ts_ns` and `speed` to create an independent timeline.
+
         Args:
             replay_date: Date in YYYYMMDD format.
             lake_data_dir: Path to the data-lake root.
-            data_start_ts_ns: Epoch-ns anchor for the virtual clock.
-            speed: Replay speed multiplier (1.0 = real-time).
+            shared_time: A `SharedTimeHandle` from `ReplayClock.get_shared_time()`.
+                When provided, the replayer uses this as the time source (recommended).
+            data_start_ts_ns: (Legacy) Epoch-ns anchor for the virtual clock.
+                Ignored if `shared_time` is provided.
+            speed: (Legacy) Replay speed multiplier. Ignored if `shared_time` is provided.
             start_time: Optional ``"HH:MM"`` or ``"HH:MM:SS"`` (ET).
             max_gap_ms: Threshold for logging large time gaps (ms).
         """
@@ -288,19 +343,31 @@ class TickDataReplayer:
         ...
 
     def set_speed(self, speed: float) -> None:
-        """Change replay speed (re-anchors the timeline)."""
+        """Change replay speed (legacy mode only).
+
+        In shared time mode, this is a no-op. Use ReplayClock.set_speed() instead.
+        """
         ...
 
     def pause(self) -> None:
-        """Pause playback."""
+        """Pause playback (legacy mode only).
+
+        In shared time mode, this is a no-op. Use ReplayClock.pause() instead.
+        """
         ...
 
     def resume(self) -> None:
-        """Resume playback."""
+        """Resume playback (legacy mode only).
+
+        In shared time mode, this is a no-op. Use ReplayClock.resume() instead.
+        """
         ...
 
     def jump_to(self, target_ts_ns: int) -> None:
-        """Jump to a specific data timestamp (epoch ns)."""
+        """Jump to a specific data timestamp (legacy mode only).
+
+        In shared time mode, this is a no-op. Use ReplayClock.jump_to() instead.
+        """
         ...
 
     def now_ns(self) -> int:
@@ -332,6 +399,34 @@ class TickDataReplayer:
 
     def shutdown(self) -> None:
         """Shut down the engine thread."""
+        ...
+
+    def __repr__(self) -> str: ...
+
+class VolumeTracker:
+    """Track relative volume for a single ticker."""
+
+    def __init__(self, window_ms: int = 3900000) -> None:
+        """Create a new VolumeTracker.
+
+        Args:
+            window_ms: Rolling window in milliseconds (default 3900000 = 6.5 hours).
+        """
+        ...
+
+    def on_trade(self, timestamp_ms: int, volume: int) -> None:
+        """Record a trade."""
+        ...
+
+    def compute(self, current_ms: int) -> Optional[float]:
+        """Compute relative volume (current vol / average vol).
+
+        Returns None if window is empty.
+        """
+        ...
+
+    def reset(self) -> None:
+        """Reset all state."""
         ...
 
     def __repr__(self) -> str: ...

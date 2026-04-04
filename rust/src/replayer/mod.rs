@@ -5,6 +5,10 @@
 //
 // Replaces the standalone `local_tickdata_replayer` binary + WebSocket
 // transport with a zero-copy, in-process callback model.
+//
+// IMPORTANT: The replayer uses a shared time handle from `ReplayClock`
+// to ensure all components see the same virtual time. This eliminates
+// clock drift between the Python clock and Rust replayer.
 
 pub mod config;
 pub mod engine;
@@ -24,26 +28,34 @@ use config::ReplayConfig;
 use engine::{ReplayCommand, Timeline};
 use types::DataType;
 
+// Import SharedTimeHandle from clock module
+use crate::clock::SharedTimeHandle;
+
 // ── TickDataReplayer ────────────────────────────────────────────────
 
 /// Tick-level data replayer, embedded in the Python process.
 ///
 /// Reads Parquet files from the data lake, replays quotes and trades
-/// at the correct pace using a virtual timeline, and delivers payloads
+/// at the correct pace using a shared virtual timeline, and delivers payloads
 /// to a Python callback.
+///
+/// **Clock Synchronization:**
+/// The replayer uses a `SharedTimeHandle` from `ReplayClock` to read the
+/// current virtual time. This ensures all components (Python clock, bar builder,
+/// factor engine) see the same time without drift.
 ///
 /// Example (Python)::
 ///
-///     from jerry_trader._rust import TickDataReplayer
+///     from jerry_trader._rust import ReplayClock, TickDataReplayer
 ///
-///     def on_tick(symbol: str, payload: dict):
-///         print(symbol, payload["ev"], payload["bp"])
+///     # Create the master clock
+///     clock = ReplayClock(data_start_ts_ns=..., speed=1.0)
 ///
+///     # Pass shared time handle to replayer
 ///     replayer = TickDataReplayer(
 ///         replay_date="20251113",
 ///         lake_data_dir="/mnt/data/lake",
-///         data_start_ts_ns=clock.data_start_ts_ns,
-///         speed=1.0,
+///         shared_time=clock.get_shared_time(),
 ///     )
 ///     replayer.subscribe("AAPL", ["Q", "T"], on_tick)
 #[pyclass]
@@ -51,27 +63,49 @@ pub struct TickDataReplayer {
     cmd_tx: mpsc::Sender<ReplayCommand>,
     #[allow(dead_code)]
     engine_handle: Option<std::thread::JoinHandle<()>>,
+    /// Legacy timeline for backward compatibility (used when no shared_time)
     timeline: Arc<RwLock<Timeline>>,
+    /// Shared time handle from ReplayClock (preferred)
+    shared_time: Option<SharedTimeHandle>,
+    /// Speed for legacy mode
+    speed: f64,
 }
 
 #[pymethods]
 impl TickDataReplayer {
     /// Create a new replayer.
     ///
+    /// **Recommended (shared time mode):**
+    ///     replayer = TickDataReplayer(
+    ///         replay_date="20251113",
+    ///         lake_data_dir="/mnt/data/lake",
+    ///         shared_time=clock.get_shared_time(),
+    ///     )
+    ///
+    /// **Legacy (standalone timeline):**
+    ///     replayer = TickDataReplayer(
+    ///         replay_date="20251113",
+    ///         lake_data_dir="/mnt/data/lake",
+    ///         data_start_ts_ns=...,
+    ///         speed=1.0,
+    ///     )
+    ///
     /// Args:
     ///     replay_date: Date in YYYYMMDD format.
     ///     lake_data_dir: Path to the data-lake root.
-    ///     data_start_ts_ns: Epoch-ns anchor for the virtual clock
-    ///         (should match `ReplayClock.data_start_ts_ns`).
-    ///     speed: Replay speed multiplier (1.0 = real-time).
-    ///     start_time: Optional start time in ``"HH:MM"`` or
-    ///         ``"HH:MM:SS"`` (America/New_York).
+    ///     shared_time: A `SharedTimeHandle` from `ReplayClock.get_shared_time()`.
+    ///         When provided, the replayer uses this as the time source (recommended).
+    ///     data_start_ts_ns: (Legacy) Epoch-ns anchor for the virtual clock.
+    ///         Ignored if `shared_time` is provided.
+    ///     speed: (Legacy) Replay speed multiplier. Ignored if `shared_time` is provided.
+    ///     start_time: Optional start time in ``"HH:MM"`` or ``"HH:MM:SS"``.
     ///     max_gap_ms: Threshold for logging large time gaps (ms).
     #[new]
-    #[pyo3(signature = (replay_date, lake_data_dir, data_start_ts_ns, speed=1.0, start_time=None, max_gap_ms=None))]
+    #[pyo3(signature = (replay_date, lake_data_dir, shared_time=None, data_start_ts_ns=0, speed=1.0, start_time=None, max_gap_ms=None))]
     fn new(
         replay_date: &str,
         lake_data_dir: &str,
+        shared_time: Option<SharedTimeHandle>,
         data_start_ts_ns: i64,
         speed: f64,
         start_time: Option<&str>,
@@ -89,14 +123,25 @@ impl TickDataReplayer {
             max_gap_ms,
         };
 
-        let timeline = Arc::new(RwLock::new(Timeline::new(data_start_ts_ns, speed)));
+        // Use shared time if provided, otherwise create standalone timeline
+        let (timeline, effective_speed) = if let Some(ref handle) = shared_time {
+            // Shared time mode - timeline is just a placeholder for pause state
+            let tl = Arc::new(RwLock::new(Timeline::new_placeholder()));
+            (tl, 1.0) // Speed is controlled by ReplayClock, not us
+        } else {
+            // Legacy mode - standalone timeline
+            let tl = Arc::new(RwLock::new(Timeline::new(data_start_ts_ns, speed)));
+            (tl, speed)
+        };
+
         let (cmd_tx, cmd_rx) = mpsc::channel();
 
         let tl = timeline.clone();
+        let st = shared_time.clone();
         let cfg = config.clone();
         let engine_handle = std::thread::Builder::new()
             .name("replay-engine".into())
-            .spawn(move || engine::engine_loop(cfg, cmd_rx, tl))
+            .spawn(move || engine::engine_loop(cfg, cmd_rx, tl, st))
             .map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!(
                     "Failed to start engine thread: {}",
@@ -104,15 +149,24 @@ impl TickDataReplayer {
                 ))
             })?;
 
-        info!(
-            "TickDataReplayer created: date={}, speed={:.1}x, data_start_ts_ns={}",
-            replay_date, speed, data_start_ts_ns,
-        );
+        if shared_time.is_some() {
+            info!(
+                "TickDataReplayer created (shared time mode): date={}",
+                replay_date,
+            );
+        } else {
+            info!(
+                "TickDataReplayer created (legacy mode): date={}, speed={:.1}x, data_start_ts_ns={}",
+                replay_date, speed, data_start_ts_ns,
+            );
+        }
 
         Ok(Self {
             cmd_tx,
             engine_handle: Some(engine_handle),
             timeline,
+            shared_time,
+            speed: effective_speed,
         })
     }
 
@@ -164,8 +218,6 @@ impl TickDataReplayer {
             })?;
 
         // Release GIL while waiting for Parquet load.
-        // `move` captures ack_rx by value (Receiver is Send but not Sync,
-        // so a reference can't cross the thread boundary).
         py.detach(move || {
             ack_rx
                 .recv()
@@ -251,39 +303,56 @@ impl TickDataReplayer {
         })
     }
 
-    // ── Transport controls ──────────────────────────────────────
+    // ── Transport controls (legacy mode only) ───────────────────────
     //
-    // State changes (speed / pause / resume) are applied directly to the
-    // shared `Arc<RwLock<Timeline>>` so they take effect immediately
-    // (the replay tasks read the timeline on every loop iteration).
-    // `jump_to` also notifies the engine thread to abort+restart tasks.
+    // In shared time mode, these are no-ops because the ReplayClock
+    // controls time. In legacy mode, they update the internal Timeline.
 
-    /// Change replay speed.  Re-anchors the timeline so the current
-    /// position is preserved.
+    /// Change replay speed (legacy mode only).
+    ///
+    /// In shared time mode, this is a no-op. Control speed via `ReplayClock.set_speed()`.
     fn set_speed(&self, speed: f64) -> PyResult<()> {
+        if self.shared_time.is_some() {
+            log::warn!("set_speed() called in shared time mode - use ReplayClock.set_speed() instead");
+            return Ok(());
+        }
         self.timeline.write().unwrap().set_speed(speed);
         Ok(())
     }
 
-    /// Pause playback.
+    /// Pause playback (legacy mode only).
+    ///
+    /// In shared time mode, this is a no-op. Use `ReplayClock.pause()`.
     fn pause(&self) -> PyResult<()> {
+        if self.shared_time.is_some() {
+            log::warn!("pause() called in shared time mode - use ReplayClock.pause() instead");
+            return Ok(());
+        }
         self.timeline.write().unwrap().pause();
         Ok(())
     }
 
-    /// Resume playback.
+    /// Resume playback (legacy mode only).
+    ///
+    /// In shared time mode, this is a no-op. Use `ReplayClock.resume()`.
     fn resume(&self) -> PyResult<()> {
+        if self.shared_time.is_some() {
+            log::warn!("resume() called in shared time mode - use ReplayClock.resume() instead");
+            return Ok(());
+        }
         self.timeline.write().unwrap().resume();
         Ok(())
     }
 
-    /// Jump to a specific data timestamp (epoch ns).
+    /// Jump to a specific data timestamp (legacy mode only).
     ///
-    /// **Note:** running replay tasks are aborted on jump.  Full
-    /// restart-from-new-position is planned for Phase E.
+    /// In shared time mode, this is a no-op. Use `ReplayClock.jump_to()`.
     fn jump_to(&self, target_ts_ns: i64) -> PyResult<()> {
+        if self.shared_time.is_some() {
+            log::warn!("jump_to() called in shared time mode - use ReplayClock.jump_to() instead");
+            return Ok(());
+        }
         self.timeline.write().unwrap().jump_to(target_ts_ns);
-        // Also notify engine so it can abort & restart replay tasks.
         let _ = self.cmd_tx.send(ReplayCommand::JumpTo(target_ts_ns));
         Ok(())
     }
@@ -292,7 +361,11 @@ impl TickDataReplayer {
 
     /// Current virtual time as epoch nanoseconds.
     fn now_ns(&self) -> i64 {
-        self.timeline.read().unwrap().now_ns()
+        if let Some(ref handle) = self.shared_time {
+            handle.now_ns()
+        } else {
+            self.timeline.read().unwrap().now_ns()
+        }
     }
 
     /// Current virtual time as epoch milliseconds.
@@ -303,29 +376,45 @@ impl TickDataReplayer {
     /// Whether playback is paused.
     #[getter]
     fn is_paused(&self) -> bool {
-        self.timeline.read().unwrap().is_paused()
+        if self.shared_time.is_some() {
+            // In shared time mode, we don't track pause state here
+            // The caller should check ReplayClock.is_paused()
+            false
+        } else {
+            self.timeline.read().unwrap().is_paused()
+        }
     }
 
     /// Current speed multiplier.
     #[getter]
     fn speed(&self) -> f64 {
-        self.timeline.read().unwrap().speed()
+        if self.shared_time.is_some() {
+            // In shared time mode, speed is controlled by ReplayClock
+            1.0 // Placeholder - caller should check ReplayClock.speed
+        } else {
+            self.timeline.read().unwrap().speed()
+        }
     }
 
     /// Current data-start anchor (epoch ns).
     #[getter]
     fn data_start_ts_ns(&self) -> i64 {
-        self.timeline.read().unwrap().data_start_ts_ns()
+        if self.shared_time.is_some() {
+            // In shared time mode, this is managed by ReplayClock
+            0 // Placeholder
+        } else {
+            self.timeline.read().unwrap().data_start_ts_ns()
+        }
     }
 
     /// Get replay statistics as a Python dict.
     fn get_stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let tl = self.timeline.read().unwrap();
         let dict = PyDict::new(py);
-        dict.set_item("now_ns", tl.now_ns())?;
-        dict.set_item("speed", tl.speed())?;
-        dict.set_item("paused", tl.is_paused())?;
-        dict.set_item("data_start_ts_ns", tl.data_start_ts_ns())?;
+        dict.set_item("now_ns", self.now_ns())?;
+        dict.set_item("speed", self.speed())?;
+        dict.set_item("paused", self.is_paused())?;
+        dict.set_item("data_start_ts_ns", self.data_start_ts_ns())?;
+        dict.set_item("shared_time_mode", self.shared_time.is_some())?;
         Ok(dict)
     }
 
@@ -341,12 +430,12 @@ impl TickDataReplayer {
     }
 
     fn __repr__(&self) -> String {
-        let tl = self.timeline.read().unwrap();
-        let state = if tl.is_paused() { "paused" } else { "running" };
+        let state = if self.is_paused() { "paused" } else { "running" };
+        let mode = if self.shared_time.is_some() { "shared" } else { "legacy" };
         format!(
-            "TickDataReplayer(now_ms={}, speed={:.1}x, {})",
-            tl.now_ns() / 1_000_000,
-            tl.speed(),
+            "TickDataReplayer(now_ms={}, mode={}, {})",
+            self.now_ns() / 1_000_000,
+            mode,
             state,
         )
     }

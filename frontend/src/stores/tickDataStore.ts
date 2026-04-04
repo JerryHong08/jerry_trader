@@ -46,6 +46,7 @@ type TickDataState = {
   symbols: string[];
   symbolData: SymbolData;
   perSymbolEvents: Record<string, string[]>;
+  factorSubscriptions: Record<string, string[]>; // {symbol: [timeframes]}
 
   // Connection
   connected: boolean;
@@ -102,12 +103,27 @@ function loadPerSymbolEvents(): Record<string, string[]> {
   }
 }
 
+function loadFactorSubscriptions(): Record<string, string[]> {
+  // Key: symbol, Value: list of timeframes subscribed
+  // e.g., {"AAPL": ["trade", "1m"], "TSLA": ["trade"]}
+  try {
+    const saved = localStorage.getItem('tickdata-factorSubscriptions');
+    return saved ? JSON.parse(saved) : {};
+  } catch {
+    return {};
+  }
+}
+
 function saveSymbols(symbols: string[]) {
   localStorage.setItem('tickdata-symbols', JSON.stringify(symbols));
 }
 
 function savePerSymbolEvents(events: Record<string, string[]>) {
   localStorage.setItem('tickdata-perSymbolEvents', JSON.stringify(events));
+}
+
+function saveFactorSubscriptions(subs: Record<string, string[]>) {
+  localStorage.setItem('tickdata-factorSubscriptions', JSON.stringify(subs));
 }
 
 // ============================================================================
@@ -120,6 +136,7 @@ export const useTickDataStore = create<TickDataState>()((set, get) => ({
   symbols: loadSymbols(),
   symbolData: {},
   perSymbolEvents: loadPerSymbolEvents(),
+  factorSubscriptions: loadFactorSubscriptions(),
   connected: false,
 
   // Derived
@@ -169,6 +186,19 @@ export const useTickDataStore = create<TickDataState>()((set, get) => ({
         }));
         socket.send(JSON.stringify({ subscriptions: subs }));
       }
+
+      // Re-subscribe saved factor subscriptions
+      const { factorSubscriptions } = get();
+      for (const [symbol, timeframes] of Object.entries(factorSubscriptions)) {
+        for (const timeframe of timeframes) {
+          socket.send(JSON.stringify({
+            action: 'subscribe_factors',
+            symbols: [symbol.toUpperCase()],
+            timeframe,
+          }));
+          console.log('[TickData] Re-subscribed to factors:', symbol, `timeframe=${timeframe}`);
+        }
+      }
     };
 
     socket.onmessage = (event) => {
@@ -182,6 +212,19 @@ export const useTickDataStore = create<TickDataState>()((set, get) => ({
         if (symbol && timestamp_ns && factors) {
           // timeframe from backend (e.g., 'trade', '1m', '5m')
           const tf = timeframe || 'trade';
+
+          // Log with wall-clock time for delay measurement
+          const factorTime = new Date(timestamp_ns / 1_000_000);
+          const now = new Date();
+          const wsDelayMs = now.getTime() - factorTime.getTime();
+
+          // Only log if delay is significant (> 1s in replay time)
+          if (wsDelayMs > 1000) {
+            console.log(
+              `[FactorUpdate] ${symbol}/${tf} ts=${factorTime.toISOString()} ` +
+              `ws_delay=${wsDelayMs}ms factors=${Object.keys(factors).join(',')}`
+            );
+          }
 
           // Find all moduleIds that have factor data for this symbol AND timeframe
           // Keys are formatted as "{moduleId}::{ticker}::{timeframe}"
@@ -281,10 +324,17 @@ export const useTickDataStore = create<TickDataState>()((set, get) => ({
     const newData = { ...symbolData };
     delete newData[symbol];
 
+    // Also clean up factor subscriptions for this symbol
+    const { factorSubscriptions } = get();
+    const newFactorSubs = { ...factorSubscriptions };
+    delete newFactorSubs[symbol];
+    saveFactorSubscriptions(newFactorSubs);
+
     set({
       symbols: updated,
       perSymbolEvents: newPer,
       symbolData: newData,
+      factorSubscriptions: newFactorSubs,
     });
     saveSymbols(updated);
     savePerSymbolEvents(newPer);
@@ -296,27 +346,73 @@ export const useTickDataStore = create<TickDataState>()((set, get) => ({
 
   subscribeFactors: (symbols: string | string[], timeframe: string = 'trade') => {
     const symbolArray = Array.isArray(symbols) ? symbols : [symbols];
+    const symbolUpper = symbolArray.map(s => s.toUpperCase());
+
+    // Persist to localStorage for re-subscribe on reconnect
+    const { factorSubscriptions } = get();
+    const updatedSubs: Record<string, string[]> = {};
+    for (const sym of symbolUpper) {
+      const existing = factorSubscriptions[sym] || [];
+      if (!existing.includes(timeframe)) {
+        updatedSubs[sym] = [...existing, timeframe];
+      } else {
+        updatedSubs[sym] = existing; // Already subscribed
+      }
+    }
+
+    // Merge with existing subscriptions
+    const mergedSubs = { ...factorSubscriptions, ...updatedSubs };
+    set({ factorSubscriptions: mergedSubs });
+    saveFactorSubscriptions(mergedSubs);
+
+    // Send WebSocket message if connected, otherwise it will be sent on reconnect
     if (ws?.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({
         action: 'subscribe_factors',
-        symbols: symbolArray.map(s => s.toUpperCase()),
+        symbols: symbolUpper,
         timeframe,
       }));
-      console.log('[TickData] Subscribed to factors:', symbolArray, `timeframe=${timeframe}`);
+      console.log('[TickData] Subscribed to factors:', symbolUpper, `timeframe=${timeframe}`);
     } else {
-      console.warn('[TickData] Cannot subscribe to factors - WebSocket not connected');
+      console.warn('[TickData] WebSocket not connected, factor subscription queued for reconnect:', symbolUpper, `timeframe=${timeframe}`);
     }
   },
 
   unsubscribeFactors: (symbols: string | string[], timeframe: string = 'trade') => {
     const symbolArray = Array.isArray(symbols) ? symbols : [symbols];
+    const symbolUpper = symbolArray.map(s => s.toUpperCase());
+
+    // Remove from persisted subscriptions
+    const { factorSubscriptions } = get();
+    const updatedSubs: Record<string, string[]> = {};
+    for (const sym of symbolUpper) {
+      const existing = factorSubscriptions[sym] || [];
+      updatedSubs[sym] = existing.filter(tf => tf !== timeframe);
+      if (updatedSubs[sym].length === 0) {
+        delete updatedSubs[sym];
+      }
+    }
+
+    // Merge with existing
+    const mergedSubs = { ...factorSubscriptions };
+    for (const sym of symbolUpper) {
+      if (mergedSubs[sym]) {
+        mergedSubs[sym] = mergedSubs[sym].filter(tf => tf !== timeframe);
+        if (mergedSubs[sym].length === 0) {
+          delete mergedSubs[sym];
+        }
+      }
+    }
+    set({ factorSubscriptions: mergedSubs });
+    saveFactorSubscriptions(mergedSubs);
+
     if (ws?.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({
         action: 'unsubscribe_factors',
-        symbols: symbolArray.map(s => s.toUpperCase()),
+        symbols: symbolUpper,
         timeframe,
       }));
-      console.log('[TickData] Unsubscribed from factors:', symbolArray, `timeframe=${timeframe}`);
+      console.log('[TickData] Unsubscribed from factors:', symbolUpper, `timeframe=${timeframe}`);
     }
   },
 }));

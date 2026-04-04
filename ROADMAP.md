@@ -50,6 +50,7 @@ React/TradingView UI modules and UX improvements.
   - [x] 5.14.1 Real-time price chart updates from trade ticks
   - [x] 5.14.2 TradeRate canvas stability (single fitContent)
   - [x] 5.14.3 Overlay factor rendering timing fix
+- [-] 5.15 Fix tick factor real-time update - compute and publish on tick arrival
 ## 6. Orchestration
 
 System-wide coordination and backtest infrastructure.
@@ -69,6 +70,8 @@ System-wide coordination and backtest infrastructure.
   - [x] 6.7.1 Fix FactorEngine and BarsBuilderService to bootstrap new timeframes on existing tickers
 - [x] 6.8 Cleanup flow - coordinator.cleanup() notifies all services to stop tracking ticker
 - [x] [6.9](roadmap/re-subscribe-gap-fill.md) Fix re-subscribe gap fill - use per_tf_starts for dedup
+- [x] 6.10 Fix clock synchronization - ReplayClock and TickDataReplayer shared time
+- [x] 6.11 Fix factor query - add session filter and remove FINAL
 ## 7. AI Agent Layer
 
 Event-driven AI agent system with generative UI capabilities.
@@ -95,6 +98,7 @@ Event-driven AI agent system with generative UI capabilities.
 - [ ] 7.13 ML pipeline agent validation
 - [ ] 7.14 Basic CLI tools and skills instruction
 
+- [ ] [7.15](roadmap/factor-stream-rust-migration.md) Factor stream Rust migration - migrate from Python asyncio to Rust FactorBroadcaster when Signal Engine is introduced
 ## 8. Optional Features
 
 Enhancements and additional modules.

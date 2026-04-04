@@ -710,13 +710,21 @@ function PricePanel({
         }));
         overlaySeriesRef.current[factorId].setData(lineData);
       } else {
-        // Incremental update
+        // Incremental update - ensure time is strictly increasing
+        // Track the last time we actually added to the series
+        let lastAddedTime = factorData[previousLength - 1]?.time;
         for (let i = previousLength; i < currentLength; i++) {
           const point = factorData[i];
+          // Skip if time is not greater than the last added time
+          if (lastAddedTime !== undefined && point.time <= lastAddedTime) {
+            console.warn(`[PricePanel] Skipping duplicate/out-of-order factor point: ${factorId} time=${point.time}, lastAdded=${lastAddedTime}`);
+            continue;
+          }
           overlaySeriesRef.current[factorId].update({
             time: point.time as Time,
             value: point.value,
           });
+          lastAddedTime = point.time;
         }
       }
 

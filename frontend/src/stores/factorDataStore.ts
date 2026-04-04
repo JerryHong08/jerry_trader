@@ -197,16 +197,18 @@ export const useFactorDataStore = create<FactorDataState>((set, get) => ({
       const existingPoints = current.factors[factorName] || [];
 
       // Check if point already exists (avoid duplicates)
-      const exists = existingPoints.some((p) => p.time === point.time);
-      if (exists) return state;
+      // Optimization: only check last point since new points should have higher timestamps
+      const lastPoint = existingPoints[existingPoints.length - 1];
+      if (lastPoint && point.time <= lastPoint.time) {
+        // Skip if not strictly newer (avoids sorting)
+        return state;
+      }
 
-      // Append new point and sort by time
-      const updatedPoints = [...existingPoints, point].sort((a, b) => a.time - b.time);
-
-      // Cap at 10,000 points to prevent memory growth
-      const cappedPoints = updatedPoints.length > 10000
-        ? updatedPoints.slice(-10000)
-        : updatedPoints;
+      // Append new point (no need to sort since it's always newer)
+      // This is O(1) instead of O(n log n)
+      const cappedPoints = existingPoints.length >= 10000
+        ? [...existingPoints.slice(1), point]  // Drop oldest, add newest
+        : [...existingPoints, point];
 
       return {
         symbolFactors: {

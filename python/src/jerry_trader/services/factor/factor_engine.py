@@ -13,6 +13,7 @@ import logging
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -47,6 +48,7 @@ from jerry_trader.services.orchestration.bootstrap_coordinator import (
     get_coordinator,
 )
 from jerry_trader.shared.logging.logger import setup_logger
+from jerry_trader.shared.time.timezone import ms_to_readable
 
 logger = setup_logger("factor_engine", log_to_file=True, level=logging.INFO)
 
@@ -81,6 +83,8 @@ class TickerState:
     last_bootstrap_trade_ms: int = (
         0  # Track last trade from bootstrap to avoid duplicates
     )
+    last_tick_ts_ms: int = 0  # Track last tick timestamp for DEBUG
+    last_publish_ms: int = 0  # Track last factor publish time for throttle
 
     def reset(self) -> None:
         """Reset all indicators."""
@@ -90,6 +94,7 @@ class TickerState:
             ind.reset()
         for ind in self.quote_indicators:
             ind.reset()
+        self.last_publish_ms = 0
 
 
 class FactorEngine:
@@ -100,6 +105,8 @@ class FactorEngine:
         BarsBuilder → Redis pub/sub → BarIndicators (EMA)
         FactorEngine → ClickHouse (via FactorStorage)
     """
+
+    _ms_to_readable = staticmethod(ms_to_readable)
 
     def __init__(
         self,
@@ -171,6 +178,9 @@ class FactorEngine:
         self._bars_thread: threading.Thread | None = None
         self._tasks_thread: threading.Thread | None = None
         self._compute_thread: threading.Thread | None = None
+        self._write_executor = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="FactorEngine-Write"
+        )
 
         # Bootstrap state
         # Use composite key "symbol:timeframe" for per-timeframe bootstrap tracking
@@ -257,6 +267,10 @@ class FactorEngine:
         # Skip processing until bootstrap is complete for this timeframe
         bar_key = f"{symbol}:{timeframe}"
         if bar_key not in self._bootstrap_done:
+            logger.debug(
+                f"_on_event_bar_closed: skipping {symbol}/{timeframe} - bootstrap not done "
+                f"(done keys: {list(self._bootstrap_done)})"
+            )
             return
 
         state = self.ticker_states.get(symbol)
@@ -862,16 +876,27 @@ class FactorEngine:
                     # Wait for bars to be ready (poll bootstrap state)
                     logger.info(f"_run_bootstrap - {symbol}/{tf}: waiting for bars")
                     bars_ready = False
+                    wait_iterations = 0
                     for _ in range(600):  # 60 seconds
+                        wait_iterations += 1
                         tf_bootstrap = coordinator.get_bootstrap(symbol)
                         if tf_bootstrap and tf in tf_bootstrap.timeframes:
-                            if tf_bootstrap.timeframes[tf].state in (
+                            tf_bs_state = tf_bootstrap.timeframes[tf].state
+                            logger.debug(
+                                f"_run_bootstrap - {symbol}/{tf}: tf_bs_state={tf_bs_state}"
+                            )
+                            if tf_bs_state in (
                                 TimeframeState.READY,
                                 TimeframeState.DONE,
                             ):
                                 bars_ready = True
                                 break
                         time.sleep(0.1)
+
+                    logger.info(
+                        f"_run_bootstrap - {symbol}/{tf}: bars_ready={bars_ready} "
+                        f"after {wait_iterations * 100}ms"
+                    )
 
                     if bars_ready:
                         logger.info(
@@ -1261,9 +1286,85 @@ class FactorEngine:
             )
             return
 
+        # DEBUG: Log tick arrival time
+        now_ms = clock_mod.now_ms()
+        if now_ms - ts_ms > 2000:  # Only log if delay > 2s
+            logger.warning(
+                f"[DELAY] _on_tick: {symbol} tick_ts={ts_ms} clock_ts={now_ms} "
+                f"delay={now_ms - ts_ms}ms"
+            )
+
         # Feed to tick indicators
         for ind in state.tick_indicators:
             ind.on_tick(ts_ms, float(price), int(size))
+
+        # Track last tick timestamp for DEBUG
+        state.last_tick_ts_ms = ts_ms
+
+        # Compute and publish tick factors immediately with throttle
+        # This ensures low latency in high-speed replay mode
+        self._maybe_compute_tick_factors(state, ts_ms)
+
+    def _maybe_compute_tick_factors(self, state: "TickerState", ts_ms: int) -> None:
+        """Compute and publish tick factors with throttle.
+
+        Called on every tick to ensure low latency. Throttles to at most
+        one publication per second per ticker.
+        """
+        # Throttle: only publish at most once per second
+        if ts_ms - state.last_publish_ms < 1000:
+            return
+
+        state.last_publish_ms = ts_ms
+
+        factors: dict[str, float] = {}
+        for ind in state.tick_indicators:
+            value = ind.compute(ts_ms)
+            if value is not None:
+                factors[ind.name] = value
+
+        for ind in state.quote_indicators:
+            value = ind.compute(ts_ms)
+            if value is not None:
+                factors[ind.name] = value
+
+        if factors:
+            # Publish to Redis immediately (non-blocking)
+            try:
+                channel = f"factors:{state.symbol}:trade"
+                message = json.dumps(
+                    {
+                        "symbol": state.symbol,
+                        "timestamp_ns": ts_ms * 1_000_000,
+                        "timestamp_ms": ts_ms,
+                        "timeframe": "trade",
+                        "factors": factors,
+                    }
+                )
+                self.redis_client.publish(channel, message)
+            except Exception as e:
+                logger.error(f"FactorEngine: Redis publish failed - {e}")
+
+            # Write to ClickHouse in background thread (non-blocking)
+            if self.storage:
+                snapshot = FactorSnapshot(
+                    symbol=state.symbol,
+                    timestamp_ns=ts_ms * 1_000_000,
+                    factors=factors,
+                )
+                # Submit to thread pool for async write
+                self._write_executor.submit(
+                    self._write_snapshot_bg,
+                    snapshot,
+                    "trade",
+                )
+
+    def _write_snapshot_bg(self, snapshot: FactorSnapshot, timeframe: str) -> None:
+        """Background thread worker for writing factor snapshot to ClickHouse."""
+        try:
+            self.storage.write_factor_snapshot(snapshot, timeframe)
+        except Exception as e:
+            logger.error(f"FactorEngine: Background write failed - {e}")
 
     def _on_quote(self, data: dict) -> None:
         """Handle a quote tick."""
@@ -1296,12 +1397,17 @@ class FactorEngine:
             )
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # Tick Indicator Compute Loop (every 1s)
+    # Tick Indicator Compute Loop (fallback for quote indicators)
     # ═══════════════════════════════════════════════════════════════════════════
 
     def _compute_loop(self) -> None:
-        """Compute tick indicators every COMPUTE_INTERVAL_SEC."""
-        logger.info("FactorEngine: compute loop started")
+        """Compute quote indicators every COMPUTE_INTERVAL_SEC.
+
+        Note: Tick indicators are now computed on-tick via _maybe_compute_tick_factors
+        for low latency. This loop serves as a fallback for quote indicators and
+        ensures factors are published even if ticks stop arriving.
+        """
+        logger.info("FactorEngine: compute loop started (quote indicators fallback)")
 
         while self._running:
             ts_ms = clock_mod.now_ms()
@@ -1317,12 +1423,11 @@ class FactorEngine:
                     continue
 
                 try:
-                    factors: dict[str, float] = {}
-                    for ind in state.tick_indicators:
-                        value = ind.compute(ts_ms)
-                        if value is not None:
-                            factors[ind.name] = value
+                    # Only compute quote indicators here (tick indicators are on-tick)
+                    if not state.quote_indicators:
+                        continue
 
+                    factors: dict[str, float] = {}
                     for ind in state.quote_indicators:
                         value = ind.compute(ts_ms)
                         if value is not None:
@@ -1333,7 +1438,7 @@ class FactorEngine:
                             state.symbol,
                             ts_ms * 1_000_000,  # ms to ns
                             factors,
-                            timeframe="trade",  # Trade-based indicators
+                            timeframe="trade",
                         )
                 except Exception as e:
                     logger.error(
@@ -1376,8 +1481,9 @@ class FactorEngine:
         try:
             count = self.storage.write_factor_snapshot(snapshot, timeframe)
             if count > 0:
-                logger.debug(
+                logger.info(
                     f"FactorEngine: wrote {count} factors for {symbol}/{timeframe} "
+                    f"at ts={self._ms_to_readable(timestamp_ns // 1_000_000)} "
                     f"({list(factors.keys())})"
                 )
 
@@ -1394,9 +1500,9 @@ class FactorEngine:
                         }
                     )
                     self.redis_client.publish(channel, message)
-                    # logger.debug(
-                    #     f"FactorEngine: published {len(factors)} factors to {channel}"
-                    # )
+                    logger.debug(
+                        f"FactorEngine: published {len(factors)} factors to {channel}"
+                    )
                 except Exception as e:
                     logger.error(f"FactorEngine: Redis publish failed - {e}")
 
@@ -1477,6 +1583,9 @@ class FactorEngine:
         for thread in [self._bars_thread, self._tasks_thread, self._compute_thread]:
             if thread and thread.is_alive():
                 thread.join(timeout=5.0)
+
+        # Shutdown write executor
+        self._write_executor.shutdown(wait=False)
 
         # Stop WS loop if we own it
         if self._owns_manager and self.ws_loop and self.ws_loop.is_running():

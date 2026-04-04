@@ -3,7 +3,8 @@
 -- Table: factors
 -- Engine: ReplacingMergeTree (upserts on replays / recomputation)
 -- Partition: by trade_date for fast date-range queries and easy TTL
--- Order: (ticker, timestamp_ns, factor_name) for efficient filtered lookups
+-- Order: (ticker, timeframe, timestamp_ns, factor_name) for efficient filtered lookups
+--         timeframe is included to allow different timeframes at the same timestamp
 --
 -- Run:
 --   clickhouse-client --password <pw> < sql/clickhouse_factors.sql
@@ -13,7 +14,7 @@ CREATE DATABASE IF NOT EXISTS jerry_trader;
 CREATE TABLE IF NOT EXISTS jerry_trader.factors
 (
     ticker        LowCardinality(String),    -- e.g. "AAPL"
-    timeframe     LowCardinality(String),    -- e.g. "tick", "10s", "1m", "5m" for bar-based factors
+    timeframe     LowCardinality(String),    -- e.g. "trade", "10s", "1m", "5m" for bar-based factors
     timestamp_ns  Int64,                     -- epoch nanoseconds, factor computation time
     session       String,                    -- session_id for this run
     factor_name   LowCardinality(String),    -- e.g. "ema_20", "trade_rate"
@@ -24,7 +25,7 @@ CREATE TABLE IF NOT EXISTS jerry_trader.factors
 )
 ENGINE = ReplacingMergeTree(inserted_at)
 PARTITION BY toYYYYMM(trade_date)
-ORDER BY (ticker, timestamp_ns, factor_name)
+ORDER BY (ticker, timeframe, timestamp_ns, factor_name)
 TTL trade_date + INTERVAL 2 YEAR
 SETTINGS index_granularity = 8192;
 

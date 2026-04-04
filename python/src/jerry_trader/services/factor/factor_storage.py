@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 
 from jerry_trader.domain.factor import FactorSnapshot
 from jerry_trader.shared.logging.logger import setup_logger
+from jerry_trader.shared.time.timezone import ms_to_readable
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
 
@@ -24,6 +25,7 @@ class FactorStorage:
     """
 
     TABLE_NAME = "factors"
+    _ms_to_readable = staticmethod(ms_to_readable)
 
     def __init__(
         self,
@@ -146,7 +148,7 @@ class FactorStorage:
             )
             logger.debug(
                 f"FactorStorage: Wrote {len(rows)} factors for {snapshot.symbol}/{timeframe} "
-                f"at ts={snapshot.timestamp_ns}"
+                f"at ts={self._ms_to_readable(snapshot.timestamp_ns // 1_000_000)}"
             )
             return len(rows)
         except Exception as e:
@@ -196,7 +198,15 @@ class FactorStorage:
                     "factor_value",
                 ],
             )
-            logger.debug(f"FactorStorage: Batch wrote {len(rows)} rows")
+            # Log sample of what was written for debugging
+            if rows:
+                sample = rows[0]
+                logger.info(
+                    f"FactorStorage: Batch wrote {len(rows)} rows, sample: "
+                    f"ticker={sample[0]}, timeframe={sample[1]}, "
+                    f"timestamp_ns={sample[2]}, session={sample[3]}, "
+                    f"factor_name={sample[4]}"
+                )
             return len(rows)
         except Exception as e:
             logger.error(f"FactorStorage: Batch write failed - {e}")
@@ -254,13 +264,24 @@ class FactorStorage:
                 SELECT ticker, timeframe, timestamp_ns, factor_name, factor_value
                 FROM {self.TABLE_NAME} FINAL
                 WHERE ticker = {{ticker:String}}
+                  AND session = {{session:String}}
                   {time_filter}
                   {timeframe_filter}
                   {factor_filter}
                 ORDER BY timestamp_ns ASC
             """
 
+            params["session"] = self.session_id
+            logger.info(
+                f"FactorStorage: Query for {ticker}/{timeframe} "
+                f"session={self.session_id}, start_ns={start_ns}, end_ns={end_ns}, "
+                f"factor_names={factor_names}"
+            )
+
             result = ch_client.query(query, parameters=params)
+            logger.info(
+                f"FactorStorage: Query returned {len(result.result_rows)} rows for {ticker}/{timeframe}"
+            )
 
             return [
                 {

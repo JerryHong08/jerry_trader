@@ -7,17 +7,34 @@
     "id": "chart-1773117208665",
     "moduleType": "chart",
     "position": {
-      "x": -450,
-      "y": 460
+      "x": -480,
+      "y": 170
     },
     "size": {
-      "width": 750,
-      "height": 550
+      "width": 1390,
+      "height": 430
     },
     "syncGroup": "group-2",
     "settings": {
       "chart": {
-        "timeframe": "10s"
+        "timeframe": "10s",
+        "panels": [
+          {
+            "id": "price",
+            "type": "price",
+            "collapsed": false,
+            "visible": true,
+            "overlays": [
+              "ema_20"
+            ]
+          },
+          {
+            "id": "trade_rate",
+            "type": "panel",
+            "collapsed": false,
+            "visible": false
+          }
+        ]
       }
     }
   },
@@ -25,32 +42,36 @@
     "id": "chart-1773212923947",
     "moduleType": "chart",
     "position": {
-      "x": 310,
-      "y": 460
+      "x": -480,
+      "y": 610
     },
     "size": {
-      "width": 640,
-      "height": 1110
+      "width": 1390,
+      "height": 690
     },
     "syncGroup": "group-2",
     "settings": {
       "chart": {
-        "timeframe": "1m"
+        "timeframe": "1m",
+        "panels": [
+          {
+            "id": "price",
+            "type": "price",
+            "collapsed": false,
+            "visible": true,
+            "overlays": [
+              "ema_20"
+            ]
+          },
+          {
+            "id": "trade_rate",
+            "type": "panel",
+            "collapsed": false,
+            "visible": true
+          }
+        ]
       }
     }
-  },
-  {
-    "id": "factor-chart-1774174916263",
-    "moduleType": "factor-chart",
-    "position": {
-      "x": -450,
-      "y": 1020
-    },
-    "size": {
-      "width": 750,
-      "height": 560
-    },
-    "syncGroup": "group-2"
   }
 ]
 }

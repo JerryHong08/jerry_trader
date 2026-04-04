@@ -5,26 +5,30 @@
 //
 // Runs on a dedicated OS thread with its own tokio runtime so that
 // busy-wait spin-loops never block the caller.
+//
+// Clock modes:
+// - Shared time mode: Uses SharedTimeHandle from ReplayClock (recommended)
+// - Legacy mode: Uses internal Timeline (standalone)
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use log::{error, info};
+use log::{error, info, warn};
 use pyo3::prelude::*;
 use tokio::task::JoinHandle;
 
+use crate::clock::SharedTimeHandle;
 use crate::replayer::config::ReplayConfig;
 use crate::replayer::loader::{self, PreloadedData};
 use crate::replayer::stats::ReplayStats;
 use crate::replayer::types::{DataType, RawQuote, RawTrade};
 
-// ── Timeline ────────────────────────────────────────────────────────
+// ── Timeline (legacy mode) ─────────────────────────────────────────────
 //
-// Mirrors `ReplayClock` logic but is a plain Rust struct (no PyO3)
-// behind `Arc<RwLock<…>>` so replay tasks can read it lock-free
-// relative to each other (readers don't block readers).
+// In shared time mode, this is a placeholder. Time queries go through
+// SharedTimeHandle instead.
 
 pub struct Timeline {
     wall_clock_start: Instant,
@@ -33,6 +37,7 @@ pub struct Timeline {
     paused: bool,
     pause_start: Option<Instant>,
     total_pause_ns: i64,
+    is_placeholder: bool,
 }
 
 impl Timeline {
@@ -44,17 +49,39 @@ impl Timeline {
             paused: false,
             pause_start: None,
             total_pause_ns: 0,
+            is_placeholder: false,
+        }
+    }
+
+    /// Create a placeholder timeline for shared time mode.
+    /// Time queries will be handled by SharedTimeHandle.
+    pub fn new_placeholder() -> Self {
+        Self {
+            wall_clock_start: Instant::now(),
+            data_start_ts_ns: 0,
+            speed: 1.0,
+            paused: false,
+            pause_start: None,
+            total_pause_ns: 0,
+            is_placeholder: true,
         }
     }
 
     /// Current virtual time (epoch nanoseconds).
     pub fn now_ns(&self) -> i64 {
+        if self.is_placeholder {
+            warn!("Timeline::now_ns() called on placeholder - returning 0");
+            return 0;
+        }
         let raw = self.raw_elapsed_ns();
         let effective = raw - self.total_pause_ns;
         self.data_start_ts_ns + (effective as f64 * self.speed) as i64
     }
 
     pub fn set_speed(&mut self, speed: f64) {
+        if self.is_placeholder {
+            return;
+        }
         let current = self.now_ns();
         self.wall_clock_start = Instant::now();
         self.total_pause_ns = 0;
@@ -65,6 +92,9 @@ impl Timeline {
     }
 
     pub fn pause(&mut self) {
+        if self.is_placeholder {
+            return;
+        }
         if !self.paused {
             self.paused = true;
             self.pause_start = Some(Instant::now());
@@ -72,6 +102,9 @@ impl Timeline {
     }
 
     pub fn resume(&mut self) {
+        if self.is_placeholder {
+            return;
+        }
         if self.paused {
             if let Some(ps) = self.pause_start.take() {
                 self.total_pause_ns += ps.elapsed().as_nanos() as i64;
@@ -81,6 +114,9 @@ impl Timeline {
     }
 
     pub fn jump_to(&mut self, target_ts_ns: i64) {
+        if self.is_placeholder {
+            return;
+        }
         let was_paused = self.paused;
         let now = Instant::now();
         self.wall_clock_start = now;
@@ -109,7 +145,7 @@ impl Timeline {
     /// will be reached.  Returns `None` if the target is already past
     /// or the clock is paused.
     pub fn target_instant_for(&self, target_data_ts_ns: i64) -> Option<Instant> {
-        if self.paused {
+        if self.is_placeholder || self.paused {
             return None;
         }
         let current = self.now_ns();
@@ -128,6 +164,54 @@ impl Timeline {
                 .unwrap_or(0)
         } else {
             self.wall_clock_start.elapsed().as_nanos() as i64
+        }
+    }
+}
+
+// ── Time source abstraction ────────────────────────────────────────────
+
+/// Abstract time source that works in both shared and legacy modes.
+pub enum TimeSource {
+    Shared(SharedTimeHandle),
+    Legacy(Arc<RwLock<Timeline>>),
+}
+
+impl TimeSource {
+    /// Get current time in nanoseconds.
+    pub fn now_ns(&self) -> i64 {
+        match self {
+            TimeSource::Shared(handle) => handle.now_ns(),
+            TimeSource::Legacy(tl) => tl.read().unwrap().now_ns(),
+        }
+    }
+
+    /// Check if paused (only meaningful in legacy mode).
+    pub fn is_paused(&self) -> bool {
+        match self {
+            TimeSource::Shared(_) => false, // Pause state managed by ReplayClock
+            TimeSource::Legacy(tl) => tl.read().unwrap().is_paused(),
+        }
+    }
+
+    /// Get target instant for a future timestamp.
+    /// In shared mode, we can't compute this (speed controlled by ReplayClock).
+    pub fn target_instant_for(&self, target_ts_ns: i64) -> Option<Instant> {
+        match self {
+            TimeSource::Shared(_) => {
+                // In shared time mode, we need to poll for time progression
+                // since we don't control the speed. Return None to indicate
+                // we should use polling instead.
+                None
+            }
+            TimeSource::Legacy(tl) => tl.read().unwrap().target_instant_for(target_ts_ns),
+        }
+    }
+
+    /// Get speed multiplier (only meaningful in legacy mode).
+    pub fn speed(&self) -> f64 {
+        match self {
+            TimeSource::Shared(_) => 1.0, // Speed controlled by ReplayClock
+            TimeSource::Legacy(tl) => tl.read().unwrap().speed(),
         }
     }
 }
@@ -165,6 +249,7 @@ pub fn engine_loop(
     config: ReplayConfig,
     cmd_rx: std::sync::mpsc::Receiver<ReplayCommand>,
     timeline: Arc<RwLock<Timeline>>,
+    shared_time: Option<SharedTimeHandle>,
 ) {
     // Build a dedicated tokio runtime for Parquet I/O + replay tasks.
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -177,7 +262,14 @@ pub fn engine_loop(
     let mut preloaded_cache: HashMap<String, PreloadedData> = HashMap::new();
     let stats = Arc::new(RwLock::new(ReplayStats::new()));
 
-    info!("Replay engine started for date {}", config.replay_date);
+    // Create time source based on mode
+    let time_source = if let Some(handle) = shared_time {
+        info!("Replay engine started (shared time mode) for date {}", config.replay_date);
+        TimeSource::Shared(handle)
+    } else {
+        info!("Replay engine started (legacy mode) for date {}", config.replay_date);
+        TimeSource::Legacy(timeline)
+    };
 
     loop {
         match cmd_rx.recv() {
@@ -221,7 +313,7 @@ pub fn engine_loop(
                             symbol.clone(),
                             dt,
                             data.clone(),
-                            timeline.clone(),
+                            time_source.clone(),
                             callback.clone(),
                             stats.clone(),
                             config.max_gap_ms,
@@ -279,24 +371,22 @@ pub fn engine_loop(
                 }
             }
 
-            // ── Speed / Pause / Resume ──────────────────────────────
-            // These are applied directly to the shared Timeline by the
-            // Python-facing methods — the engine doesn't need to act.
+            // ── Speed / Pause / Resume (legacy mode only) ──────────────
             Ok(ReplayCommand::SetSpeed(_))
             | Ok(ReplayCommand::Pause)
-            | Ok(ReplayCommand::Resume) => {}
+            | Ok(ReplayCommand::Resume) => {
+                // These are handled directly by the Timeline in legacy mode
+                // or are no-ops in shared time mode
+            }
 
             // ── Jump ────────────────────────────────────────────────
-            // Timeline already updated by the Python method; engine
-            // just needs to abort running tasks.
             Ok(ReplayCommand::JumpTo(ts)) => {
                 // Abort all running tasks; update timeline.
                 for (_, handle) in active_tasks.drain() {
                     handle.abort();
                 }
-                timeline.write().unwrap().jump_to(ts);
+                // Timeline already updated by the Python method
                 info!("Jumped to ts={}", ts);
-                // Phase E will re-start tasks from the new position.
             }
 
             // ── Shutdown ────────────────────────────────────────────
@@ -314,6 +404,16 @@ pub fn engine_loop(
     info!("Replay engine stopped");
 }
 
+// Implement Clone for TimeSource (needed for spawning tasks)
+impl Clone for TimeSource {
+    fn clone(&self) -> Self {
+        match self {
+            TimeSource::Shared(handle) => TimeSource::Shared(handle.clone()),
+            TimeSource::Legacy(tl) => TimeSource::Legacy(tl.clone()),
+        }
+    }
+}
+
 // ── Task spawning ───────────────────────────────────────────────────
 
 fn spawn_replay_task(
@@ -321,7 +421,7 @@ fn spawn_replay_task(
     symbol: String,
     data_type: DataType,
     data: PreloadedData,
-    timeline: Arc<RwLock<Timeline>>,
+    time_source: TimeSource,
     callback: Arc<Py<PyAny>>,
     stats: Arc<RwLock<ReplayStats>>,
     max_gap_ms: Option<u64>,
@@ -333,7 +433,7 @@ fn spawn_replay_task(
                     replay_quotes(
                         symbol.clone(),
                         quotes,
-                        timeline,
+                        time_source,
                         callback,
                         stats,
                         max_gap_ms,
@@ -345,7 +445,7 @@ fn spawn_replay_task(
             }
             DataType::Trades => {
                 if let Some(trades) = data.trades {
-                    replay_trades(symbol.clone(), trades, timeline, callback, stats, max_gap_ms)
+                    replay_trades(symbol.clone(), trades, time_source, callback, stats, max_gap_ms)
                         .await
                 } else {
                     Ok(())
@@ -359,12 +459,12 @@ fn spawn_replay_task(
     })
 }
 
-// ── Quote replay (3-tier adaptive sleep) ────────────────────────────
+// ── Quote replay (polling-based for shared time) ─────────────────────
 
 async fn replay_quotes(
     symbol: String,
     quotes: Vec<RawQuote>,
-    timeline: Arc<RwLock<Timeline>>,
+    time_source: TimeSource,
     callback: Arc<Py<PyAny>>,
     stats: Arc<RwLock<ReplayStats>>,
     max_gap_ms: Option<u64>,
@@ -374,7 +474,7 @@ async fn replay_quotes(
     }
 
     // Skip data already in the past relative to the timeline.
-    let current_ts = timeline.read().unwrap().now_ns();
+    let current_ts = time_source.now_ns();
     let mut idx = quotes.partition_point(|q| q.participant_timestamp < current_ts);
 
     if idx > 0 {
@@ -392,14 +492,23 @@ async fn replay_quotes(
     let mut last_log = Instant::now();
     let mut messages_since_log: usize = 0;
 
+    // Determine if we're in shared time mode
+    let is_shared_mode = matches!(time_source, TimeSource::Shared(_));
+
     while idx < quotes.len() {
-        // ── Pause gate ──────────────────────────────────────────
-        while timeline.read().unwrap().is_paused() {
-            tokio::time::sleep(Duration::from_millis(50)).await;
+        // ── Pause gate (poll in shared mode, check in legacy mode) ──
+        if is_shared_mode {
+            // In shared mode, just poll for time progression
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        } else {
+            // In legacy mode, check pause state
+            while time_source.is_paused() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
         }
 
         // ── Batch flush: all quotes up to current virtual time ──
-        let target_ts = timeline.read().unwrap().now_ns();
+        let target_ts = time_source.now_ns();
         let batch_start = idx;
 
         while idx < quotes.len() && quotes[idx].participant_timestamp <= target_ts {
@@ -453,56 +562,62 @@ async fn replay_quotes(
             break;
         }
 
-        // ── 3-tier adaptive sleep toward next quote ─────────────
+        // ── Sleep toward next quote ─────────────────────────────
         let next_ts = quotes[idx].participant_timestamp;
-        let target_instant = { timeline.read().unwrap().target_instant_for(next_ts) };
 
-        if let Some(target) = target_instant {
-            // Log large market gaps.
-            if let Some(max_gap) = max_gap_ms {
-                let remaining = target.saturating_duration_since(Instant::now());
-                if remaining.as_millis() > max_gap as u128 {
-                    info!(
-                        "{} waiting for market gap: {:.2}s",
-                        symbol,
-                        remaining.as_secs_f64(),
-                    );
-                }
-            }
+        if is_shared_mode {
+            // In shared mode, we don't know the speed, so we poll
+            // Use a small sleep to avoid busy-waiting
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        } else {
+            // In legacy mode, use precise timing
+            let target_instant = time_source.target_instant_for(next_ts);
 
-            // Timing loop — three tiers like local_tickdata_replayer.
-            loop {
-                let now = Instant::now();
-                if now >= target {
-                    break;
-                }
-
-                // Re-check pause (break to outer loop which will gate).
-                if timeline.read().unwrap().is_paused() {
-                    break;
-                }
-
-                let remaining = target.duration_since(now);
-                let remaining_us = remaining.as_micros() as i64;
-
-                if remaining_us < 50 {
-                    // Tier 1 — < 50 µs: busy-wait for precision.
-                    while Instant::now() < target {
-                        std::hint::spin_loop();
+            if let Some(target) = target_instant {
+                // Log large market gaps.
+                if let Some(max_gap) = max_gap_ms {
+                    let remaining = target.saturating_duration_since(Instant::now());
+                    if remaining.as_millis() > max_gap as u128 {
+                        info!(
+                            "{} waiting for market gap: {:.2}s",
+                            symbol,
+                            remaining.as_secs_f64(),
+                        );
                     }
-                    break;
-                } else if remaining_us < 5_000 {
-                    // Tier 2 — 50 µs–5 ms: sleep most, then spin.
-                    let sleep_us = (remaining_us - 50).max(0) as u64;
-                    if sleep_us > 0 {
-                        tokio::time::sleep(Duration::from_micros(sleep_us)).await;
+                }
+
+                // Timing loop — three tiers.
+                loop {
+                    let now = Instant::now();
+                    if now >= target {
+                        break;
                     }
-                    // Re-check at top of loop.
-                } else {
-                    // Tier 3 — > 5 ms: chunked sleep (max 10 ms).
-                    let chunk_us = ((remaining_us - 1_000).max(0) as u64).min(10_000);
-                    if chunk_us > 0 {
-                        tokio::time::sleep(Duration::from_micros(chunk_us)).await;
+
+                    if time_source.is_paused() {
+                        break;
+                    }
+
+                    let remaining = target.duration_since(now);
+                    let remaining_us = remaining.as_micros() as i64;
+
+                    if remaining_us < 50 {
+                        // Tier 1 — < 50 µs: busy-wait for precision.
+                        while Instant::now() < target {
+                            std::hint::spin_loop();
+                        }
+                        break;
+                    } else if remaining_us < 5_000 {
+                        // Tier 2 — 50 µs–5 ms: sleep most, then spin.
+                        let sleep_us = (remaining_us - 50).max(0) as u64;
+                        if sleep_us > 0 {
+                            tokio::time::sleep(Duration::from_micros(sleep_us)).await;
+                        }
+                    } else {
+                        // Tier 3 — > 5 ms: chunked sleep (max 10 ms).
+                        let chunk_us = ((remaining_us - 1_000).max(0) as u64).min(10_000);
+                        if chunk_us > 0 {
+                            tokio::time::sleep(Duration::from_micros(chunk_us)).await;
+                        }
                     }
                 }
             }
@@ -513,12 +628,12 @@ async fn replay_quotes(
     Ok(())
 }
 
-// ── Trade replay (simpler sleep) ────────────────────────────────────
+// ── Trade replay (polling-based for shared time) ────────────────────
 
 async fn replay_trades(
     symbol: String,
     trades: Vec<RawTrade>,
-    timeline: Arc<RwLock<Timeline>>,
+    time_source: TimeSource,
     callback: Arc<Py<PyAny>>,
     stats: Arc<RwLock<ReplayStats>>,
     _max_gap_ms: Option<u64>,
@@ -527,7 +642,7 @@ async fn replay_trades(
         return Ok(());
     }
 
-    let current_ts = timeline.read().unwrap().now_ns();
+    let current_ts = time_source.now_ns();
     let mut idx = trades.partition_point(|t| t.participant_timestamp < current_ts);
 
     if idx > 0 {
@@ -542,13 +657,20 @@ async fn replay_trades(
         trades.len()
     );
 
+    // Determine if we're in shared time mode
+    let is_shared_mode = matches!(time_source, TimeSource::Shared(_));
+
     while idx < trades.len() {
         // Pause gate.
-        while timeline.read().unwrap().is_paused() {
-            tokio::time::sleep(Duration::from_millis(50)).await;
+        if is_shared_mode {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        } else {
+            while time_source.is_paused() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
         }
 
-        let target_ts = timeline.read().unwrap().now_ns();
+        let target_ts = time_source.now_ns();
         let batch_start = idx;
 
         while idx < trades.len() && trades[idx].participant_timestamp <= target_ts {
@@ -582,13 +704,19 @@ async fn replay_trades(
             break;
         }
 
-        // Simple tokio sleep (no spin-loop for trades — lower frequency).
+        // Sleep toward next trade
         let next_ts = trades[idx].participant_timestamp;
-        let target_instant = timeline.read().unwrap().target_instant_for(next_ts);
-        if let Some(target) = target_instant {
-            let now = Instant::now();
-            if now < target {
-                tokio::time::sleep(target.duration_since(now)).await;
+
+        if is_shared_mode {
+            // In shared mode, poll for time progression
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        } else {
+            let target_instant = time_source.target_instant_for(next_ts);
+            if let Some(target) = target_instant {
+                let now = Instant::now();
+                if now < target {
+                    tokio::time::sleep(target.duration_since(now)).await;
+                }
             }
         }
     }

@@ -27,6 +27,11 @@ Usage::
     clock.set_speed(2.0)
     clock.pause()
     clock.resume()
+
+    # ── Shared time handle for TickDataReplayer ──
+    # Get a handle that can be passed to other components
+    handle = clock.get_shared_time()  # Returns SharedTimeHandle
+    # Pass to TickDataReplayer for synchronized timing
 """
 
 from __future__ import annotations
@@ -168,6 +173,25 @@ def resume() -> None:
 # ── TickDataReplayer factory ─────────────────────────────────────────
 
 
+def get_shared_time():
+    """Get a shared time handle from the active ReplayClock.
+
+    The handle can be passed to TickDataReplayer (or other components)
+    to ensure they read from the same time source without GIL contention.
+
+    Returns:
+        SharedTimeHandle: A handle that can be used to read the clock time.
+
+    Raises:
+        RuntimeError: If no ReplayClock is active (live mode).
+    """
+    if _clock is None:
+        raise RuntimeError(
+            "get_shared_time() requires replay mode (call init_replay first)"
+        )
+    return _clock.get_shared_time()
+
+
 def create_tick_replayer(
     replay_date: str,
     lake_data_dir: str,
@@ -175,23 +199,34 @@ def create_tick_replayer(
     start_time: str | None = None,
     max_gap_ms: int | None = None,
 ) -> TickDataReplayer:
-    """Create a ``TickDataReplayer`` that inherits the active clock's params.
+    """Create a ``TickDataReplayer`` that shares the active clock's time.
 
-    Convenience wrapper: reads ``data_start_ts_ns`` and ``speed`` from the
-    module-level ``ReplayClock`` so the replayer's internal timeline is
-    automatically in sync.
+    **IMPORTANT**: The replayer uses a shared time handle from the ReplayClock
+    so all components see the same virtual time without drift. This is the
+    recommended way to create a TickDataReplayer in replay mode.
 
-    Raises ``RuntimeError`` if no ``ReplayClock`` is active (live mode).
+    Args:
+        replay_date: Date in YYYYMMDD format.
+        lake_data_dir: Path to the data-lake root.
+        start_time: Optional start time in "HH:MM" or "HH:MM:SS" (ET).
+        max_gap_ms: Threshold for logging large time gaps (ms).
+
+    Returns:
+        TickDataReplayer: A replayer that uses the shared clock time.
+
+    Raises:
+        RuntimeError: If no ReplayClock is active (live mode).
     """
     if _clock is None:
         raise RuntimeError(
             "create_tick_replayer() requires replay mode (call init_replay first)"
         )
+    # Get shared time handle for synchronized timing
+    shared_time = _clock.get_shared_time()
     return TickDataReplayer(
         replay_date=replay_date,
         lake_data_dir=lake_data_dir,
-        data_start_ts_ns=_clock.data_start_ts_ns,
-        speed=_clock.speed,
+        shared_time=shared_time,
         start_time=start_time,
         max_gap_ms=max_gap_ms,
     )

@@ -78,6 +78,8 @@ mod _rust {
     // ── Replay clock ────────────────────────────────────────────────
     #[pymodule_export]
     use super::clock::ReplayClock;
+    #[pymodule_export]
+    use super::clock::SharedTimeHandle;
 
     // ── Tick-data replayer ───────────────────────────────────────────
     #[pymodule_export]

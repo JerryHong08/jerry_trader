@@ -965,23 +965,39 @@ class ChartBFF:
             pubsub.subscribe(channel)
             logger.info(f"📊 Listening to Redis channel: {channel}")
 
+            # Track the latest timestamp we've forwarded to detect lag
+            last_forwarded_ts: dict[str, int] = {}
+
             while True:
-                message = pubsub.get_message(timeout=1.0)
+                message = pubsub.get_message(timeout=0.1)
                 if message and message["type"] == "message":
                     try:
                         factor_data = json.loads(message["data"])
-                        # Forward to WebSocket with message type
+                        ts_ms = factor_data.get("timestamp_ms", 0)
+
+                        # Check for queued/old messages and skip if significantly behind
+                        # This prevents lag from accumulating in fast replay mode
+                        key = f"{symbol}:{timeframe}"
+                        last_ts = last_forwarded_ts.get(key, 0)
+
+                        if ts_ms < last_ts:
+                            # Message is older than what we already sent - skip it
+                            continue
+
+                        last_forwarded_ts[key] = ts_ms
+
+                        # Forward to WebSocket immediately
                         await websocket.send_json(
                             {"type": "factor_update", "data": factor_data}
                         )
-                        # logger.debug(f"📊 Forwarded factor update for {symbol}")
                     except json.JSONDecodeError as e:
                         logger.error(f"📊 Invalid JSON in factor message: {e}")
                     except Exception as e:
                         logger.error(f"📊 Error forwarding factor: {e}")
                         break
 
-                await asyncio.sleep(0.01)  # Small delay to prevent busy loop
+                # No sleep - process messages as fast as possible
+                await asyncio.sleep(0)  # Yield to event loop but don't delay
 
         except asyncio.CancelledError:
             logger.info(f"📊 Factor consumer cancelled for {symbol}")

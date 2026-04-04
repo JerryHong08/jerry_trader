@@ -14,6 +14,8 @@
 // Exposed to Python as `jerry_trader._rust.ReplayClock` via PyO3.
 
 use pyo3::prelude::*;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 // ── ReplayClock ─────────────────────────────────────────────────────
@@ -26,6 +28,10 @@ use std::time::Instant;
 ///
 /// All "now" queries are O(1) with no syscall — just an `Instant`
 /// subtraction and a multiply.
+///
+/// The clock also publishes its current time to a shared `AtomicI64`
+/// so that other Rust components (e.g., `TickDataReplayer`) can read
+/// the time without GIL contention.
 #[pyclass]
 #[derive(Debug)]
 pub struct ReplayClock {
@@ -47,6 +53,10 @@ pub struct ReplayClock {
     /// Accumulated wall-clock nanoseconds spent in paused state.
     /// Subtracted from raw elapsed to get effective elapsed.
     total_pause_ns: i64,
+
+    /// Shared atomic time for zero-GIL reads by other Rust components.
+    /// Updated on every `now_ns()` call.
+    shared_time_ns: Arc<AtomicI64>,
 }
 
 #[pymethods]
@@ -62,6 +72,7 @@ impl ReplayClock {
     #[new]
     #[pyo3(signature = (data_start_ts_ns, speed = 1.0))]
     fn new(data_start_ts_ns: i64, speed: f64) -> Self {
+        let shared = Arc::new(AtomicI64::new(data_start_ts_ns));
         Self {
             wall_clock_start: Instant::now(),
             data_start_ts_ns,
@@ -69,6 +80,7 @@ impl ReplayClock {
             paused: false,
             pause_start: None,
             total_pause_ns: 0,
+            shared_time_ns: shared,
         }
     }
 
@@ -78,7 +90,12 @@ impl ReplayClock {
     fn now_ns(&self) -> i64 {
         let raw_elapsed_ns = self.raw_elapsed_ns();
         let effective_ns = raw_elapsed_ns - self.total_pause_ns;
-        self.data_start_ts_ns + (effective_ns as f64 * self.speed) as i64
+        let result = self.data_start_ts_ns + (effective_ns as f64 * self.speed) as i64;
+
+        // Update shared atomic for zero-GIL reads
+        self.shared_time_ns.store(result, Ordering::Relaxed);
+
+        result
     }
 
     /// Current replay time as epoch **milliseconds**.
@@ -108,6 +125,9 @@ impl ReplayClock {
         self.paused = false;
         self.data_start_ts_ns = current;
         self.speed = speed;
+
+        // Update shared time
+        self.shared_time_ns.store(current, Ordering::Relaxed);
     }
 
     /// Get the current speed multiplier.
@@ -161,6 +181,9 @@ impl ReplayClock {
         } else {
             self.pause_start = None;
         }
+
+        // Update shared time
+        self.shared_time_ns.store(target_ts_ns, Ordering::Relaxed);
     }
 
     /// The current data-start anchor (epoch ns).
@@ -168,6 +191,19 @@ impl ReplayClock {
     #[getter]
     fn data_start_ts_ns(&self) -> i64 {
         self.data_start_ts_ns
+    }
+
+    // ── Shared time access ──────────────────────────────────────────
+
+    /// Get a clone of the shared time handle.
+    ///
+    /// This can be passed to other Rust components (e.g., TickDataReplayer)
+    /// so they can read the clock time without GIL contention.
+    #[pyo3(name = "get_shared_time")]
+    fn py_get_shared_time(&self) -> SharedTimeHandle {
+        SharedTimeHandle {
+            inner: self.shared_time_ns.clone(),
+        }
     }
 
     // ── Display ─────────────────────────────────────────────────────
@@ -198,6 +234,51 @@ impl ReplayClock {
         } else {
             self.wall_clock_start.elapsed().as_nanos() as i64
         }
+    }
+}
+
+// ── SharedTimeHandle ─────────────────────────────────────────────────
+
+/// A handle for reading the ReplayClock time without GIL contention.
+///
+/// Created by `ReplayClock.get_shared_time()` and passed to other
+/// Rust components that need to read the clock.
+#[pyclass]
+#[derive(Debug, Clone)]
+pub struct SharedTimeHandle {
+    inner: Arc<AtomicI64>,
+}
+
+impl SharedTimeHandle {
+    /// Read the current clock time (epoch nanoseconds).
+    ///
+    /// This is lock-free and GIL-free — safe to call from any thread.
+    pub fn now_ns(&self) -> i64 {
+        self.inner.load(Ordering::Relaxed)
+    }
+
+    /// Read the current clock time (epoch milliseconds).
+    pub fn now_ms(&self) -> i64 {
+        self.now_ns() / 1_000_000
+    }
+}
+
+#[pymethods]
+impl SharedTimeHandle {
+    /// Read the current clock time (epoch nanoseconds).
+    #[pyo3(name = "now_ns")]
+    fn py_now_ns(&self) -> i64 {
+        self.now_ns()
+    }
+
+    /// Read the current clock time (epoch milliseconds).
+    #[pyo3(name = "now_ms")]
+    fn py_now_ms(&self) -> i64 {
+        self.now_ms()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("SharedTimeHandle(now_ns={})", self.now_ns())
     }
 }
 
@@ -377,5 +458,35 @@ mod tests {
         clock.resume(); // second resume should be a no-op
         // Just ensure it doesn't panic.
         let _ = clock.now_ns();
+    }
+
+    #[test]
+    fn test_shared_time_handle() {
+        let clock = ReplayClock::new(START_NS, 1.0);
+        let handle = clock.py_get_shared_time();
+
+        // Initial value
+        let t0 = handle.now_ns();
+        assert!(t0 >= START_NS);
+
+        // After some time
+        thread::sleep(Duration::from_millis(10));
+        clock.now_ns(); // Update shared time
+        let t1 = handle.now_ns();
+        assert!(t1 > t0, "shared time should advance: t0={t0}, t1={t1}");
+    }
+
+    #[test]
+    fn test_shared_time_no_gil() {
+        let clock = ReplayClock::new(START_NS, 1.0);
+        let handle = clock.py_get_shared_time();
+
+        // Read from another thread without GIL
+        let handle_clone = handle.clone();
+        let t = thread::spawn(move || {
+            handle_clone.now_ns()
+        }).join().unwrap();
+
+        assert!(t >= START_NS);
     }
 }

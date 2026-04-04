@@ -20,6 +20,23 @@ import { useFactorDataStore } from './factorDataStore';
 // Types
 // ============================================================================
 
+/**
+ * Parse timeframe string to seconds
+ * e.g., '10s' -> 10, '1m' -> 60, '5m' -> 300, '1h' -> 3600
+ */
+function parseTimeframeToSeconds(tf: string): number {
+  const match = tf.match(/^(\d+)(s|m|h)$/);
+  if (!match) return 0;
+  const value = parseInt(match[1], 10);
+  const unit = match[2];
+  switch (unit) {
+    case 's': return value;
+    case 'm': return value * 60;
+    case 'h': return value * 3600;
+    default: return 0;
+  }
+}
+
 export interface Quote {
   symbol: string;
   bid: number;
@@ -208,22 +225,35 @@ export const useTickDataStore = create<TickDataState>()((set, get) => ({
       if (data.type === 'factor_update') {
         const factorStore = useFactorDataStore.getState();
         const { symbol, timestamp_ns, factors, timeframe } = data.data || {};
+        const clock_now_ns = data.clock_now_ns;  // Replay clock time from backend
 
         if (symbol && timestamp_ns && factors) {
           // timeframe from backend (e.g., 'trade', '1m', '5m')
           const tf = timeframe || 'trade';
 
-          // Log with wall-clock time for delay measurement
-          const factorTime = new Date(timestamp_ns / 1_000_000);
-          const now = new Date();
-          const wsDelayMs = now.getTime() - factorTime.getTime();
+          // Calculate delay using replay clock (not wall-clock time)
+          if (clock_now_ns) {
+            let wsDelayMs: number;
 
-          // Only log if delay is significant (> 1s in replay time)
-          if (wsDelayMs > 1000) {
-            console.log(
-              `[FactorUpdate] ${symbol}/${tf} ts=${factorTime.toISOString()} ` +
-              `ws_delay=${wsDelayMs}ms factors=${Object.keys(factors).join(',')}`
-            );
+            if (tf === 'trade') {
+              // Tick-based: delay = clock_now - timestamp
+              wsDelayMs = Math.floor((clock_now_ns - timestamp_ns) / 1_000_000);
+            } else {
+              // Bar-based: delay = clock_now - (bar_start + bar_duration)
+              // Parse timeframe to get bar duration in seconds (e.g., '10s' -> 10, '1m' -> 60, '5m' -> 300)
+              const barDurationSec = parseTimeframeToSeconds(tf);
+              const barCloseNs = timestamp_ns + barDurationSec * 1_000_000_000;
+              wsDelayMs = Math.floor((clock_now_ns - barCloseNs) / 1_000_000);
+            }
+
+            // Only log if delay is significant (> 500ms in replay time)
+            if (wsDelayMs > 500) {
+              const factorTime = new Date(timestamp_ns / 1_000_000);
+              console.log(
+                `[FactorUpdate] ${symbol}/${tf} ts=${factorTime.toISOString()} ` +
+                `delay=${wsDelayMs}ms factors=${Object.keys(factors).join(',')}`
+              );
+            }
           }
 
           // Find all moduleIds that have factor data for this symbol AND timeframe

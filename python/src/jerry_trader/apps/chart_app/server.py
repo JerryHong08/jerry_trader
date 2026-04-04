@@ -986,9 +986,15 @@ class ChartBFF:
 
                         last_forwarded_ts[key] = ts_ms
 
-                        # Forward to WebSocket immediately
+                        # Forward to WebSocket immediately with clock time for delay calculation
+                        from jerry_trader import clock
+
                         await websocket.send_json(
-                            {"type": "factor_update", "data": factor_data}
+                            {
+                                "type": "factor_update",
+                                "data": factor_data,
+                                "clock_now_ns": clock.now_ns(),  # Current replay clock time
+                            }
                         )
                     except json.JSONDecodeError as e:
                         logger.error(f"📊 Invalid JSON in factor message: {e}")

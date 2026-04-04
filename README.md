@@ -36,6 +36,33 @@ Changelod in [CHANGELOG.md](CHANGELOG.md)
 
 I use my self-built human agent task management system [Topology](https://github.com/JerryHong08/topology) to develop this project.
 
+## Key Features
+
+### Real-time Market Data Pipeline
+- Multi-source tick data ingestion (Polygon, Theta Data, local replay)
+- Rust-based BarBuilder with watermark close and late-arrival handling
+- ClickHouse storage for bars and factor snapshots
+
+### Factor Engine
+- Multi-timeframe technical indicators (EMA, Volume Ratio, Trade Rate, etc.)
+- Real-time factor computation and WebSocket streaming
+- Backtest-optimized factor storage with session support
+
+### Replay System
+- Distributed clock synchronization across machines
+- Historical tick-by-tick replay with configurable speed
+- Cross-machine time accuracy via Redis heartbeat
+
+### AI Agent Layer
+Rule-driven agent system inspired by ACT-R cognitive architecture:
+
+- **Rule Engine**: Real-time monitoring with Strategy DSL (backtest-optimized triggers)
+- **Agent Think**: LLM deep analysis triggered by rules — cost-efficient, only runs on significant events
+- **Backtest Integration**: Validate rules, optimize thresholds, simulate agent decisions
+- **Output**: Notifications (Telegram/Discord), dynamic widgets, alerts
+
+See [roadmap/atcr-agent-system.md](roadmap/atcr-agent-system.md) for architecture details.
+
 ## Installation & Quick Start
 
 This project is designed for a multi-machine setup connected via a local network or [Tailscale](https://tailscale.com/). Each machine's role is defined in [`config.yaml`](/config.yaml.example).
@@ -71,9 +98,9 @@ The system has multiple services that can be distributed across machines. my set
 
 | Machine | Services |
 |---------|----------|
-| **A** | TickData Engine, BarBuilder, Factor Engine, Order Execution |
+| **A** | TickData Engine, BarBuilder, Factor Engine, AI Rule Engine, Order Execution |
 | **B** | Market Snapshot engine (collect/replay), strategy-driving pre-processing(top20, normalization) |
-| **C** | News Module (fetch, LLM classification) |
+| **C** | News Module (fetch, LLM classification), Agent BFF, Agent Reasoner |
 
 See [`config.yaml.example`](/config.yaml.example) for the full schema and role definitions.
 
@@ -263,4 +290,48 @@ Postgres (classified results)  ──► Redis B (news events)
       │
       ▼
 AgentBFF ──► Frontend / [Stage4] AgentRuntime
+```
+
+### AI Agent Layer (planned)
+
+```bash
+Factor Engine / News Pipeline
+      │
+      ▼
+┌─────────────────────────────────────────┐
+│ Layer 1: Rule Engine (always-on)        │
+│                                         │
+│ Strategy DSL Rules (backtest optimized) │
+│ ├─ Factor threshold triggers            │
+│ ├─ News classifier triggers             │
+│ └─ IF condition THEN activate           │
+│                                         │
+└─────────────────────────────────────────┘
+                  ↓ Activation Event
+                  ↓ {rule_id, symbol, context}
+┌─────────────────────────────────────────┐
+│ Layer 2: Agent Think (on-demand)        │
+│                                         │
+│ 1. Context Aggregator                   │
+│    └─ Gather factors, news, trades      │
+│                                         │
+│ 2. LLM Reasoning                        │
+│    └─ Per-rule prompt template          │
+│    └─ Deep analysis → action            │
+│                                         │
+└─────────────────────────────────────────┘
+                  ↓
+┌─────────────────────────────────────────┐
+│ Layer 3: Action                         │
+│                                         │
+│ ├─ Notify (Telegram/Discord/Webhook)    │
+│ ├─ Generate Widget                      │
+│ └─ Trigger downstream rule              │
+│                                         │
+└─────────────────────────────────────────┘
+
+Offline: Backtest Engine
+├─ Optimize rule thresholds
+├─ Validate prompt templates
+└─ Simulate agent decisions
 ```

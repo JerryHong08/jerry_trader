@@ -51,6 +51,8 @@ React/TradingView UI modules and UX improvements.
   - [x] 5.14.2 TradeRate canvas stability (single fitContent)
   - [x] 5.14.3 Overlay factor rendering timing fix
 - [-] 5.15 Fix tick factor real-time update - compute and publish on tick arrival
+- [ ] [5.16](roadmap/factor-subscription-scenarios.md) Fix factor subscription lifecycle - timeframe switch, unsubscribe/re-subscribe, multi-chart scenarios
+- [ ] 5.17 Cheat method: cleanup ticker on unsubscribe - clear runtime state only, preserve ClickHouse history
 ## 6. Orchestration
 
 System-wide coordination and backtest infrastructure.
@@ -74,29 +76,34 @@ System-wide coordination and backtest infrastructure.
 - [x] 6.11 Fix factor query - add session filter and remove FINAL
 ## 7. AI Agent Layer
 
-Event-driven AI agent system with generative UI capabilities.
+ATC-R Agent System - ACT-R inspired architecture with production rules (Strategy DSL) as first-class citizens.
 
-**Core Infrastructure:**
-- [ ] 7.1 Redis streams to event_bus migration
-- [ ] 7.2 Redis-based RPC for cross-service tool calls
-- [ ] [7.3](roadmap/chatbox-module.md) Agent BFF - WebSocket + HTTP interface
+**Phase 1: Rule Engine (Activation Layer)**
+- [ ] [7.1](roadmap/atcr-agent-system.md) Strategy DSL - rule definition, real-time matching, backtest optimization
+- [ ] [7.2](roadmap/atcr-agent-system.md) News Pre-filter - LLM threshold filter for news activation
+- [ ] [7.3](roadmap/atcr-agent-system.md) Rule Engine - factor/news trigger matching with conflict resolution
 
-**Agent Runtime:**
-- [ ] 7.4 Tool registry - wrap services as callable tools
-- [ ] 7.5 Agent core loop - LLM reasoning + tool dispatch
-- [ ] 7.6 Context manager - session state + memory
+**Phase 2: Agent Think (Reasoning Layer)**
+- [ ] [7.4](roadmap/atcr-agent-system.md) Agent BFF - WebSocket + HTTP interface for agent communication
+- [ ] [7.5](roadmap/atcr-agent-system.md) Context Aggregator - gather factors, news, trades when triggered
+- [ ] [7.6](roadmap/atcr-agent-system.md) Agent Reasoner - LLM with per-rule prompt templates
+- [ ] [7.7](roadmap/atcr-agent-system.md) Tool Registry - wrap services as callable tools
 
-**Generative Widget System:**
-- [ ] [7.7](roadmap/chatbox-module.md) Widget sandbox - iframe + security model
-- [ ] [7.8](roadmap/chatbox-module.md) Widget registry - CRUD + lifecycle
-- [ ] [7.9](roadmap/chatbox-module.md) Widget generation - template → LLM
-- [ ] [7.10](roadmap/chatbox-module.md) Human-agent interaction - context, right-click, focus
+**Phase 3: Backtest Integration**
+- [ ] [7.8](roadmap/atcr-agent-system.md) Strategy Backtest - validate rules on historical data
+- [ ] [7.9](roadmap/atcr-agent-system.md) Threshold Optimization - grid search for optimal trigger values
+- [ ] [7.10](roadmap/atcr-agent-system.md) Agent Decision Simulation - simulate agent decisions in backtest mode
 
-**Validation & CLI:**
-- [ ] 7.11 txt to tool-calling validation
-- [ ] 7.12 Strategy pipeline agent validation
-- [ ] 7.13 ML pipeline agent validation
-- [ ] 7.14 Basic CLI tools and skills instruction
+**Phase 4: Output & UX**
+- [ ] [7.11](roadmap/atcr-agent-system.md) Notification System - Telegram/Discord/Webhook
+- [ ] [7.12](roadmap/atcr-agent-system.md) Dynamic Widget - template-based widget generation
+- [ ] [7.13](roadmap/atcr-agent-system.md) Chat Interface - simple natural language interaction
+
+**Deprioritized:**
+- [~] Redis streams migration (not needed - rules listen directly to factor stream)
+- [~] Redis RPC (over-engineered - direct function calls sufficient)
+- [~] Widget sandbox (Phase 4, simplified)
+- [~] Right-click interaction (over-engineered)
 
 - [ ] [7.15](roadmap/factor-stream-rust-migration.md) Factor stream Rust migration - migrate from Python asyncio to Rust FactorBroadcaster when Signal Engine is introduced
 ## 8. Optional Features

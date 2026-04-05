@@ -1,0 +1,26 @@
+# Pre-market Momentum Spike Detector
+#
+# Detects stocks with unusually high trade rate during pre-market.
+# Used by Signal Engine to record and track subsequent returns.
+#
+# Usage: Signal Engine loads this rule, evaluates against real-time factors,
+# and records trigger events for return tracking.
+
+id: premarket_momentum_v1
+name: "Pre-market momentum spike"
+version: 1
+
+trigger:
+  type: AND
+  conditions:
+    - factor: trade_rate
+      timeframe: trade
+      op: gt
+      value: 200.0
+
+actions:
+  - type: record
+    track:
+      - returns_1m
+      - returns_5m
+      - returns_15m

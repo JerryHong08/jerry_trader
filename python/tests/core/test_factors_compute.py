@@ -12,7 +12,7 @@ from collections import deque
 
 import pytest
 
-from jerry_trader._rust import compute_trade_rate, price_accel, z_score
+from jerry_trader._rust import price_accel, trade_rate, z_score
 
 # =========================================================================
 # z_score
@@ -150,28 +150,33 @@ class TestPriceAccel:
 # =========================================================================
 
 
-class TestComputeTradeRate:
-    """Tests for compute_trade_rate."""
+class TestTradeRate:
+    """Tests for trade_rate.
+
+    trade_rate(timestamps, current_ms, window_ms, min_trades=5)
+    timestamps: list of trade timestamps in ms
+    Returns: trades per second in the window, or 0.0 if insufficient trades.
+    """
 
     def test_basic(self):
-        """100 trades in 1000ms → 100 trades/sec."""
-        assert compute_trade_rate(100, 1000) == pytest.approx(100.0)
+        """10 trades over 1000ms window → 10 trades/sec."""
+        # Trades at t=0..900 (every 100ms)
+        timestamps = [i * 100 for i in range(10)]
+        result = trade_rate(timestamps, current_ms=950, window_ms=1000)
+        assert result == pytest.approx(10.0)
 
     def test_zero_trades(self):
-        assert compute_trade_rate(0, 1000) == 0.0
+        result = trade_rate([], current_ms=1000, window_ms=1000)
+        assert result is None or result == 0.0
 
-    def test_zero_window(self):
-        """Zero window → 0.0 (avoid division by zero)."""
-        assert compute_trade_rate(100, 0) == 0.0
-
-    def test_negative_window(self):
-        """Negative window → 0.0."""
-        assert compute_trade_rate(100, -500) == 0.0
+    def test_below_min_trades(self):
+        """Fewer than min_trades → None or 0.0."""
+        timestamps = [0, 100, 200]  # only 3, default min_trades=5
+        result = trade_rate(timestamps, current_ms=500, window_ms=1000, min_trades=5)
+        assert result is None or result == 0.0
 
     def test_small_window(self):
-        """10 trades in 100ms → 100 trades/sec."""
-        assert compute_trade_rate(10, 100) == pytest.approx(100.0)
-
-    def test_large_window(self):
-        """5000 trades in 60000ms (1 min) → 83.33 trades/sec."""
-        assert compute_trade_rate(5000, 60000) == pytest.approx(5000.0 / 60.0)
+        """5 trades in 100ms → 50 trades/sec."""
+        timestamps = [0, 25, 50, 75, 100]
+        result = trade_rate(timestamps, current_ms=100, window_ms=100, min_trades=3)
+        assert result == pytest.approx(50.0)

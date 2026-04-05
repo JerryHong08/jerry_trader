@@ -36,13 +36,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from jerry_trader.platform.config.config_builder import (
+from jerry_trader.platform.config.session import make_session_id
+from jerry_trader.runtime.config_builder import (
     DEFAULT_CONFIG_PATH,
     build_runtime_config,
     load_yaml_config,
     parse_override_args,
 )
-from jerry_trader.platform.config.session import make_session_id
 from jerry_trader.shared.logging.logger import setup_logger
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.INFO)

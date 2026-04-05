@@ -95,6 +95,7 @@ export function ChartPanelSystem({
   // Chart data store (OHLCV bars)
   const fetchBars = useChartDataStore((s) => s.fetchBars);
   const symbolBars = useChartDataStore((s) => s.symbolBars);
+  const fetchTrigger = useChartDataStore((s) => s.fetchTriggers[symbol?.toUpperCase() ?? ''] ?? 0);
   const chartState = symbol ? symbolBars[chartStoreKey(moduleId, symbol)] : undefined;
 
   // Factor data store
@@ -128,6 +129,17 @@ export function ChartPanelSystem({
     }
   }, [selectedSymbol]);
 
+  // ── React to global symbol list changes (subscribe/unsubscribe) ─────────────
+  useEffect(() => {
+    if (symbol && !symbols.includes(symbol)) {
+      // Symbol was removed from global list → clear local state
+      setSymbol('');
+    } else if (!symbol && selectedSymbol && symbols.includes(selectedSymbol)) {
+      // Symbol was re-added to global list → restore from sync group
+      setSymbol(selectedSymbol);
+    }
+  }, [symbols, symbol, selectedSymbol]);
+
   // ── Data fetching on symbol/timeframe change ─────────────────────────────────
   useEffect(() => {
     if (!symbol) return;
@@ -138,16 +150,15 @@ export function ChartPanelSystem({
     fetchBars(moduleId, symbolUpper, timeframe);
 
     // Fetch factors for overlays and panels
-    // Trade-based factors (TradeRate)
     fetchFactors(moduleId, symbolUpper, undefined, undefined, undefined, 'trade');
-    // Bar-based factors (EMA, etc.)
     fetchFactors(moduleId, symbolUpper, undefined, undefined, undefined, timeframe);
 
     // Subscribe to real-time factor updates
     const tickStore = useTickDataStore.getState();
     tickStore.subscribeFactors(symbolUpper, 'trade');
     tickStore.subscribeFactors(symbolUpper, timeframe);
-  }, [symbol, timeframe, moduleId, fetchBars, fetchFactors]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbol, timeframe, moduleId, fetchTrigger]);
 
   // ── Panel management ────────────────────────────────────────────────────────
   const togglePanelCollapse = useCallback((panelId: string) => {
@@ -704,10 +715,15 @@ function PricePanel({
 
       // Initial load or reset - use setData
       if (previousLength === 0 || currentLength <= previousLength) {
-        const lineData = factorData.map((point: any) => ({
-          time: point.time as Time,
-          value: point.value,
-        }));
+        // Deduplicate by time (keep last value per timestamp)
+        const seen = new Map<number, number>();
+        for (const point of factorData) {
+          const t = typeof point.time === 'number' ? point.time : parseInt(String(point.time));
+          seen.set(t, point.value);
+        }
+        const lineData = Array.from(seen.entries())
+          .sort((a, b) => a[0] - b[0])
+          .map(([time, value]) => ({ time: time as Time, value }));
         overlaySeriesRef.current[factorId].setData(lineData);
       } else {
         // Incremental update - ensure time is strictly increasing
@@ -872,10 +888,16 @@ function FactorPanel({
 
       if (isReset) {
         // Initial load or reset - use setData
-        const lineData = factorData.map((point: any) => ({
-          time: point.time as Time,
-          value: point.value,
-        }));
+        // Deduplicate by time (keep last value per timestamp) to prevent
+        // lightweight-charts assertion error on duplicate timestamps
+        const seen = new Map<number, number>();
+        for (const point of factorData) {
+          const t = typeof point.time === 'number' ? point.time : parseInt(String(point.time));
+          seen.set(t, point.value);
+        }
+        const lineData = Array.from(seen.entries())
+          .sort((a, b) => a[0] - b[0])
+          .map(([time, value]) => ({ time: time as Time, value }));
         seriesRef.current.setData(lineData);
 
         // Update tracking refs

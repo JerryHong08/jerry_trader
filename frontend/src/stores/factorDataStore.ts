@@ -81,6 +81,7 @@ type FactorDataState = {
   ) => void;
 
   clearFactors: (moduleId: string, ticker: string) => void;
+  clearFactorsForTicker: (ticker: string) => void; // Clear all factor data for a ticker (all modules, all timeframes)
   clearAll: () => void;
 };
 
@@ -233,10 +234,32 @@ export const useFactorDataStore = create<FactorDataState>((set, get) => ({
     timeframe: string = 'trade'
   ) => {
     const time = Math.floor(timestamp_ns / 1_000_000_000); // ns to seconds
+    const key = factorStoreKey(moduleId, ticker, timeframe);
 
-    for (const [factorName, value] of Object.entries(factors)) {
-      get().updateFactor(moduleId, ticker, factorName, { time, value }, timeframe);
-    }
+    set((state) => {
+      const current = state.symbolFactors[key];
+      if (!current) return state;
+
+      const updatedFactors = { ...current.factors };
+
+      for (const [factorName, value] of Object.entries(factors)) {
+        const existingPoints = updatedFactors[factorName] || [];
+        const lastPoint = existingPoints[existingPoints.length - 1];
+        if (lastPoint && time <= lastPoint.time) continue; // skip older/duplicate
+
+        const point: FactorPoint = { time, value };
+        updatedFactors[factorName] = existingPoints.length >= 10000
+          ? [...existingPoints.slice(1), point]
+          : [...existingPoints, point];
+      }
+
+      return {
+        symbolFactors: {
+          ...state.symbolFactors,
+          [key]: { ...current, factors: updatedFactors },
+        },
+      };
+    });
   },
 
   clearFactors: (moduleId: string, ticker: string, timeframe: string = 'trade') => {
@@ -244,6 +267,20 @@ export const useFactorDataStore = create<FactorDataState>((set, get) => ({
     set((state) => {
       const { [key]: _, ...rest } = state.symbolFactors;
       return { symbolFactors: rest };
+    });
+  },
+
+  clearFactorsForTicker: (ticker: string) => {
+    const tickerUpper = ticker.toUpperCase();
+    set((state) => {
+      // Find all keys that contain this ticker (format: "moduleId::TICKER::timeframe")
+      const newFactors = { ...state.symbolFactors };
+      for (const key of Object.keys(newFactors)) {
+        if (key.includes(`::${tickerUpper}::`)) {
+          delete newFactors[key];
+        }
+      }
+      return { symbolFactors: newFactors };
     });
   },
 

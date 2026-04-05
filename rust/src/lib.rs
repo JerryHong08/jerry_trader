@@ -71,6 +71,18 @@ mod _rust {
         factors::trade_rate(timestamps, current_ms, window_ms, min_trades)
     }
 
+    #[pyfunction]
+    #[pyo3(name = "bootstrap_trade_rate")]
+    #[pyo3(signature = (timestamps, window_ms = 20_000, min_trades = 5, compute_interval_ms = 1_000))]
+    fn py_bootstrap_trade_rate(
+        timestamps: Vec<i64>,
+        window_ms: i64,
+        min_trades: usize,
+        compute_interval_ms: i64,
+    ) -> PyResult<factors::TradeRateBootstrapResult> {
+        Ok(factors::bootstrap_trade_rate(timestamps, window_ms, min_trades, compute_interval_ms))
+    }
+
     // ── Bar builder ─────────────────────────────────────────────────
     #[pymodule_export]
     use super::bars::BarBuilder;

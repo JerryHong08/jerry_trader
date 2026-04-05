@@ -319,16 +319,18 @@ class BootstrapCoordinator:
                     new_tfs = set(timeframes) - existing_tfs
                     if not new_tfs:
                         logger.debug(
-                            f"start_bootstrap - {symbol}: already ready with all requested timeframes"
+                            f"start_bootstrap - {symbol}: already ready with same timeframes"
                         )
                         return bootstrap
-                    # Has new timeframes, reset and add them
-                    logger.info(
-                        f"start_bootstrap - {symbol}: adding new timeframes {list(new_tfs)} "
-                        f"to completed bootstrap (resetting)"
-                    )
-                    # Reset bootstrap for new timeframes
-                    bootstrap.end_time_ns = 0
+                    else:
+                        # Has new timeframes, reset and add them
+                        logger.info(
+                            f"start_bootstrap - {symbol}: adding new timeframes {list(new_tfs)} "
+                            f"to completed bootstrap (resetting)"
+                        )
+                        # Reset bootstrap for new timeframes
+                        bootstrap.end_time_ns = 0
+
                     for tf in new_tfs:
                         if tf in TRADES_ONLY_TIMEFRAMES:
                             tf_bootstrap = TimeframeBootstrap(
@@ -691,6 +693,18 @@ class BootstrapCoordinator:
         """Check if ticker bootstrap is complete."""
         bootstrap = self.get_bootstrap(symbol)
         return bootstrap is not None and bootstrap.is_ready()
+
+    def ensure_event(self, symbol: str) -> None:
+        """Ensure an event exists for this symbol.
+
+        Called from WebSocket subscribe handler before spawning background
+        bootstrap task, so REST calls have something to wait on immediately.
+        Thread-safe.
+        """
+        with self._lock:
+            if symbol not in self._ready_events:
+                self._ready_events[symbol] = threading.Event()
+                logger.debug(f"ensure_event - {symbol}: created event")
 
     def cleanup(self, symbol: str) -> None:
         """Clean up bootstrap state, stored trades, and notify services to stop tracking.

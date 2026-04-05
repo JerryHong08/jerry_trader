@@ -15,6 +15,7 @@
 import { create } from 'zustand';
 import { IS_DEMO } from '../data/mockData';
 import { useFactorDataStore } from './factorDataStore';
+import { useChartDataStore } from './chartDataStore';
 
 // ============================================================================
 // Types
@@ -204,18 +205,11 @@ export const useTickDataStore = create<TickDataState>()((set, get) => ({
         socket.send(JSON.stringify({ subscriptions: subs }));
       }
 
-      // Re-subscribe saved factor subscriptions
-      const { factorSubscriptions } = get();
-      for (const [symbol, timeframes] of Object.entries(factorSubscriptions)) {
-        for (const timeframe of timeframes) {
-          socket.send(JSON.stringify({
-            action: 'subscribe_factors',
-            symbols: [symbol.toUpperCase()],
-            timeframe,
-          }));
-          console.log('[TickData] Re-subscribed to factors:', symbol, `timeframe=${timeframe}`);
-        }
-      }
+      // Factor subscriptions are NOT re-subscribed here on purpose:
+      // React components call subscribeFactors() via their useEffect when
+      // they mount, handling both fresh loads and reconnects.  Re-subscribing
+      // from localStorage would trigger stale backend bootstraps for tickers
+      // the user may not be actively watching.
     };
 
     socket.onmessage = (event) => {
@@ -331,6 +325,14 @@ export const useTickDataStore = create<TickDataState>()((set, get) => ({
     saveSymbols(merged);
     savePerSymbolEvents(newPer);
 
+    // Increment fetch triggers so all modules showing re-subscribed tickers re-fetch data
+    const chartStore = useChartDataStore.getState();
+    const newTriggers = { ...chartStore.fetchTriggers };
+    for (const s of newSyms) {
+      newTriggers[s] = (newTriggers[s] || 0) + 1;
+    }
+    useChartDataStore.setState({ fetchTriggers: newTriggers });
+
     // Send subscribe
     const subs = newSyms.map((s) => ({ symbol: s, events }));
     if (subs.length > 0 && ws?.readyState === WebSocket.OPEN) {
@@ -359,6 +361,12 @@ export const useTickDataStore = create<TickDataState>()((set, get) => ({
     const newFactorSubs = { ...factorSubscriptions };
     delete newFactorSubs[symbol];
     saveFactorSubscriptions(newFactorSubs);
+
+    // Clear all factor data for this symbol (cheat method)
+    useFactorDataStore.getState().clearFactorsForTicker(symbol);
+
+    // Clear all chart bars for this symbol (cheat method)
+    useChartDataStore.getState().clearBarsForTicker(symbol);
 
     set({
       symbols: updated,

@@ -736,6 +736,10 @@ class BarsBuilderService:
             )
 
             # ── Filter: only trades BEFORE first WS tick ─────────────
+            # Filtering is needed for BAR building (avoids duplicate bars
+            # between REST backfill and live WS stream).  We keep the
+            # unfiltered list for tick-indicator warmup (trade_rate etc.).
+            tick_warmup_trades = trades  # unfiltered
             first_ws_ts = self._first_ws_tick_ts.get(symbol)
             if first_ws_ts:
                 original_len = len(trades)
@@ -872,18 +876,19 @@ class BarsBuilderService:
                     )
 
             # Store trades in BootstrapCoordinator for FactorEngine to consume
-            # This replaces the old callback pattern with unified orchestration
+            # Use UNFILTERED trades so tick indicators (trade_rate) get full
+            # coverage without the ~17s gap between REST and WS streams.
             if self._coordinator:
                 source = "polygon" if self.run_mode == "live" else "parquet"
                 first_ws_ts = self._first_ws_tick_ts.get(symbol)
                 trades_key = self._coordinator.store_trades(
                     symbol=symbol,
-                    trades=trades,  # Original UTC timestamps
+                    trades=tick_warmup_trades,  # unfiltered for tick warmup
                     from_ms=from_ms,
                     first_ws_ts=first_ws_ts,
                 )
                 logger.info(
-                    f"trades_backfill - {symbol}: stored {len(trades)} trades "
+                    f"trades_backfill - {symbol}: stored {len(tick_warmup_trades)} trades "
                     f"in coordinator at {trades_key}"
                 )
 

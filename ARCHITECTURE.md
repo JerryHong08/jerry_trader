@@ -97,7 +97,6 @@ python/
 │       ├── platform/                    # ── INFRASTRUCTURE LAYER ──────────────────
 │       │   ├── config/
 │       │   │   ├── config.py            # Config loader, lake_data_dir, env resolution
-│       │   │   ├── config_builder.py    # Runtime config builder
 │       │   │   └── session.py           # make_session_id, session parsing
 │       │   ├── storage/
 │       │   │   ├── clickhouse.py        # Pure ClickHouse connect/query client
@@ -262,7 +261,7 @@ The codebase follows a **layered architecture** with strict dependency rules:
 - ✅ Platform layer clean (no service imports)
 - ✅ **Bootstrap Coordinator V2** implemented (direct service calls, no Redis Streams)
 - ✅ **Domain Layer** populated with Bar, BarPeriod, Order, OrderState, FactorSnapshot
-- ⚠️ `config_builder.py` still in `platform/config/` (should be merged with `config.py`)
+- ✅ `config_builder.py` moved from `platform/config/` to `runtime/` (only consumer is backend_starter)
 
 ---
 

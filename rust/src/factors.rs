@@ -233,6 +233,145 @@ pub fn volume_ratio(volumes: Vec<i64>, window: usize) -> f64 {
 // Tick-Based Indicator Functions
 // ═══════════════════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Batch Bootstrap Functions
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Result of a batch trade_rate bootstrap computation.
+///
+/// Contains the per-second snapshots and the final indicator state
+/// so the Python TradeRate indicator can pick up where the bootstrap left off.
+#[pyclass]
+#[derive(Debug)]
+pub struct TradeRateBootstrapResult {
+    /// (timestamp_ms, rate_value) pairs — one per second where rate was computable.
+    pub snapshots: Vec<(i64, f64)>,
+    /// The last timestamp in the bootstrap trades (for dedup watermark).
+    pub last_trade_ms: i64,
+    /// The timestamps remaining in the rolling window at bootstrap end.
+    /// These should be loaded into the Python TradeRate's internal deque
+    /// so that live ticks merge seamlessly.
+    pub remaining_timestamps: Vec<i64>,
+}
+
+#[pymethods]
+impl TradeRateBootstrapResult {
+    #[getter]
+    fn snapshots(&self) -> Vec<(i64, f64)> {
+        self.snapshots.clone()
+    }
+
+    #[getter]
+    fn last_trade_ms(&self) -> i64 {
+        self.last_trade_ms
+    }
+
+    #[getter]
+    fn remaining_timestamps(&self) -> Vec<i64> {
+        self.remaining_timestamps.clone()
+    }
+}
+
+/// Batch-compute trade_rate snapshots from a sorted list of trade timestamps.
+///
+/// This is the Rust equivalent of _process_bootstrap_trades for tick indicators.
+/// Instead of a Python for-loop over 200k+ trades calling on_tick/compute per trade,
+/// this processes everything in a single Rust call (~milliseconds).
+///
+/// Algorithm:
+///   1. Collect all timestamps into a sorted VecDeque (like TradeRate._timestamps)
+///   2. Walk through 1-second intervals from first_ts to last_ts
+///   3. At each interval boundary, prune old timestamps and compute rate
+///   4. Return (ts_ms, rate) pairs where rate was computable (>= min_trades)
+///   5. Return remaining timestamps in the window for seamless live-tick handoff
+///
+/// Python signature:
+///   bootstrap_trade_rate(
+///       timestamps: list[int],
+///       window_ms: int = 20000,
+///       min_trades: int = 5,
+///       compute_interval_ms: int = 1000,
+///   ) -> TradeRateBootstrapResult
+#[pyfunction]
+#[pyo3(signature = (timestamps, window_ms = 20_000, min_trades = 5, compute_interval_ms = 1_000))]
+pub fn bootstrap_trade_rate(
+    timestamps: Vec<i64>,
+    window_ms: i64,
+    min_trades: usize,
+    compute_interval_ms: i64,
+) -> TradeRateBootstrapResult {
+    if timestamps.is_empty() || window_ms <= 0 || compute_interval_ms <= 0 {
+        return TradeRateBootstrapResult {
+            snapshots: Vec::new(),
+            last_trade_ms: 0,
+            remaining_timestamps: Vec::new(),
+        };
+    }
+
+    // Sort timestamps (they should already be sorted, but be safe)
+    let mut sorted = timestamps;
+    sorted.sort_unstable();
+
+    let last_trade_ms = *sorted.last().unwrap();
+    let first_ts = sorted[0];
+
+    // Build VecDeque of all timestamps
+    let all_ts: std::collections::VecDeque<i64> = sorted.into_iter().collect();
+
+    // Compute snapshots at 1-second intervals
+    let mut snapshots: Vec<(i64, f64)> = Vec::new();
+    let cutoff_window = window_ms;
+
+    // Walk through compute intervals
+    let mut next_compute = first_ts - (first_ts % compute_interval_ms) + compute_interval_ms;
+
+    // Track how many timestamps we've consumed up to each compute point
+    let mut ts_iter: std::collections::VecDeque<i64> = all_ts.clone();
+    let mut window_ts: std::collections::VecDeque<i64> = std::collections::VecDeque::new();
+
+    while next_compute <= last_trade_ms {
+        // Move timestamps from ts_iter into window_ts up to next_compute
+        while let Some(&ts) = ts_iter.front() {
+            if ts <= next_compute {
+                window_ts.push_back(ts);
+                ts_iter.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        // Prune timestamps outside the window
+        let prune_cutoff = next_compute - cutoff_window;
+        while window_ts.front().map_or(false, |&ts| ts < prune_cutoff) {
+            window_ts.pop_front();
+        }
+
+        // Compute rate if enough trades
+        let count = window_ts.len();
+        if count >= min_trades {
+            let rate = count as f64 / (window_ms as f64 / 1000.0);
+            snapshots.push((next_compute, rate));
+        }
+
+        next_compute += compute_interval_ms;
+    }
+
+    // Remaining timestamps in the window at the end of bootstrap
+    // These are timestamps within [last_trade_ms - window_ms, last_trade_ms]
+    let remaining_cutoff = last_trade_ms.saturating_sub(cutoff_window);
+    let remaining: Vec<i64> = all_ts
+        .iter()
+        .filter(|&&ts| ts >= remaining_cutoff)
+        .copied()
+        .collect();
+
+    TradeRateBootstrapResult {
+        snapshots,
+        last_trade_ms,
+        remaining_timestamps: remaining,
+    }
+}
+
 /// Compute trade rate (trades per second) from timestamps.
 ///
 /// Counts trades within [current_ms - window_ms, current_ms] and divides by window seconds.

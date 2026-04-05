@@ -460,17 +460,20 @@ class ChartBFF:
                 )
 
                 # Transform to frontend format: {factor_name: [{time, value}, ...]}
-                factors_dict = {}
+                # Deduplicate by (factor_name, time_in_seconds) — keep last value
+                # Multiple nanosecond rows can map to the same second.
+                factors_dict: dict[str, list[dict]] = {}
                 for row in results:
                     name = row["factor_name"]
+                    time_sec = row["timestamp_ns"] // 1_000_000_000
                     if name not in factors_dict:
                         factors_dict[name] = []
-                    factors_dict[name].append(
-                        {
-                            "time": row["timestamp_ns"] // 1_000_000_000,  # seconds
-                            "value": row["factor_value"],
-                        }
-                    )
+                    # Check for duplicate timestamp — replace if same second
+                    points = factors_dict[name]
+                    if points and points[-1]["time"] == time_sec:
+                        points[-1] = {"time": time_sec, "value": row["factor_value"]}
+                    else:
+                        points.append({"time": time_sec, "value": row["factor_value"]})
 
                 return {
                     "ticker": ticker_upper,
@@ -515,6 +518,7 @@ class ChartBFF:
                                 manager,
                                 consumer_tasks,
                                 current_streams,
+                                factor_subscriptions,
                             )
                         elif data.get("action") == "subscribe_factors":
                             await self._handle_factor_subscribe(
@@ -561,6 +565,7 @@ class ChartBFF:
         manager: UnifiedTickManager,
         consumer_tasks: dict,
         current_streams: Set[str],
+        factor_subscriptions: Set[str],
     ) -> None:
         """Handle unsubscribe requests from WebSocket clients.
 
@@ -570,6 +575,7 @@ class ChartBFF:
             manager: UnifiedTickManager instance
             consumer_tasks: Dict of stream_key -> asyncio.Task
             current_streams: Set of currently active stream keys
+            factor_subscriptions: Set of currently subscribed factor symbols
         """
         subscriptions = data.get("subscriptions", [])
 
@@ -618,6 +624,17 @@ class ChartBFF:
                         logger.warning(
                             f"⚠️ Failed to cleanup coordinator for {sym}: {e}"
                         )
+
+                # Clean up factor subscriptions and consumer tasks for this symbol
+                # This ensures re-subscribe will create fresh consumers
+                for sub_key in list(factor_subscriptions):
+                    if sub_key.startswith(f"{sym}:"):
+                        factor_subscriptions.discard(sub_key)
+                        task_key = f"factors:{sub_key}"
+                        if task_key in consumer_tasks:
+                            consumer_tasks[task_key].cancel()
+                            del consumer_tasks[task_key]
+                            logger.debug(f"📤 Cancelled factor consumer for {sub_key}")
 
     async def _handle_subscribe(
         self,
@@ -732,6 +749,11 @@ class ChartBFF:
             )
 
         # Start bootstrap tasks in background (don't block on manager.subscribe)
+        # Pre-create events so REST calls have something to wait on
+        if self._coordinator is not None:
+            for sym, _ in symbols_to_bootstrap:
+                self._coordinator.ensure_event(sym)
+
         for sym, tf in symbols_to_bootstrap:
             asyncio.create_task(run_bootstrap_for_symbol(sym, tf))
 

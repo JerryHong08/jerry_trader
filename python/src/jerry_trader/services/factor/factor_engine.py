@@ -194,6 +194,11 @@ class FactorEngine:
         # when bar backfill completes. Structure: {symbol: {timeframe1, timeframe2, ...}}
         self._failed_bootstrap_timeframes: dict[str, set[str]] = {}
 
+        # Tick buffer: holds WS ticks that arrive DURING bootstrap so they
+        # aren't lost.  Replayed after tick warmup completes.
+        self._tick_buffer: dict[str, list[tuple[int, float, int]]] = {}
+        self._tick_buffer_lock = threading.Lock()
+
         # BootstrapCoordinator integration (new orchestration)
         self._coordinator: BootstrapCoordinator | None = (
             None  # set via set_coordinator()
@@ -324,7 +329,17 @@ class FactorEngine:
     ) -> None:
         """Process historical trades for tick indicator warmup.
 
-        This replaces the old _on_bootstrap_trades callback.
+        Uses Rust batch processing (bootstrap_trade_rate) for all tick
+        indicators — processes 200k+ trades in ~50ms instead of ~13s
+        via Python loop.  Follows the same pattern as BarsBuilder's
+        ingest_trades_batch: single Rust call, fast results.
+
+        For each tick indicator with a window, this:
+        1. Extracts timestamps from trades
+        2. Calls Rust bootstrap function (single batch call)
+        3. Gets back per-second snapshots + remaining window state
+        4. Creates FactorSnapshot objects and batch-writes to ClickHouse
+        5. Loads remaining timestamps into the indicator for seamless live merge
 
         Args:
             symbol: Ticker symbol
@@ -344,30 +359,224 @@ class FactorEngine:
                 f"_process_bootstrap_trades - {symbol}: TickerState not found after 2s, skipping"
             )
             # Signal completion anyway
-            tick_evt = self._tick_bootstrap_events.get(symbol)
+            tick_key = f"{symbol}:tick"
+            tick_evt = self._tick_bootstrap_events.get(tick_key)
             if tick_evt:
                 tick_evt.set()
             return
 
+        if not state.tick_indicators:
+            # No tick indicators — just set watermark and return
+            if trades:
+                state.last_bootstrap_trade_ms = int(trades[-1][0])
+            tick_key = f"{symbol}:tick"
+            tick_evt = self._tick_bootstrap_events.get(tick_key)
+            if tick_evt:
+                tick_evt.set()
+            return
+
+        t0 = time.perf_counter()
         logger.info(
-            f"_process_bootstrap_trades - {symbol}: feeding {len(trades)} trades to tick indicators"
+            f"_process_bootstrap_trades - {symbol}: processing {len(trades)} trades "
+            f"via Rust batch warmup"
         )
 
-        # Feed trades and simulate 1s compute intervals
+        # Extract timestamps from trades
+        timestamps = [int(t) for t, _, _ in trades]
+
+        # Batch-process each tick indicator via Rust
+        all_snapshots: list[tuple[str, int, float]] = (
+            []
+        )  # (indicator_name, ts_ms, value)
+        max_ts_ms = max(timestamps) if timestamps else 0
+
+        for ind in state.tick_indicators:
+            try:
+                # Use Rust batch function for indicators with window_ms
+                if hasattr(ind, "window_ms"):
+                    from jerry_trader._rust import bootstrap_trade_rate
+
+                    result = bootstrap_trade_rate(
+                        timestamps,
+                        window_ms=ind.window_ms,
+                        min_trades=getattr(ind, "min_trades", 5),
+                        compute_interval_ms=1000,
+                    )
+
+                    # Collect snapshots
+                    for ts_ms, rate in result.snapshots:
+                        all_snapshots.append((ind.name, ts_ms, rate))
+
+                    # Load remaining timestamps into indicator for live merge
+                    # This is the "meeting point" — indicator state picks up
+                    # where the Rust bootstrap left off
+                    if hasattr(ind, "_timestamps") and result.remaining_timestamps:
+                        ind._timestamps.extend(result.remaining_timestamps)
+                        ind._last_value = (
+                            result.snapshots[-1][1] if result.snapshots else None
+                        )
+
+                    logger.info(
+                        f"_process_bootstrap_trades - {symbol}/{ind.name}: "
+                        f"Rust batch produced {len(result.snapshots)} snapshots, "
+                        f"loaded {len(result.remaining_timestamps)} remaining timestamps"
+                    )
+                else:
+                    # Fallback for non-windowed tick indicators: use Python loop
+                    self._warmup_indicator_python(symbol, ind, trades, all_snapshots)
+            except Exception as e:
+                logger.error(
+                    f"_process_bootstrap_trades - {symbol}/{ind.name}: "
+                    f"batch warmup failed: {e}, falling back to Python loop"
+                )
+                self._warmup_indicator_python(symbol, ind, trades, all_snapshots)
+
+        # Track the last trade timestamp for dedup
+        state.last_bootstrap_trade_ms = max_ts_ms
+
+        elapsed = (time.perf_counter() - t0) * 1000
+        logger.info(
+            f"_process_bootstrap_trades - {symbol}: Rust batch warmup done "
+            f"in {elapsed:.0f}ms, {len(all_snapshots)} total snapshots, "
+            f"last_trade_ts={max_ts_ms}"
+        )
+
+        # Signal that tick bootstrap is complete
+        tick_key = f"{symbol}:tick"
+        tick_evt = self._tick_bootstrap_events.get(tick_key)
+        if tick_evt:
+            tick_evt.set()
+
+        # Batch write tick-based factor snapshots to ClickHouse
+        if all_snapshots and self.storage:
+            # Group by timestamp to create FactorSnapshots with multiple factors
+            from collections import defaultdict
+
+            ts_factors: dict[int, dict[str, float]] = defaultdict(dict)
+            for ind_name, ts_ms, value in all_snapshots:
+                ts_factors[ts_ms][ind_name] = value
+
+            snapshots = [
+                FactorSnapshot(
+                    symbol=symbol,
+                    timestamp_ns=ts_ms * 1_000_000,
+                    factors=factors,
+                )
+                for ts_ms, factors in sorted(ts_factors.items())
+            ]
+
+            snapshots_with_tf = [(s, "trade") for s in snapshots]
+            count = self.storage.write_batch(snapshots_with_tf)
+            logger.info(
+                f"_process_bootstrap_trades - {symbol}: wrote {count} trade factor rows "
+                f"from {len(snapshots)} snapshots"
+            )
+
+    def _warmup_indicator_python(
+        self,
+        symbol: str,
+        ind: "TickIndicator",
+        trades: list[tuple[int, float, int]],
+        all_snapshots: list[tuple[str, int, float]],
+    ) -> None:
+        """Fallback Python loop warmup for non-windowed tick indicators."""
+        last_compute_ms = 0
+        for ts_ms, price, size in trades:
+            ts_ms = int(ts_ms)
+            ind.on_tick(ts_ms, float(price), int(size))
+            if last_compute_ms == 0:
+                last_compute_ms = ts_ms
+            elif ts_ms - last_compute_ms >= 1000:
+                value = ind.compute(ts_ms)
+                if value is not None:
+                    all_snapshots.append((ind.name, ts_ms, value))
+                last_compute_ms = ts_ms
+
+    def _tick_warmup_background(
+        self, symbol: str, coordinator: BootstrapCoordinator
+    ) -> None:
+        """Wait for trades from coordinator and run tick warmup.
+
+        Used when bars already exist (immediate bar warmup path) but tick
+        indicators still need trades from BarsBuilder's trades_backfill.
+        Runs in a background thread to avoid blocking the coordinator.
+        """
+        trades = []
+        for _ in range(300):  # 30 s timeout (same as _run_bootstrap)
+            trades = coordinator.get_trades(symbol)
+            if trades:
+                break
+            time.sleep(0.1)
+
+        if trades:
+            logger.info(f"_tick_warmup_background - {symbol}: got {len(trades)} trades")
+            self._process_bootstrap_trades(symbol, trades)
+        else:
+            logger.warning(
+                f"_tick_warmup_background - {symbol}: no trades after 30s timeout"
+            )
+
+        coordinator.report_done(symbol, "tick_warmup", "factor_engine")
+
+        # Mark tick bootstrap done and replay buffered ticks
+        tick_key = f"{symbol}:tick"
+        self._bootstrap_done.add(tick_key)
+        tick_evt = self._tick_bootstrap_events.get(tick_key)
+        if tick_evt:
+            tick_evt.set()
+        self._replay_tick_buffer(symbol)
+
+        logger.info(f"_tick_warmup_background - {symbol}: complete")
+
+    def _replay_tick_buffer(self, symbol: str) -> None:
+        """Replay WS ticks that were buffered during bootstrap.
+
+        Called after tick warmup completes.  Drains the per-symbol buffer
+        and feeds ticks to indicators, bridging the gap between the last
+        bootstrap trade and the first live WS tick.
+
+        Computes factors directly and batch-writes to ClickHouse (synchronous)
+        rather than going through the live _on_tick path which publishes to
+        Redis — no consumer is listening yet during replay, so Redis publishes
+        would be lost.
+        """
+        with self._tick_buffer_lock:
+            buffered = self._tick_buffer.pop(symbol, [])
+
+        if not buffered:
+            return
+
+        state = self.ticker_states.get(symbol)
+        if not state:
+            return
+
+        cutoff = state.last_bootstrap_trade_ms
+        to_replay = [(ts, p, s) for ts, p, s in buffered if ts > cutoff]
+
+        if not to_replay:
+            logger.info(
+                f"_replay_tick_buffer - {symbol}: no ticks to replay "
+                f"(buffered={len(buffered)}, all <= cutoff={cutoff})"
+            )
+            return
+
+        logger.info(
+            f"_replay_tick_buffer - {symbol}: replaying {len(to_replay)} ticks "
+            f"(buffered={len(buffered)}, cutoff={cutoff})"
+        )
+
+        # Feed ticks to indicators and compute factors every 1s
         snapshots: list[FactorSnapshot] = []
         last_compute_ms = 0
         max_ts_ms = 0
 
-        for ts_ms, price, size in trades:
+        for ts_ms, price, size in to_replay:
             ts_ms = int(ts_ms)
             max_ts_ms = max(max_ts_ms, ts_ms)
             for ind in state.tick_indicators:
                 ind.on_tick(ts_ms, float(price), int(size))
 
-            # Compute every 1000ms
-            if last_compute_ms == 0:
-                last_compute_ms = ts_ms
-            elif ts_ms - last_compute_ms >= 1000:
+            if ts_ms - last_compute_ms >= 1000:
                 factors: dict[str, float] = {}
                 for ind in state.tick_indicators:
                     value = ind.compute(ts_ms)
@@ -383,28 +592,18 @@ class FactorEngine:
                     )
                 last_compute_ms = ts_ms
 
-        # Track the last trade timestamp to avoid duplicate processing
-        state.last_bootstrap_trade_ms = max_ts_ms
-        logger.debug(
-            f"_process_bootstrap_trades - {symbol}: last_bootstrap_trade_ms set to {max_ts_ms}"
-        )
-
-        # Signal that tick bootstrap is complete
-        tick_evt = self._tick_bootstrap_events.get(symbol)
-        if tick_evt:
-            tick_evt.set()
-            logger.debug(
-                f"_process_bootstrap_trades - {symbol}: tick bootstrap event set"
-            )
-
-        # Batch write tick-based factor snapshots to ClickHouse
+        # Synchronous batch write so REST query will find these rows
         if snapshots and self.storage:
             snapshots_with_tf = [(s, "trade") for s in snapshots]
             count = self.storage.write_batch(snapshots_with_tf)
             logger.info(
-                f"_process_bootstrap_trades - {symbol}: wrote {count} trade factor rows "
+                f"_replay_tick_buffer - {symbol}: wrote {count} replay factor rows "
                 f"from {len(snapshots)} snapshots"
             )
+
+        # Update dedup watermark so live _on_tick skips these replayed ticks
+        state.last_bootstrap_trade_ms = max_ts_ms
+        state.last_publish_ms = max_ts_ms  # prevent throttle misfire
 
     def _run_ws_loop(self) -> None:
         """Run the WebSocket event loop (only if we own the manager)."""
@@ -503,9 +702,10 @@ class FactorEngine:
                     self._bootstrap_events[
                         symbol
                     ].set()  # Already done for existing ticker
-                if symbol not in self._tick_bootstrap_events:
-                    self._tick_bootstrap_events[symbol] = threading.Event()
-                    self._tick_bootstrap_events[symbol].set()  # Already done
+                tick_key = f"{symbol}:tick"
+                if tick_key not in self._tick_bootstrap_events:
+                    self._tick_bootstrap_events[tick_key] = threading.Event()
+                    self._tick_bootstrap_events[tick_key].set()  # Already done
             else:
                 # Create timeframe states for each timeframe (new ticker case)
                 registry = get_factor_registry()
@@ -541,8 +741,9 @@ class FactorEngine:
                 # Create bootstrap Events (new ticker case)
                 if symbol not in self._bootstrap_events:
                     self._bootstrap_events[symbol] = threading.Event()
-                if symbol not in self._tick_bootstrap_events:
-                    self._tick_bootstrap_events[symbol] = threading.Event()
+                tick_key = f"{symbol}:tick"
+                if tick_key not in self._tick_bootstrap_events:
+                    self._tick_bootstrap_events[tick_key] = threading.Event()
 
                 # Subscribe to tick stream (timeframe-agnostic) - only for new tickers
                 self._subscribe_ticks(symbol)
@@ -565,7 +766,7 @@ class FactorEngine:
                 logger.info(
                     f"add_ticker - {symbol}: all TFs have bars, running immediate warmup"
                 )
-                # Run warmup immediately without waiting for coordinator
+                # Run bar warmup immediately without waiting for coordinator
                 for tf in tfs_to_process:
                     tf_state = state.timeframe_states.get(tf)
                     if tf_state and tf_state.bar_indicators:
@@ -577,15 +778,44 @@ class FactorEngine:
                         if bar_evt:
                             bar_evt.set()
 
-                # Mark tick bootstrap as done for new tickers
-                if not new_timeframes_for_existing:
+                # Tick warmup: wait for trades from coordinator (BarsBuilder
+                # runs trades_backfill in a parallel thread).
+                # Bar warmup is done (bars exist in ClickHouse), but tick
+                # indicators need trades from BarsBuilder's REST fetch.
+                # Spawn background thread to avoid blocking coordinator.
+                if self._coordinator is not None and state.tick_indicators:
+                    coordinator = self._coordinator
+                    coordinator.register_consumer(
+                        symbol, "tick_warmup", "factor_engine"
+                    )
+                    for tf in tfs_to_process:
+                        coordinator.register_consumer(
+                            symbol, f"bar_warmup:{tf}", "factor_engine"
+                        )
+                        coordinator.report_done(
+                            symbol, f"bar_warmup:{tf}", "factor_engine"
+                        )
+
+                    t = threading.Thread(
+                        target=self._tick_warmup_background,
+                        args=(symbol, coordinator),
+                        daemon=True,
+                        name=f"FactorEngine-TickWarmup-{symbol}",
+                    )
+                    t.start()
+                else:
+                    # No tick indicators — mark tick bootstrap done immediately
                     tick_key = f"{symbol}:tick"
                     self._bootstrap_done.add(tick_key)
                     tick_evt = self._tick_bootstrap_events.get(tick_key)
                     if tick_evt:
                         tick_evt.set()
+                    self._replay_tick_buffer(symbol)
 
-                logger.info(f"add_ticker - {symbol}: immediate warmup complete")
+                logger.info(
+                    f"add_ticker - {symbol}: immediate bar warmup complete, "
+                    f"tick warmup running in background"
+                )
             else:
                 # Start bootstrap in background thread using BootstrapCoordinator
                 # For existing tickers with new TFs, we need to wait for bars
@@ -653,6 +883,19 @@ class FactorEngine:
             state = self.ticker_states[symbol]
             timeframes = list(state.timeframe_states.keys())
             del self.ticker_states[symbol]
+
+        # Clear bootstrap state so re-subscribe triggers fresh warmup
+        for tf in timeframes:
+            bar_key = f"{symbol}:{tf}"
+            self._bootstrap_done.discard(bar_key)
+            bar_evt = self._bootstrap_events.pop(bar_key, None)
+            if bar_evt:
+                bar_evt.clear()
+        tick_key = f"{symbol}:tick"
+        self._bootstrap_done.discard(tick_key)
+        tick_evt = self._tick_bootstrap_events.pop(tick_key, None)
+        if tick_evt:
+            tick_evt.clear()
 
         # Unsubscribe from all bar channels
         if self._pubsub:
@@ -851,13 +1094,14 @@ class FactorEngine:
                 logger.info(f"_run_bootstrap - {symbol}: tick_warmup complete")
 
                 # Mark tick bootstrap as done
+                self._bootstrap_done.add(f"{symbol}:tick")
                 tick_key = f"{symbol}:tick"
-                self._bootstrap_done.add(tick_key)
                 tick_evt = self._tick_bootstrap_events.get(tick_key)
                 if tick_evt:
                     tick_evt.set()
 
-            # 3. Wait for bars ready and process bar warmup per timeframe
+                # Replay WS ticks buffered during bootstrap
+                self._replay_tick_buffer(symbol)
             state = self.ticker_states.get(symbol)
             if state:
                 for tf in all_timeframes:
@@ -931,7 +1175,7 @@ class FactorEngine:
             timeframe: Timeframe for bar-based factors (e.g., '1m', '5m').
                        'trade' or None for tick-based factors only.
         """
-        # Always pre-register tick bootstrap
+        # Always pre-register tick bootstrap (key format: "symbol:tick")
         tick_key = f"{symbol}:tick"
         if tick_key not in self._tick_bootstrap_events:
             self._tick_bootstrap_events[tick_key] = threading.Event()
@@ -962,6 +1206,15 @@ class FactorEngine:
         Returns True if bootstrap completed, False if timed out or bootstrap
         was not pre-registered (indicating FactorEngine hasn't started processing).
         """
+        # If ticker is not tracked, no bootstrap will happen - return immediately
+        with self._states_lock:
+            if symbol not in self.ticker_states:
+                logger.warning(
+                    f"wait_for_bootstrap - {symbol}: ticker not tracked, "
+                    "no bootstrap will happen"
+                )
+                return False
+
         # For tick-based factors (timeframe='trade' or None), only check tick bootstrap
         if timeframe == "trade" or timeframe is None:
             tick_key = f"{symbol}:tick"
@@ -1254,12 +1507,17 @@ class FactorEngine:
         if not symbol:
             return
 
-        # Skip processing until tick bootstrap is complete
+        # Buffer ticks until tick bootstrap is complete, then replay.
         tick_key = f"{symbol}:tick"
         if tick_key not in self._bootstrap_done:
-            # logger.debug(
-            #     f"_on_tick: skipping tick for {symbol} - bootstrap not complete"
-            # )
+            ts_ms_val = data.get("timestamp")
+            price_val = data.get("price")
+            size_val = data.get("size", 0)
+            if ts_ms_val is not None and price_val is not None:
+                with self._tick_buffer_lock:
+                    self._tick_buffer.setdefault(symbol, []).append(
+                        (int(ts_ms_val), float(price_val), int(size_val))
+                    )
             return
 
         with self._states_lock:

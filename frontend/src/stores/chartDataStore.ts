@@ -68,6 +68,10 @@ type ChartDataState = {
   // Per-instance + symbol bar data (keyed by "moduleId::TICKER")
   symbolBars: Record<string, SymbolChartState>;
 
+  // Per-ticker fetch trigger — incremented on re-subscribe so all
+  // modules showing the same ticker re-fetch data.
+  fetchTriggers: Record<string, number>;
+
   // Actions — moduleId scopes state per chart instance
   fetchBars: (moduleId: string, ticker: string, timeframe: ChartTimeframe) => Promise<void>;
   updateFromTrade: (
@@ -81,6 +85,8 @@ type ChartDataState = {
   /** Broadcast a bar update to ALL chart instances showing this ticker+timeframe */
   broadcastBarUpdate: (ticker: string, timeframe: string, bar: OHLCVBar) => void;
   clearSymbol: (moduleId: string, symbol: string) => void;
+  /** Clear all bars for a ticker across all modules (cheat method for unsubscribe) */
+  clearBarsForTicker: (ticker: string) => void;
   reset: () => void;
 };
 
@@ -132,6 +138,7 @@ const MIN_REFETCH_INTERVAL: Record<ChartTimeframe, number> = {
 
 export const useChartDataStore = create<ChartDataState>()((set, get) => ({
   symbolBars: {},
+  fetchTriggers: {},
 
   // ========================================================================
   // Fetch historical bars
@@ -430,6 +437,20 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
     set((s) => {
       const next = { ...s.symbolBars };
       delete next[chartStoreKey(moduleId, symbol)];
+      return { symbolBars: next };
+    });
+  },
+
+  clearBarsForTicker: (ticker: string) => {
+    const tickerUpper = ticker.toUpperCase();
+    set((s) => {
+      // Find all keys that contain this ticker (format: "moduleId::TICKER")
+      const next = { ...s.symbolBars };
+      for (const key of Object.keys(next)) {
+        if (key.endsWith(`::${tickerUpper}`)) {
+          delete next[key];
+        }
+      }
       return { symbolBars: next };
     });
   },

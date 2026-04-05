@@ -585,6 +585,28 @@ class JerryTraderBackendStarter:
         else:
             self.agent_bff = None
 
+        if "SignalEngine" in self.roles:
+            import redis as redis_lib
+
+            from jerry_trader.services.signal.engine import SignalEngine
+
+            role_cfg = self.roles["SignalEngine"]
+            redis_cfg = role_cfg.get("redis", {})
+            signal_redis = redis_lib.Redis(
+                host=redis_cfg.get("host", "127.0.0.1"),
+                port=redis_cfg.get("port", 6379),
+                db=redis_cfg.get("db", 0),
+            )
+            self.signal_engine = SignalEngine(
+                redis_client=signal_redis,
+                rules_dir=role_cfg.get("rules_dir", "config/rules/"),
+                symbols=role_cfg.get("symbols"),
+                timeframes=role_cfg.get("timeframes"),
+            )
+            self._services.append(("SignalEngine", self.signal_engine))
+        else:
+            self.signal_engine = None
+
         logger.info(f"Initialized {len(self._services)} services")
 
     def is_trading_day_today(self) -> bool:
@@ -659,6 +681,10 @@ class JerryTraderBackendStarter:
         if self.factor_engine:
             self.factor_engine.stop()
             logger.info("FactorEngine stopped")
+
+        if self.signal_engine:
+            self.signal_engine.stop()
+            logger.info("SignalEngine stopped")
 
         if self.bars_builder:
             self.bars_builder.stop()
@@ -915,6 +941,11 @@ class JerryTraderBackendStarter:
             agent_bff_thread.start()
             self._threads.append(agent_bff_thread)
             logger.info("AgentBFF started")
+
+        # Start SignalEngine if enabled (it creates its own background thread)
+        if self.signal_engine:
+            self.signal_engine.start()
+            logger.info("SignalEngine started")
 
         # Run BFF in the main thread (blocking) if enabled
         if self.bff:

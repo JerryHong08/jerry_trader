@@ -96,6 +96,12 @@ machines:
         clickhouse: "clickhouse-a"
         timeframe: "1m"
         # influxdb: "influxdb-a"
+      SignalEngine:
+        enabled: true
+        redis: "redis-a"
+        rules_dir: "config/rules/"
+        # symbols: []  # empty = subscribe to all
+        # timeframes: ["trade", "10s", "1m", "5m"]
 
   mibuntu:
     limit: "market_open"    # market_open | market_close | null (never stop)

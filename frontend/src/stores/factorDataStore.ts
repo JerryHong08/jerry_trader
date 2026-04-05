@@ -1,7 +1,7 @@
 /**
  * Factor Data Zustand Store
  *
- * Manages factor data (EMA, TradeRate, etc.) for the FactorChartModule.
+ * Manages factor data (EMA, TradeRate, etc.) for chart panels.
  *
  * Responsibilities:
  *   - Fetch historical factors from ChartBFF REST API (bootstrap)

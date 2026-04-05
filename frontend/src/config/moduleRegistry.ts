@@ -5,7 +5,6 @@ import { OverviewChartModule } from '../components/OverviewChartModule';
 import { StockDetail } from '../components/StockDetail';
 import { PortfolioModule } from '../components/PortfolioModule';
 import NewsRoom from '../components/NewsRoom';
-import { FactorChartModule } from '../components/FactorChartModule'; // Legacy - kept for reference
 import ChartPanelSystem from '../components/ChartPanelSystem';
 import type { ModuleConfig, ModuleType } from '../types';
 
@@ -67,14 +66,5 @@ export const moduleRegistry: Record<ModuleType, ModuleConfig> = {
     component: NewsRoom,
     defaultSize: { width: 800, height: 600 },
     supportSync: false,
-  },
-  'factor-chart': {
-    type: 'factor-chart',
-    name: 'Factor Chart',
-    description: 'Legacy factor chart (use Chart panel instead)',
-    component: FactorChartModule,
-    defaultSize: { width: 800, height: 500 },
-    supportSync: true,
-    supportSearch: true,
   },
 };

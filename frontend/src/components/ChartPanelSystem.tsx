@@ -9,7 +9,7 @@
  *
  * Data Flow:
  * - Bars: chartDataStore (shared with legacy ChartModule)
- * - Factors: factorDataStore (shared with legacy FactorChartModule)
+ * - Factors: factorDataStore
  * - Real-time: tickDataStore trade/quote subscriptions
  */
 

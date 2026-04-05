@@ -379,7 +379,7 @@ export const useTickDataStore = create<TickDataState>()((set, get) => ({
   },
 
   // ========================================================================
-  // Factor Subscriptions (for FactorChartModule)
+  // Factor Subscriptions (for ChartPanelSystem factor panels)
   // ========================================================================
 
   subscribeFactors: (symbols: string | string[], timeframe: string = 'trade') => {

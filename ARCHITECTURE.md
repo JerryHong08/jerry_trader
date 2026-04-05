@@ -1,8 +1,8 @@
 # Jerry Trader — Architecture Documentation
 
-> **Status: IMPLEMENTED (Stage 2.5 Complete)**
-> This document describes the current architecture of the Jerry Trader system.
-> The restructuring from the old `packages/` layout to the layered architecture is complete.
+> **Status: STAGE 3 IN PROGRESS**
+> Domain Layer populated, Factor Engine operational, Panel Chart System complete.
+> ATC-R Agent Layer design finalized, implementation starting.
 
 ---
 
@@ -15,7 +15,7 @@
 5. [Bootstrap Coordinator V2](#5-bootstrap-coordinator-v2)
 6. [Rust Extension Layout](#6-rust-extension-layout)
 7. [Data Flow](#7-data-flow)
-8. [Stage 3 & 4 Roadmap](#8-stage-3--4-roadmap)
+8. [ATC-R Agent Layer](#8-atc-r-agent-layer)
 9. [Development Guidelines](#9-development-guidelines)
 
 ---
@@ -34,9 +34,9 @@ The core strategy targets **short-term pre-market momentum** (gap-ups, float awa
 - Serve all of this to a React/TradingView frontend over WebSocket
 - Support **full replay mode** with a Rust-backed distributed clock for cross-machine time sync
 
-**Current Stage:** Stage 2.5 (Chart module complete, replay clock synchronized)
+**Current Stage:** Stage 3 (Domain Layer populated, Factor Engine operational)
 
-**Next Stage:** Stage 3 (Strategy engine, risk management, ML pipeline)
+**Next Stage:** ATC-R Agent Layer (Rule Engine + Agent Think + Backtest)
 
 ---
 
@@ -48,10 +48,10 @@ The core strategy targets **short-term pre-market momentum** (gap-ups, float awa
 │                                                                 │
 │  • ChartBFF          (WebSocket, bar serving — port 8000)       │
 │  • BarsBuilder       (Rust BarBuilder → ClickHouse)             │
+│  • FactorEngine      (Multi-timeframe indicators)               │
+│  • Rule Engine       (ATC-R Strategy DSL matching)              │
 │  • OrderRuntime      (IBKR adapter, FastAPI — port 8888)        │
 │  • GlobalClock       (ReplayClock master + Redis heartbeat)     │
-│  • [Stage3] FactorEngine                                        │
-│  • [Stage3] StateEngine                                         │
 │  • Frontend (pnpm dev / built static)                           │
 │                                                                 │
 │  Redis A  │  ClickHouse A  │  Postgres A                        │
@@ -64,19 +64,19 @@ The core strategy targets **short-term pre-market momentum** (gap-ups, float awa
 │                      │        │                          │
 │  • JerryTraderBFF    │        │  • NewsWorker            │
 │    (market_bff)      │        │  • NewsProcessor (LLM)   │
-│    (port 5001)       │        │  • AgentBFF (port 5003)  │
-│  • SnapshotProcessor │        │  • [Stage4] AgentRuntime │
-│  • StaticDataWorker  │        │                          │
-│  • Collector         │        │  Redis B (shared w/ B)   │
-│  • Replayer          │        │  Postgres B              │
-│                      │        └──────────────────────────┘
-│  Redis B  │ ClickHouse│
-└──────────────────────┘
+│    (port 5001)       │        │  • Agent Reasoner        │
+│  • SnapshotProcessor │        │    (ATC-R LLM thinking)  │
+│  • StaticDataWorker  │        │  • AgentBFF (port 5003)  │
+│  • Collector         │        │  • Backtest Engine       │
+│  • Replayer          │        │                          │
+│                      │        │  Redis B (shared w/ B)   │
+│  Redis B  │ ClickHouse│       │  Postgres B              │
+└──────────────────────┘        └──────────────────────────┘
 ```
 
-**Redis A** — tick data streams, bar streams, ChartBFF pub/sub, clock heartbeats
+**Redis A** — tick data streams, bar streams, ChartBFF pub/sub, clock heartbeats, factor streams
 **Redis B** — snapshot streams, news cache, static data, order/portfolio pub/sub
-**ClickHouse** — OHLCV bars (persistent), market snapshot history
+**ClickHouse** — OHLCV bars (persistent), market snapshot history, factor snapshots
 **Postgres** — order history, news articles, LLM results
 **Parquet (local lake)** — raw tick data for replay (Machine A path)
 
@@ -123,11 +123,15 @@ python/
 │       │       └── momo_token.py
 │       │
 │       ├── domain/                      # ── DOMAIN LAYER (pure business logic) ────
-│       │   ├── market/                  # [Stage3] Tick, Bar, Snapshot value objects
-│       │   ├── order/                   # [Stage3] Order, Fill, Contract domain models
+│       │   ├── market/                  # Bar, BarPeriod, Tick, Snapshot value objects
+│       │   │   ├── bar.py               # Bar value object with OHLCV fields
+│       │   │   └── bar_period.py        # BarPeriod with to_timedelta(), from_str()
+│       │   ├── order/                   # Order, Fill, Contract domain models
+│       │   │   ├── order.py             # Order, OrderState value objects
+│       │   │   └── contract.py          # Contract domain model
 │       │   ├── strategy/                # [Stage3] Signal, Risk domain models
-│       │   └── factor/                  # [Stage3] Factor value objects
-│       │   # NOTE: Currently empty placeholders, will be populated in Stage 3
+│       │   └── factor/                  # FactorSnapshot value object
+│       │       └── factor_snapshot.py   # FactorSnapshot with symbol, timeframe, factors
 │       │
 │       ├── services/                    # ── SERVICE / USE-CASE LAYER ──────────────
 │       │   │                            #    Stateful workers, no HTTP/WS here
@@ -257,7 +261,7 @@ The codebase follows a **layered architecture** with strict dependency rules:
 - ✅ `shared/logging/logger.py` moved from `shared/utils/`
 - ✅ Platform layer clean (no service imports)
 - ✅ **Bootstrap Coordinator V2** implemented (direct service calls, no Redis Streams)
-- ⚠️ Domain layer is placeholder (empty `__init__.py` files only)
+- ✅ **Domain Layer** populated with Bar, BarPeriod, Order, OrderState, FactorSnapshot
 - ⚠️ `config_builder.py` still in `platform/config/` (should be merged with `config.py`)
 
 ---
@@ -506,59 +510,146 @@ AgentBFF ──► Frontend / [Stage4] AgentRuntime
 
 ---
 
-## 7. Stage 3 & 4 Roadmap
+## 8. ATC-R Agent Layer
 
-### Stage 3 — Strategy Engine (Next)
+ATC-R (Agent Trading Copilot - Rule-driven) is inspired by ACT-R cognitive architecture. The key insight: **Agent doesn't poll raw data — a Rule Engine monitors factors and activates Agent only when conditions match.**
 
-**Goals:**
-- Rewrite StateEngine and FactorEngine in Rust for performance
-- Implement real-time risk management engine
-- Build ML pipeline for breakout-compute-analyze context model
+### Architecture Overview
 
-**Tasks:**
-1. **Populate Domain Layer**
-   - Create `domain/market/tick.py`, `bar.py`, `snapshot.py`
-   - Create `domain/order/order.py`, `contract.py`
-   - Create `domain/strategy/signal.py`, `risk.py`
-   - Create `domain/factor/factor.py`
-
-2. **Rust Rewrites**
-   - `rust/src/state_engine.rs` — high-frequency tick state tracking
-   - `rust/src/factor_engine.rs` — factor computation engine
-   - Python wrappers in `services/strategy/` and `services/factor/`
-
-3. **Risk Management**
-   - `services/strategy/risk_engine.py` — position limits, drawdown checks
-   - Integration with order execution
-
-4. **ML Pipeline**
-   - Expand `runtime/ml/` with training/evaluation workflows
-   - Historical context model for breakout detection
-   - Integrate with FactorEngine
-
-5. **Orchestration**
-   - Pre-locate tickers fitting strategy conditions
-   - Strategy orchestrator for sequenced replay jumps
-   - Backtest visualization
-
-### Stage 4 — AI Agent Layer
-
-**Goals:**
-- Event-driven system with Redis streams
-- Agent loop with tool dispatch and memory
-- RPC for cross-service tool calls
-
-**Structure:**
 ```
-apps/agent_app/          ← AgentBFF HTTP + WebSocket interface
-services/agent/          ← (new) agent loop, tool dispatch, memory
-    ├── agent.py         ← core agent loop
-    ├── tools.py         ← tool registry (wraps existing services)
-    ├── memory.py        ← short + long-term memory store
-    └── planner.py       ← planning module
-platform/messaging/rpc/  ← Redis-based RPC for cross-service tool calls
-skills/                  ← Markdown skill instruction files (already at root)
+┌─────────────────────────────────────────────────────┐
+│                 ATC-R Agent System                  │
+├─────────────────────────────────────────────────────┤
+│                                                     │
+│  ┌─────────────────────────────────────────────┐   │
+│  │ Layer 1: Rule Engine (always-on, low-lat)   │   │
+│  │                                             │   │
+│  │   Strategy DSL Rules (backtest optimized)   │   │
+│  │   ├─ Factor threshold triggers              │   │
+│  │   ├─ News classifier triggers               │   │
+│  │   └─ Pattern: IF condition THEN activate    │   │
+│  │                                             │   │
+│  │   Conflict Resolution: highest utility wins │   │
+│  │                                             │   │
+│  └─────────────────────────────────────────────┘   │
+│                        ↓                           │
+│                   Activation Event                 │
+│                   {rule_id, symbol, context}       │
+│                        ↓                           │
+│  ┌─────────────────────────────────────────────┐   │
+│  │ Layer 2: Agent Think (on-demand, LLM)       │   │
+│  │                                             │   │
+│  │   State: idle → thinking → done             │   │
+│  │                                             │   │
+│  │   1. Context Aggregator                     │   │
+│  │      - Gather factors, news, trades         │   │
+│  │      - Time window: last 5min               │   │
+│  │                                             │   │
+│  │   2. LLM Reasoning                          │   │
+│  │      - Per-rule prompt template             │   │
+│  │      - Deep analysis → action               │   │
+│  │                                             │   │
+│  └─────────────────────────────────────────────┘   │
+│                        ↓                           │
+│  ┌─────────────────────────────────────────────┐   │
+│  │ Layer 3: Action                              │   │
+│  │                                             │   │
+│  │   - Notify (Telegram/Discord/Webhook)       │   │
+│  │   - Generate Widget (template-based)        │   │
+│  │   - Trigger downstream rule                 │   │
+│  │                                             │   │
+│  └─────────────────────────────────────────────┘   │
+│                                                     │
+│  ═══════════════════════════════════════════════   │
+│  Offline: Backtest Engine                          │
+│  - Optimize rule thresholds                        │
+│  - Validate prompt templates                       │
+│  - Simulate agent decisions                        │
+│                                                     │
+└─────────────────────────────────────────────────────┘
 ```
+
+### Rule Schema (Strategy DSL)
+
+```yaml
+# Example: Volume Spike + EMA Crossover Strategy
+id: vol_spike_ema
+name: "Volume spike with EMA crossover"
+
+# Trigger conditions (backtest optimized thresholds)
+trigger:
+  type: AND
+  conditions:
+    - factor: volume_ratio_5m
+      op: gt
+      value: 3.0        # Optimized via backtest
+    - factor: price
+      op: cross_above
+      target: ema_20
+  window: 60s          # Conditions must occur within 60s
+
+# Utility score (learned from backtest)
+utility: 0.85
+
+# Context to gather when triggered
+context:
+  factors: [ema_20, volume_ratio_5m, trade_rate]
+  factor_history: 5m
+  recent_news: 3
+  recent_trades: 20
+
+# Pre-set prompt template for this rule
+prompt_template: |
+  You are analyzing a momentum signal for {{symbol}}.
+  Trigger: Volume spike ({{volume_ratio_5m}}x) + price crossed above EMA20.
+  Analyze: Is this sustained? Key levels? Recommended action?
+  Output as JSON: {signal_quality, action, message, key_levels}
+
+# Allowed actions
+actions:
+  - notify
+  - create_widget
+  - set_alert
+```
+
+### Implementation Structure
+
+```
+python/src/jerry_trader/agent/
+  rules/
+    schema.py           # Rule Pydantic models
+    parser.py           # YAML/JSON parser
+    storage.py          # Rule DB storage
+  engine/
+    matcher.py          # Pattern matching
+    resolver.py         # Conflict resolution
+    executor.py         # Trigger execution
+  context/
+    aggregator.py       # Context gathering
+  reasoner/
+    llm_client.py       # DeepSeek/Kimi API
+    prompts.py          # Template rendering
+    parser.py           # Output parsing
+  backtest/
+    simulator.py        # Rule simulation
+    optimizer.py        # Threshold optimization
+    evaluator.py        # Decision quality metrics
+  bff/
+    main.py             # FastAPI app
+    websocket.py        # WS handler
+```
+
+### Why This Design
+
+| Concern | Solution |
+|---------|----------|
+| Agent latency | Rule Engine runs continuously, catches signals fast |
+| LLM cost | Agent only activated on significant events |
+| Strategy trust | Rules are backtest-optimized, not ad-hoc |
+| Explainability | Each activation has clear trigger + prompt |
+| Scalability | Multiple rules monitor multiple symbols |
+
+See [roadmap/atcr-agent-system.md](roadmap/atcr-agent-system.md) for detailed task breakdown.
 
 ---
 

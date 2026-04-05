@@ -1,5 +1,13 @@
 # Archive
 
+## 1. Domain Layer
+
+Foundation pure business logic value objects.
+
+- [x] 1.1 Populate domain/market/ with Bar, BarPeriod models (Tick, Snapshot pending)
+- [x] 1.2 Populate domain/order/ with Order, OrderState, Fill models
+- [x] 1.4 Populate domain/factor/ with FactorSnapshot value object
+
 ## 2. Rust Core
 Performance-critical components rewritten in Rust.
 
@@ -33,6 +41,10 @@ Stateful workers and use-case implementations.
 
 - [x] 3.16 Bootstrap Coordinator V2 集成测试：10s/1m bar + 10s factor 完整流程
 
+- [x] 3.17 Factor Registry - 预配置 Factor 系统（启动时加载）
+- [x] 3.18 FactorEngine 重构 - 使用 Registry 创建 indicators
+- [~] 3.19 前端增量更新 - Dropped（前端缓存复杂度高，性价比低）
+
 ## 5. Frontend
 React/TradingView UI modules and UX improvements.
 
@@ -50,6 +62,13 @@ React/TradingView UI modules and UX improvements.
 - [x] 5.12 Demo 模式首次访问自动弹出 Layout Panel
 - [x] 5.13 页面刷新后默认全局视图 (focus-to-fit)
 
+- [x] 5.4 Unify bar chart and factor chart styles
+- [~] 5.5 Frame group feature (dropped - low ROI)
+- [x] [5.14](roadmap/panel-chart-system.md) TradingView-style panel chart system
+  - [x] 5.14.1 Real-time price chart updates from trade ticks
+  - [x] 5.14.2 TradeRate canvas stability (single fitContent)
+  - [x] 5.14.3 Overlay factor rendering timing fix
+
 ## 6. Orchestration
 
 System-wide coordination and backtest infrastructure.
@@ -58,6 +77,29 @@ System-wide coordination and backtest infrastructure.
 
 - [x] [6.1](roadmap/factor-realtime-analysis.md) Decouple trades_backfill from timeframe switch events
 
+- [x] 6.2 Configurable timeframe switch and bootstrap computation
+  - [x] 6.2.1 简化 Bootstrap 架构：删除 Redis Stream，使用 Coordinator 直接管理服务生命周期
+  - [x] 6.2.1.1 Phase 2: 修改 BootstrapCoordinator - 添加服务注册接口
+  - [x] 6.2.1.2 Phase 3: 修改 BarsBuilderService - 实现 BootstrapableService 接口
+  - [x] 6.2.1.3 Phase 4: 修改 FactorEngine - 实现 BootstrapableService 接口
+  - [x] 6.2.1.4 Phase 5: 修改 ChartBFF - 删除 XADD 逻辑
+  - [x] 6.2.1.5 Phase 6: 清理 - 删除 Redis Stream 相关代码
+- [x] 6.7 Fix timeframe switching blocking - coordinator should add new timeframes to existing bootstrap instead of returning early
+  - [x] 6.7.1 Fix FactorEngine and BarsBuilderService to bootstrap new timeframes on existing tickers
+- [x] 6.8 Cleanup flow - coordinator.cleanup() notifies all services to stop tracking ticker
+- [x] [6.9](roadmap/re-subscribe-gap-fill.md) Fix re-subscribe gap fill - use per_tf_starts for dedup
+- [x] 6.10 Fix clock synchronization - ReplayClock and TickDataReplayer shared time
+- [x] 6.11 Fix factor query - add session filter and remove FINAL
+
+## 7. AI Agent Layer
+
+ATC-R Agent System - ACT-R inspired architecture with production rules (Strategy DSL) as first-class citizens.
+
+**Phase 1: Rule Engine (Activation Layer)**
+- [~] 7.14 Redis streams migration (not needed - rules listen directly to factor stream)
+- [~] 7.15 Redis RPC (over-engineered - direct function calls sufficient)
+- [~] 7.16 Widget sandbox (Phase 4, simplified)
+- [~] 7.17 Right-click interaction (over-engineered)
 
 ## 8. Optional Features
 Enhancements and additional modules.

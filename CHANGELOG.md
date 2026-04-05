@@ -1,4 +1,19 @@
-## Unreleased (2026-03-13)
+## Unreleased
+
+### Feat
+
+- **agent**: ATC-R Agent System architecture design — Rule Engine (Strategy DSL) + Agent Think (LLM reasoning) + Backtest integration
+
+### Fix
+
+- **factor**: delay calculation now uses `clock_now_ns` (replay clock) instead of wall-clock time
+- **factor**: bar-based factor delay correctly computed as `clock_now - (bar_start + bar_duration)`
+
+### Refactor
+
+- **readme**: Added Key Features section with AI Agent Layer overview and data flow diagram
+
+## 1.4.0 (2026-04-05)
 
 ### Feat
 
@@ -8,6 +23,17 @@
 - **backend_starter**: auto-starts heartbeat publisher in `run()` when in replay mode using first available redis config; wires `RemoteClockFollower` into `MarketSnapshotReplayer` when `clock_redis` is set in Replayer role config
 - **redis_keys**: `clock_heartbeat_channel(session_id)` — canonical key `clock:heartbeat:{session_id}`
 - **config**: `clock_redis` field added (commented-out example) under `Replayer` role for cross-machine clock sync configuration
+- **domain**: `BarPeriod` value object with `to_timedelta()` and `from_str()` methods; `Order` and `OrderState` domain models
+- **frontend**: TradingView-style Panel Chart System — draggable/resizable panels, real-time price + factor overlay charts
+
+### Fix
+
+- **clock**: `ReplayClock` and `TickDataReplayer` now share time source for synchronized replay
+- **factor**: tick-based factor (trade_rate) latency reduced from ~10s to <1s via on-tick computation with 1s throttle
+- **factor**: `asyncio.sleep(0)` instead of `sleep(0.01)` for non-blocking factor stream processing
+- **factor**: ClickHouse schema — add `timeframe` to ORDER BY for multi-timeframe factor deduplication
+- **chart**: "Cannot update oldest data" error fixed — skip out-of-order data points in incremental update
+- **chart**: factor subscription persistence across WebSocket reconnects via localStorage
 
 ### Refactor
 

@@ -77,6 +77,7 @@ System-wide coordination and backtest infrastructure.
 **Infrastructure:**
 - [ ] [7.9](roadmap/factor-stream-rust-migration.md) Factor stream Rust migration - migrate from Python asyncio to Rust FactorBroadcaster when Signal Engine is introduced
 - [x] 7.10 Signal event persistence — store trigger events to ClickHouse (rule_id, symbol, trigger_time, factors). Returns computed offline via SQL JOIN with ohlcv bars. Includes SQL schema + Python storage writer.
+- [x] 7.11 Add tick price to factor Redis message — FactorEngine publishes price field alongside factors dict, SignalEngine reads it as trigger_price. Eliminates need for separate ohlcv lookup for entry price.
 ## 8. Optional Features
 
 Enhancements and additional modules.

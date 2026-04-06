@@ -614,6 +614,7 @@ class JerryTraderBackendStarter:
                 symbols=role_cfg.get("symbols"),
                 timeframes=role_cfg.get("timeframes"),
                 storage=signal_storage,
+                clickhouse_config=ch_cfg,
             )
             self._services.append(("SignalEngine", self.signal_engine))
         else:

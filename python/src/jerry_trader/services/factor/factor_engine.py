@@ -1561,9 +1561,11 @@ class FactorEngine:
 
         # Compute and publish tick factors immediately with throttle
         # This ensures low latency in high-speed replay mode
-        self._maybe_compute_tick_factors(state, ts_ms)
+        self._maybe_compute_tick_factors(state, ts_ms, float(price))
 
-    def _maybe_compute_tick_factors(self, state: "TickerState", ts_ms: int) -> None:
+    def _maybe_compute_tick_factors(
+        self, state: "TickerState", ts_ms: int, price: float
+    ) -> None:
         """Compute and publish tick factors with throttle.
 
         Called on every tick to ensure low latency. Throttles to at most
@@ -1597,6 +1599,7 @@ class FactorEngine:
                         "timestamp_ms": ts_ms,
                         "timeframe": "trade",
                         "factors": factors,
+                        "price": price,
                     }
                 )
                 self.redis_client.publish(channel, message)

@@ -121,12 +121,16 @@ class SignalEngine:
         symbols: list[str] | None = None,
         timeframes: list[str] | None = None,
         storage: Any | None = None,
+        clickhouse_config: dict | None = None,
+        return_fill_interval_sec: float = 120.0,
     ):
         self.redis_client = redis_client
         self.rules_dir = rules_dir
         self.symbols = [s.upper() for s in symbols] if symbols else []
         self.timeframes = timeframes or ["trade", "10s", "1m", "5m"]
         self._storage = storage
+        self._clickhouse_config = clickhouse_config
+        self._return_fill_interval_sec = return_fill_interval_sec
 
         # Loaded rules
         self._rules: list[Rule] = []
@@ -136,6 +140,9 @@ class SignalEngine:
         self._pubsub: redis.client.PubSub | None = None
         self._thread: threading.Thread | None = None
         self._running = threading.Event()
+
+        # Return fill background thread
+        self._return_fill_thread: threading.Thread | None = None
 
         # Trigger dedup: prevent logging same trigger within cooldown period
         # Key: (rule_id, symbol), Value: last_trigger_time_ms
@@ -196,6 +203,24 @@ class SignalEngine:
         self._thread.start()
         logger.info("SignalEngine: started")
 
+        # Start return fill background thread in live mode only.
+        # In replay mode, run ReturnFiller once after replay completes.
+        if self._clickhouse_config and not self._is_replay_mode():
+            self._return_fill_thread = threading.Thread(
+                target=self._return_fill_loop,
+                name="signal-return-fill",
+                daemon=True,
+            )
+            self._return_fill_thread.start()
+            logger.info(
+                f"SignalEngine: return fill thread started "
+                f"(interval={self._return_fill_interval_sec}s)"
+            )
+        elif self._clickhouse_config and self._is_replay_mode():
+            logger.info(
+                "SignalEngine: replay mode — return fill deferred to post-replay batch"
+            )
+
     def stop(self) -> None:
         """Stop the signal engine."""
         self._running.clear()
@@ -208,6 +233,8 @@ class SignalEngine:
                 pass
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5.0)
+        if self._return_fill_thread and self._return_fill_thread.is_alive():
+            self._return_fill_thread.join(timeout=5.0)
         logger.info(f"SignalEngine: stopped (triggers fired: {self._trigger_count})")
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -265,6 +292,29 @@ class SignalEngine:
         except Exception:
             pass
 
+    def _return_fill_loop(self) -> None:
+        """Background thread: periodically run ReturnFiller to backfill returns."""
+        from jerry_trader.services.signal.return_fill import ReturnFiller
+
+        filler = ReturnFiller(clickhouse_config=self._clickhouse_config)
+
+        # Initial delay — wait for bars to accumulate before first run
+        self._running.wait(timeout=60.0)
+
+        while self._running.is_set():
+            try:
+                filler.run()
+            except Exception as e:
+                logger.error(f"SignalEngine: return fill error - {e}")
+            self._running.wait(timeout=self._return_fill_interval_sec)
+
+    @staticmethod
+    def _is_replay_mode() -> bool:
+        """Check if running in replay mode."""
+        from jerry_trader import clock as clock_mod
+
+        return clock_mod.is_replay()
+
     def _process_message(self, message: dict[str, Any]) -> None:
         """Process a single Redis pub/sub message."""
         try:
@@ -280,7 +330,11 @@ class SignalEngine:
         if not symbol or not factors:
             return
 
-        self._evaluate_rules(symbol, timeframe, factors, timestamp_ms)
+        price = data.get("price")
+        if price is not None:
+            price = float(price)
+
+        self._evaluate_rules(symbol, timeframe, factors, timestamp_ms, price)
 
     def _evaluate_rules(
         self,
@@ -288,6 +342,7 @@ class SignalEngine:
         timeframe: str,
         factors: dict[str, float],
         timestamp_ms: int,
+        price: float | None = None,
     ) -> None:
         """Evaluate all rules against current factor snapshot."""
         with self._rules_lock:
@@ -327,7 +382,7 @@ class SignalEngine:
             self._last_trigger[cooldown_key] = now_ms
             self._trigger_count += 1
 
-            self._on_trigger(rule, symbol, timeframe, factors, timestamp_ms)
+            self._on_trigger(rule, symbol, timeframe, factors, timestamp_ms, price)
 
     def _on_trigger(
         self,
@@ -336,6 +391,7 @@ class SignalEngine:
         timeframe: str,
         factors: dict[str, float],
         timestamp_ms: int,
+        price: float | None = None,
     ) -> None:
         """Handle a triggered rule — log and persist to ClickHouse."""
         factor_summary = ", ".join(f"{k}={v:.4f}" for k, v in factors.items())
@@ -354,4 +410,5 @@ class SignalEngine:
                 timeframe=timeframe,
                 trigger_time_ns=timestamp_ms * 1_000_000,
                 factors=factors,
+                trigger_price=price,
             )

@@ -89,7 +89,7 @@ class TestBootstrapCoordinatorCore:
         assert plan1 is plan2
 
     def test_start_bootstrap_resets_completed_event(self, coordinator):
-        """Test start_bootstrap clears Event on re-subscribe after completion."""
+        """Test cleanup + start_bootstrap clears Event on re-subscribe after completion."""
         coordinator.start_bootstrap("AAPL", timeframes=["1m"])
 
         # Simulate completion - mark all consumers done
@@ -103,7 +103,8 @@ class TestBootstrapCoordinatorCore:
         assert coordinator.get_bootstrap("AAPL").is_ready()
         assert coordinator._ready_events["AAPL"].is_set()
 
-        # Re-subscribe should clear the event for fresh bootstrap
+        # Cleanup then re-subscribe should create fresh bootstrap
+        coordinator.cleanup("AAPL")
         coordinator.start_bootstrap("AAPL", timeframes=["1m"])
         assert not coordinator._ready_events["AAPL"].is_set()
 
@@ -334,7 +335,7 @@ class TestBootstrapCoordinatorIntegration:
         assert coordinator.get_bootstrap("AAPL").is_ready() is True
 
     def test_re_subscribe_scenario(self, coordinator):
-        """Test re-subscribe scenario with existing bars."""
+        """Test re-subscribe scenario: cleanup then start_bootstrap creates fresh state."""
         # First subscribe
         coordinator.start_bootstrap("MSFT", timeframes=["1m"])
         coordinator.store_trades("MSFT", [(1000, 100.0, 10)])
@@ -346,7 +347,8 @@ class TestBootstrapCoordinatorIntegration:
 
         assert coordinator.get_bootstrap("MSFT").is_ready() is True
 
-        # Re-subscribe (should reset)
+        # Cleanup then re-subscribe (real flow: cleanup first, then fresh start)
+        coordinator.cleanup("MSFT")
         coordinator.start_bootstrap("MSFT", timeframes=["1m"])
         bootstrap = coordinator.get_bootstrap("MSFT")
 

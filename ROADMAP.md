@@ -5,7 +5,6 @@
 Foundation pure business logic value objects.
 
 - [ ] 1.3 Populate domain/strategy/ with Signal, Risk models
-- [ ] 1.4 Decide strategy for domain layer empty placeholders
 
 ## 2. Rust Core
 
@@ -44,6 +43,13 @@ React/TradingView UI modules and UX improvements.
 - [x] [5.16](roadmap/factor-subscription-scenarios.md) Fix factor subscription lifecycle - timeframe switch, unsubscribe/re-subscribe, multi-chart scenarios
 - [x] 5.17 Cheat method: cleanup ticker on unsubscribe - clear runtime state only, preserve ClickHouse history
 - [x] 5.18 Batch factor updates in factorDataStore -- updateFactors calls set() N times for N factors, causing N React re-renders per tick. Refactor to single set() call with all factors merged at once.
+- [ ] 5.19 Signal visualization module - toast/notification bar for real-time signal alerts, click to jump to ticker chart
+- [ ] 5.20 RankList → Chart double-click联动 - double-click rank row auto-creates/focuses ChartPanel for that ticker
+- [ ] 5.21 Factor panel real-time value display - show last value label on factor chart panel header (like TradingView last price tag)
+- [ ] 5.22 News → Chart markers - show news event markers on bar chart at corresponding timestamps
+- [ ] 5.23 Replay timeline scrubber - draggable timeline/progress bar in replay mode, jump to any time point via replay clock pause/resume API
+- [ ] 5.24 RankList virtual scroll - use @tanstack/virtual for RankList rendering, avoid DOM bloat with 100+ tickers
+- [x] 5.25 Remove legacy FactorChartModule - removed component, registry entry, type, template reference, and stale comments
 ## 6. Orchestration
 
 System-wide coordination and backtest infrastructure.
@@ -57,8 +63,8 @@ System-wide coordination and backtest infrastructure.
 [ATC-R Agent System](roadmap/atcr-agent-system.md) — Two-phase design: near-term Agent as automated factor researcher, future ACT-R real-time decision support.
 
 **Phase A: Signal System + Agent Factor Mining (Near-term)**
-- [ ] [7.1](roadmap/atcr-agent-system.md) Signal Engine — subscribe to factor streams, evaluate DSL rules, trigger on top-20 entry
-- [ ] [7.2](roadmap/atcr-agent-system.md) Strategy DSL — YAML rule schema, factor conditions, parser/validator
+- [x] [7.1](roadmap/atcr-agent-system.md) Signal Engine — subscribe to factor streams, evaluate DSL rules, trigger on top-20 entry
+- [x] [7.2](roadmap/atcr-agent-system.md) Strategy DSL — YAML rule schema, factor conditions, parser/validator
 - [ ] [7.3](roadmap/atcr-agent-system.md) Agent Factor Mining — orchestrator, skills (define_factor, run_backtest, evaluate, optimize), prompts
 - [ ] [7.4](roadmap/atcr-agent-system.md) Backtest Infrastructure — pre-filter candidates from snapshots, factor history cursor, result store
 
@@ -70,6 +76,7 @@ System-wide coordination and backtest infrastructure.
 
 **Infrastructure:**
 - [ ] [7.9](roadmap/factor-stream-rust-migration.md) Factor stream Rust migration - migrate from Python asyncio to Rust FactorBroadcaster when Signal Engine is introduced
+- [x] 7.10 Signal event persistence — store trigger events to ClickHouse (rule_id, symbol, trigger_time, factors). Returns computed offline via SQL JOIN with ohlcv bars. Includes SQL schema + Python storage writer.
 ## 8. Optional Features
 
 Enhancements and additional modules.

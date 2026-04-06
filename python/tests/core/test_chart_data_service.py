@@ -47,7 +47,7 @@ def reset_clock():
 def service():
     """ChartDataService with a mocked CustomBarsFetcher (no real API/Redis)."""
     with patch(
-        "jerry_trader.data_manager.chart_data_service.CustomBarsFetcher"
+        "jerry_trader.services.bar_builder.chart_data_service.CustomBarsFetcher"
     ) as MockFetcher:
         mock_fetcher = MockFetcher.return_value
         mock_fetcher.bars_fetch.return_value = None  # default: no data

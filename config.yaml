@@ -99,6 +99,7 @@ machines:
       SignalEngine:
         enabled: true
         redis: "redis-a"
+        clickhouse: "clickhouse-a"
         rules_dir: "config/rules/"
         # symbols: []  # empty = subscribe to all
         # timeframes: ["trade", "10s", "1m", "5m"]

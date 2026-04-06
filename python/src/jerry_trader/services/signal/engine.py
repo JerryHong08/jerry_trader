@@ -3,8 +3,6 @@
 Subscribes to FactorEngine Redis channels, evaluates loaded DSL rules
 against incoming factor updates, and emits trigger events.
 
-Minimal Phase 1: log triggers only, no persistence.
-
 Usage:
     engine = SignalEngine(redis_client, rules_dir="config/rules/")
     engine.start()  # starts background thread
@@ -14,20 +12,13 @@ Usage:
 from __future__ import annotations
 
 import json
-import logging
 import threading
 import time
 from typing import Any
 
 import redis
 
-from jerry_trader.domain.strategy.rule import (
-    ActionType,
-    ComparisonOp,
-    Condition,
-    Rule,
-    TriggerType,
-)
+from jerry_trader.domain.strategy.rule import ComparisonOp, Condition, Rule, TriggerType
 from jerry_trader.domain.strategy.rule_parser import load_rules_from_dir
 from jerry_trader.shared.logging.logger import setup_logger
 
@@ -121,8 +112,6 @@ class SignalEngine:
 
     Subscribes to FactorEngine Redis pub/sub channels and evaluates
     loaded DSL rules against incoming factor updates.
-
-    Phase 1: trigger events are logged only.
     """
 
     def __init__(
@@ -131,11 +120,13 @@ class SignalEngine:
         rules_dir: str = "config/rules/",
         symbols: list[str] | None = None,
         timeframes: list[str] | None = None,
+        storage: Any | None = None,
     ):
         self.redis_client = redis_client
         self.rules_dir = rules_dir
         self.symbols = [s.upper() for s in symbols] if symbols else []
         self.timeframes = timeframes or ["trade", "10s", "1m", "5m"]
+        self._storage = storage
 
         # Loaded rules
         self._rules: list[Rule] = []
@@ -147,8 +138,8 @@ class SignalEngine:
         self._running = threading.Event()
 
         # Trigger dedup: prevent logging same trigger within cooldown period
-        # Key: (rule_id, symbol), Value: last_trigger_time
-        self._last_trigger: dict[tuple[str, str], float] = {}
+        # Key: (rule_id, symbol), Value: last_trigger_time_ms
+        self._last_trigger: dict[tuple[str, str], int] = {}
         self._trigger_cooldown_sec: float = 60.0  # Minimum 60s between same trigger
 
         self._trigger_count: int = 0
@@ -210,6 +201,7 @@ class SignalEngine:
         self._running.clear()
         if self._pubsub:
             try:
+                self._pubsub.punsubscribe()
                 self._pubsub.unsubscribe()
                 self._pubsub.close()
             except Exception:
@@ -228,6 +220,7 @@ class SignalEngine:
 
         # Subscribe to factor channels for configured symbols and timeframes
         channels: list[str] = []
+        use_pattern = False
         if self.symbols:
             for sym in self.symbols:
                 for tf in self.timeframes:
@@ -235,10 +228,14 @@ class SignalEngine:
         else:
             # Subscribe to all factor channels via pattern
             channels.append("factors:*")
+            use_pattern = True
 
         try:
             if channels:
-                self._pubsub.subscribe(*channels)
+                if use_pattern:
+                    self._pubsub.psubscribe(*channels)
+                else:
+                    self._pubsub.subscribe(*channels)
                 logger.info(f"SignalEngine: subscribed to {len(channels)} channels")
             else:
                 logger.warning("SignalEngine: no channels to subscribe to")
@@ -250,7 +247,7 @@ class SignalEngine:
         while self._running.is_set():
             try:
                 message = self._pubsub.get_message(timeout=0.1)
-                if message and message["type"] == "message":
+                if message and message["type"] in ("message", "pmessage"):
                     self._process_message(message)
             except redis.ConnectionError:
                 logger.warning("SignalEngine: Redis connection lost, reconnecting...")
@@ -260,7 +257,10 @@ class SignalEngine:
 
         # Cleanup
         try:
-            self._pubsub.unsubscribe()
+            if use_pattern:
+                self._pubsub.punsubscribe()
+            else:
+                self._pubsub.unsubscribe()
             self._pubsub.close()
         except Exception:
             pass
@@ -315,14 +315,16 @@ class SignalEngine:
             if not evaluate_trigger(matching_conditions, rule.trigger.type, factors):
                 continue
 
-            # Trigger fired! Check cooldown
-            now = time.time()
+            # Trigger fired! Check cooldown using global clock
+            import jerry_trader.clock as clock_mod
+
+            now_ms = clock_mod.now_ms()
             cooldown_key = (rule.id, symbol)
-            last = self._last_trigger.get(cooldown_key, 0)
-            if now - last < self._trigger_cooldown_sec:
+            last_ms = self._last_trigger.get(cooldown_key, 0)
+            if now_ms - last_ms < self._trigger_cooldown_sec * 1000:
                 continue
 
-            self._last_trigger[cooldown_key] = now
+            self._last_trigger[cooldown_key] = now_ms
             self._trigger_count += 1
 
             self._on_trigger(rule, symbol, timeframe, factors, timestamp_ms)
@@ -335,7 +337,7 @@ class SignalEngine:
         factors: dict[str, float],
         timestamp_ms: int,
     ) -> None:
-        """Handle a triggered rule. Phase 1: log only."""
+        """Handle a triggered rule — log and persist to ClickHouse."""
         factor_summary = ", ".join(f"{k}={v:.4f}" for k, v in factors.items())
 
         logger.info(
@@ -343,6 +345,13 @@ class SignalEngine:
             f"tf={timeframe} ts={timestamp_ms} factors=[{factor_summary}]"
         )
 
-        # Phase 1: just log
-        # Phase 2: record to ClickHouse, track returns
-        # Phase 3: notify, widget, etc.
+        # Persist to ClickHouse via SignalStorage
+        if self._storage:
+            self._storage.write_signal_event(
+                rule_id=rule.id,
+                rule_version=rule.version,
+                symbol=symbol,
+                timeframe=timeframe,
+                trigger_time_ns=timestamp_ms * 1_000_000,
+                factors=factors,
+            )

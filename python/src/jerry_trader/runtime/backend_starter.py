@@ -589,6 +589,7 @@ class JerryTraderBackendStarter:
             import redis as redis_lib
 
             from jerry_trader.services.signal.engine import SignalEngine
+            from jerry_trader.services.signal.storage import SignalStorage
 
             role_cfg = self.roles["SignalEngine"]
             redis_cfg = role_cfg.get("redis", {})
@@ -597,11 +598,22 @@ class JerryTraderBackendStarter:
                 port=redis_cfg.get("port", 6379),
                 db=redis_cfg.get("db", 0),
             )
+
+            # SignalStorage for ClickHouse persistence
+            signal_storage = None
+            ch_cfg = role_cfg.get("clickhouse")
+            if ch_cfg:
+                signal_storage = SignalStorage(
+                    session_id=self.session_id,
+                    clickhouse_config=ch_cfg,
+                )
+
             self.signal_engine = SignalEngine(
                 redis_client=signal_redis,
                 rules_dir=role_cfg.get("rules_dir", "config/rules/"),
                 symbols=role_cfg.get("symbols"),
                 timeframes=role_cfg.get("timeframes"),
+                storage=signal_storage,
             )
             self._services.append(("SignalEngine", self.signal_engine))
         else:

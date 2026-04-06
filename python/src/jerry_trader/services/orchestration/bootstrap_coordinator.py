@@ -139,7 +139,7 @@ class TickerBootstrap:
 
     symbol: str
     timeframes: dict[str, TimeframeBootstrap] = field(default_factory=dict)
-    trades_state: TradesBootstrapState = TradesBootstrapState.PENDING
+    trades_state: TradesBootstrapState = TradesBootstrapState.NOT_NEEDED
 
     # Trades storage
     trades_key: str = ""

@@ -364,7 +364,7 @@ export function OverviewChartModule({
     chartRef.current = chart;
 
     // Handle crosshair move for tooltip
-    chart.subscribeCrosshairMove((param) => {
+    const crosshairHandler = (param: any) => {
       if (!param.time || !param.point) {
         setTooltip(prev => ({ ...prev, visible: false }));
         return;
@@ -411,7 +411,8 @@ export function OverviewChartModule({
           visible: true,
         });
       }
-    });
+    };
+    chart.subscribeCrosshairMove(crosshairHandler);
 
     // Setup resize observer
     resizeObserverRef.current = new ResizeObserver((entries) => {
@@ -440,11 +441,12 @@ export function OverviewChartModule({
 
     // Listen for user scroll/drag interactions on the time scale
     // When user manually scrolls, disable "follow latest" mode
-    chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
+    const logicalRangeHandler = () => {
       if (isUserInteractingRef.current) {
         setIsFollowingLatest(false);
       }
-    });
+    };
+    chart.timeScale().subscribeVisibleLogicalRangeChange(logicalRangeHandler);
 
     // Track mouse interactions to detect user-initiated changes
     const container = chartContainerRef.current;
@@ -466,11 +468,16 @@ export function OverviewChartModule({
 
     return () => {
       resizeObserverRef.current?.disconnect();
+      // Unsubscribe TradingView handlers
+      chart.unsubscribeCrosshairMove(crosshairHandler);
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(logicalRangeHandler);
+      // Remove DOM event listeners
       container.removeEventListener('mousedown', handleMouseDown);
       container.removeEventListener('mouseup', handleMouseUp);
       container.removeEventListener('mouseleave', handleMouseUp);
       container.removeEventListener('wheel', handleWheel);
       mq.removeEventListener('change', handleDprChange);
+      // Cleanup chart
       chart.remove();
       chartRef.current = null;
       seriesMapRef.current.clear();
@@ -534,8 +541,8 @@ export function OverviewChartModule({
           setRankData(convertedData);
           setChartSeriesData(newSeriesData);
           previousSeriesDataRef.current = liveSeriesData;
-          // Clear initialization so chart effect will call setData with fresh validated data
-          seriesInitializedRef.current.clear();
+          // Note: Don't clear seriesInitializedRef here - let series effect handle incremental updates
+          // This prevents unnecessary setData() calls on every new data arrival
         }
       } else {
         // Fallback: do nothing.
@@ -713,20 +720,37 @@ export function OverviewChartModule({
         });
       } else {
         // Non-segmentation mode - use main series only
-        // Only call setData if this series hasn't been initialized yet
+        const validData = seriesData.data.filter(
+          (d): d is LineData<Time> => typeof d.time === 'number' && typeof d.value === 'number'
+        );
+
         if (!seriesInitializedRef.current.has(item.symbol)) {
+          // First time initialization - set all data
           segSeries.mainSeries.applyOptions({ visible: true, color: baseColor });
-          // Validate data before setData - ensure all times are numbers
-          const validData = seriesData.data.filter(
-            (d): d is LineData<Time> => typeof d.time === 'number' && typeof d.value === 'number'
-          );
           if (validData.length > 0) {
             segSeries.mainSeries.setData(validData);
             seriesInitializedRef.current.add(item.symbol);
           }
-        } else {
-          // Series already initialized - just update options if needed
+        } else if (validData.length > 0) {
+          // Series already initialized - use incremental update for new data points
           segSeries.mainSeries.applyOptions({ visible: true, color: baseColor });
+
+          // Check if we have newer data to append
+          const lastInitializedTime = lastDataTimestampRef.current.get(item.symbol) || 0;
+          const latestDataTime = validData[validData.length - 1].time as number;
+
+          if (latestDataTime > lastInitializedTime) {
+            // Find new points and append them individually using update()
+            const newPoints = validData.filter(d => (d.time as number) > lastInitializedTime);
+            newPoints.forEach(point => {
+              try {
+                segSeries!.mainSeries.update(point);
+              } catch (e) {
+                // update() failed (e.g., time out of order), fallback to setData
+                segSeries!.mainSeries.setData(validData);
+              }
+            });
+          }
         }
 
         // Hide/remove segment series

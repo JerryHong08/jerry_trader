@@ -101,8 +101,25 @@ machines:
         redis: "redis-a"
         clickhouse: "clickhouse-a"
         rules_dir: "config/rules/"
-        # symbols: []  # empty = subscribe to all
-        # timeframes: ["trade", "10s", "1m", "5m"]
+        symbols: []  # empty = subscribe to all
+        timeframes: ["trade", "10s", "1m", "5m"]
+      JerryTraderBFF:
+        enabled: true
+        host: "0.0.0.0"
+        port: 5001
+        debug: false
+        redis: "redis-a"
+        # influxdb: "influxdb-b"
+        clickhouse: "clickhouse-a"
+      SnapshotProcessor:
+        enabled: true
+        redis: "redis-a"
+        clickhouse: "clickhouse-a"
+        bootstrap:  # Bootstrap settings (for replay mode)
+          start_ms: null      # Optional: start from specific timestamp
+          end_ms: null        # Optional: end at specific timestamp
+          filter_start_et: "04:00"  # Premarket start (ET)
+          filter_end_et: "09:30"    # Market open (ET)
 
   mibuntu:
     limit: "market_open"    # market_open | market_close | null (never stop)
@@ -130,7 +147,7 @@ machines:
         redis: "redis-a"  # or "redis-b@MACHINE_B" for remote
 
   oldman:
-    limit: "market_open"    # market_open | market_close | null (never stop)
+    limit: null    # market_open | market_close | null (never stop) - set to null for replay testing
     roles:
       SnapshotProcessor:
         enabled: true
@@ -150,6 +167,14 @@ machines:
         redis: "redis-b"
         # influxdb: "influxdb-b"
         clickhouse: "clickhouse-a"
+      # Replayer: Reads pre-built snapshots from ClickHouse → pushes to Redis INPUT Stream
+      # SnapshotProcessor handles filtering/ranking (same as live mode)
+      # Replayer:
+      #   enabled: true
+      #   speed: 1.0
+      #   min_interval_ms: 50
+      #   redis: "redis-b"
+      #   clickhouse: "clickhouse-a"
 
   collector:
     limit: "market_open"     # collector only runs premarket
@@ -163,7 +188,7 @@ machines:
     limit: null               # replayer never auto-stops
     roles:
       Replayer:
-        enabled: true
+        enabled: false
         speed: 1.0
         format: "parquet"
         rollback_to: null
@@ -182,11 +207,11 @@ machines:
 # Defaults
 # =============================================================================
 defaults:
-  replay_date: null #YYYYMMDD 20260306
+  replay_date: 20260306 #YYYYMMDD set to trigger bootstrap from ClickHouse
   replay_time: null #HHMMSS 080015
   # Used only when TickDataServer.manager_type == "synced-replayer"
-  # preload_tickers: null # list of tickers to preload for synced-replayer mode (null or empty = preload all)
-  preload_tickers: ["NIPG","PRSO"]
+  preload_tickers: null # list of tickers to preload for synced-replayer mode (null or empty = preload all)
+  # preload_tickers: ["NIPG","PRSO"]
   suffix_id: null
   load_history: null
   log_level: "DEBUG"

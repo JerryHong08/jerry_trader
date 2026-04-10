@@ -2,28 +2,19 @@
 Overview Chart Data Manager for JerryTrader Frontend
 
 This module manages chart data for the JerryTrader frontend's OverviewChartModule.
-Unlike the MMM version which uses a single color per ticker, JerryTrader displays
-each ticker's line with segmented colors representing different states (regimes).
 
 Data Flow:
-    InfluxDB (market_snapshot + movers_state) -> ChartDataManager -> BFF -> Frontend
-
-Key Differences from MMM Version:
-    - Each ticker line is segmented by state transitions
-    - Each segment has its own data key (e.g., AAPL_seg0, AAPL_seg1)
-    - Segments are colored based on the state at that time period
-    - Frontend uses Recharts with multiple Line components per ticker
+    ClickHouse (market_snapshot) -> ChartDataManager -> BFF -> Frontend
 """
 
 import json
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import clickhouse_connect
-import influxdb_client
 import redis
 
 from jerry_trader.platform.config.session import (
@@ -46,22 +37,11 @@ class JerryTraderChartDataManager:
     """
     Manage and format chart data for JerryTrader's OverviewChartModule.
 
-    The key difference from MMM version:
-    - JerryTrader renders each ticker as multiple line segments
-    - Each segment corresponds to a state period
-    - Segments are colored by state (Best, Good, OnWatch, NotGood, Bad)
+    Each ticker line is segmented by state transitions, colored by state
+    (Best, Good, OnWatch, NotGood, Bad).
     """
 
-    # State colors matching frontend STATE_COLORS
-    STATE_COLORS: Dict[str, str] = {
-        "Best": "#10b981",  # Green
-        "Good": "#34d399",  # Emerald
-        "OnWatch": "#3b82f6",  # Blue
-        "NotGood": "#eab308",  # Yellow
-        "Bad": "#6b7280",  # Gray
-    }
-
-    # Valid state values (backend now emits these directly)
+    # Valid state values (backend emits these directly)
     VALID_STATES = {"Best", "Good", "OnWatch", "NotGood", "Bad"}
 
     def __init__(
@@ -93,35 +73,7 @@ class JerryTraderChartDataManager:
         self.SUBSCRIBED_SET_NAME = movers_subscribed_set(self.session_id)
         self.HSET_NAME = state_cursor(self.session_id)
 
-        # ------- InfluxDB Configuration -------
-        self._influx_client = None
-        self._query_api = None
-        self.org = "jerryhong"
-        self.influx_url = None
-
-        influx_cfg = influxdb_config or {}
-        self.bucket = influx_cfg.get("bucket", "")
-
-        if influx_cfg:
-            influx_token_env = influx_cfg.get("influx_token_env")
-            token = os.getenv(influx_token_env) if influx_token_env else None
-
-            influx_url_env = influx_cfg.get("influx_url_env")
-            self.influx_url = (
-                os.getenv(influx_url_env) if influx_url_env else "http://localhost:8086"
-            )
-            logger.info(
-                f"__init__ - Connecting to InfluxDB at {self.influx_url}, bucket={self.bucket}"
-            )
-
-            self._influx_client = influxdb_client.InfluxDBClient(
-                url=self.influx_url, token=token, org=self.org
-            )
-            self._query_api = self._influx_client.query_api()
-        else:
-            logger.info("__init__ - InfluxDB not configured for overview chart")
-
-        # ------- ClickHouse Configuration (gradual migration supplement) -------
+        # ------- ClickHouse Configuration -------
         self.ch_client = None
         ch_cfg = clickhouse_config or {}
         if ch_cfg:
@@ -145,7 +97,7 @@ class JerryTraderChartDataManager:
                 )
             except Exception as exc:
                 logger.warning(
-                    f"__init__ - ClickHouse unavailable for overview chart, fallback to InfluxDB: {exc}"
+                    f"__init__ - ClickHouse unavailable for overview chart: {exc}"
                 )
                 self.ch_client = None
 
@@ -157,32 +109,6 @@ class JerryTraderChartDataManager:
         """Mark chart data as needing refresh."""
         self._chart_data_dirty = True
 
-    def _get_intraday_time_range(self) -> Tuple[str, str]:
-        """
-        Get the intraday time range for InfluxDB queries.
-        Pre-market: 4:00 AM to 9:30 AM (330 minutes)
-        Regular hours: 9:30 AM to 4:00 PM (390 minutes)
-        """
-        ny_tz = ZoneInfo("America/New_York")
-
-        if self.run_mode == "replay":
-            d = db_date_to_date(self.db_date)
-            # Create datetime in NY timezone to get correct offset for that date
-            start_dt = datetime(d.year, d.month, d.day, 4, 0, 0, tzinfo=ny_tz)
-            end_dt = datetime(d.year, d.month, d.day, 16, 0, 0, tzinfo=ny_tz)
-            range_start = start_dt.isoformat()
-            range_end = end_dt.isoformat()
-        else:
-            today = datetime.now(ny_tz).strftime("%Y-%m-%d")
-            # Use ISO format with proper timezone for start
-            start_dt = datetime.now(ny_tz).replace(
-                hour=4, minute=0, second=0, microsecond=0
-            )
-            range_start = start_dt.isoformat()
-            range_end = "now()"
-
-        return range_start, range_end
-
     def get_subscribed_tickers(self) -> List[str]:
         """Get all subscribed tickers from Redis ZSET."""
         return list(self.redis_client.zrange(self.SUBSCRIBED_SET_NAME, 0, -1))
@@ -190,21 +116,22 @@ class JerryTraderChartDataManager:
     def get_top_n_tickers(self, n: int = 20) -> List[str]:
         """
         Get top N tickers by rank from the last snapshot in Redis Stream.
+        Falls back to ClickHouse when Redis stream is empty (e.g. replay mode).
         """
         entries = self.redis_client.xrevrange(self.STREAM_NAME, count=1)
 
         if not entries:
-            return []
+            return self._get_top_n_tickers_clickhouse(n)
 
         entry_id, fields = entries[0]
         data_json = fields.get("data")
         if not data_json:
-            return []
+            return self._get_top_n_tickers_clickhouse(n)
 
         try:
             tickers_data = json.loads(data_json)
         except json.JSONDecodeError:
-            return []
+            return self._get_top_n_tickers_clickhouse(n)
 
         # Filter tickers with rank <= n and sort by rank
         current_membership = [
@@ -215,88 +142,45 @@ class JerryTraderChartDataManager:
         current_membership.sort(key=lambda x: x[1])
         return [ticker for ticker, rank in current_membership]
 
+    def _get_top_n_tickers_clickhouse(self, n: int = 20) -> List[str]:
+        """Fallback: get top N tickers from ClickHouse latest snapshot."""
+        if not self.ch_client:
+            return []
+
+        date_tag, mode_tag = session_to_influx_tags(self.session_id)
+
+        try:
+            query = f"""
+                SELECT DISTINCT symbol FROM market_snapshot FINAL
+                WHERE date = {{date:String}}
+                  AND mode = {{mode:String}}
+                  AND rank > 0
+                  AND rank <= {n}
+                ORDER BY rank ASC
+                LIMIT {n}
+            """
+            result = self.ch_client.query(
+                query,
+                parameters={"date": date_tag, "mode": mode_tag},
+            )
+            return [row[0] for row in result.result_rows]
+        except Exception as e:
+            logger.error(f"Error getting top N tickers from ClickHouse: {e}")
+            return []
+
     def get_ticker_history(
         self, ticker: str, since: Optional[datetime] = None
     ) -> List[Dict]:
         """
-        Query historical snapshot data for a ticker from InfluxDB.
-        Returns list of {timestamp, changePercent, price, volume, rank}
-        """
-        if since is not None:
-            range_start = since.isoformat()
-            range_end = (
-                "now()"
-                if self.run_mode != "replay"
-                else f"{db_date_to_date(self.db_date).isoformat()}T23:59:59Z"
-            )
-        else:
-            range_start, range_end = self._get_intraday_time_range()
-
-        # Prefer ClickHouse (new path), keep InfluxDB as fallback.
-        if self.ch_client:
-            ch_results = self._get_ticker_history_clickhouse(
-                ticker=ticker,
-                range_start=range_start,
-                range_end=range_end,
-            )
-            if ch_results:
-                return ch_results
-
-        if self._query_api is None or not self.bucket:
-            return []
-
-        date_tag, mode_tag = session_to_influx_tags(self.session_id)
-        query = f"""
-        from(bucket: "{self.bucket}")
-            |> range(start: {range_start}, stop: {range_end})
-            |> filter(fn: (r) => r["_measurement"] == "market_snapshot")
-            |> filter(fn: (r) => r["symbol"] == "{ticker}")
-            |> filter(fn: (r) => r["date"] == "{date_tag}")
-            |> filter(fn: (r) => r["mode"] == "{mode_tag}")
-            |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
-            |> sort(columns: ["_time"])
-        """
-
-        try:
-            tables = self._query_api.query(query, org=self.org)
-            results = []
-            for table in tables:
-                for record in table.records:
-                    results.append(
-                        {
-                            "timestamp": record.get_time(),
-                            "changePercent": record.values.get("changePercent", 0.0),
-                            "price": record.values.get("price", 0.0),
-                            "volume": record.values.get("volume", 0),
-                            "rank": record.values.get("rank", 0),
-                        }
-                    )
-            return results
-        except Exception as e:
-            logger.error(f"Error querying history for {ticker}: {e}")
-            return []
-
-    def _get_ticker_history_clickhouse(
-        self,
-        ticker: str,
-        range_start: str,
-        range_end: str,
-    ) -> List[Dict]:
-        """Query historical snapshot data for a ticker from ClickHouse.
-
+        Query historical snapshot data for a ticker from ClickHouse.
         Returns list of {timestamp, changePercent, price, volume, rank}.
         """
         if not self.ch_client:
             return []
 
-        def _to_ms(ts: str) -> int:
-            if ts == "now()":
-                return int(datetime.now(ZoneInfo("UTC")).timestamp() * 1000)
-            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            return int(dt.timestamp() * 1000)
-
-        start_ms = _to_ms(range_start)
-        end_ms = _to_ms(range_end)
+        range_start, range_end = self._get_time_range(since)
+        start_ms = self._time_to_ms(range_start)
+        end_ms = self._time_to_ms(range_end)
 
         date_tag, mode_tag = session_to_influx_tags(self.session_id)
 
@@ -342,57 +226,49 @@ class JerryTraderChartDataManager:
 
     def get_ticker_state_history(self, ticker: str) -> List[Dict]:
         """
-        Query state history for a ticker from InfluxDB movers_state.
+        Query state history for a ticker.
         Returns list of {timestamp, state, stateReason} sorted by timestamp.
+        Currently returns empty — state history will be stored in ClickHouse
+        when StateEngine is migrated.
         """
-        if self._query_api is None or not self.bucket:
-            return []
+        # TODO: Migrate state history queries to ClickHouse
+        return []
 
-        range_start, range_end = self._get_intraday_time_range()
+    def _get_time_range(self, since: Optional[datetime] = None) -> Tuple[str, str]:
+        """Get time range for queries as ISO strings."""
+        ny_tz = ZoneInfo("America/New_York")
 
-        date_tag, mode_tag = session_to_influx_tags(self.session_id)
-        query = f"""
-        from(bucket: "{self.bucket}")
-            |> range(start: {range_start}, stop: {range_end})
-            |> filter(fn: (r) => r["_measurement"] == "movers_state")
-            |> filter(fn: (r) => r["symbol"] == "{ticker}")
-            |> filter(fn: (r) => r["date"] == "{date_tag}")
-            |> filter(fn: (r) => r["mode"] == "{mode_tag}")
-            |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
-            |> sort(columns: ["_time"])
-        """
+        if since is not None:
+            range_start = since.isoformat()
+            if self.run_mode == "replay":
+                d = db_date_to_date(self.db_date)
+                range_end = f"{d.isoformat()}T23:59:59Z"
+            else:
+                range_end = "now()"
+        elif self.run_mode == "replay":
+            d = db_date_to_date(self.db_date)
+            range_start = f"{d.isoformat()}T04:00:00Z"
+            range_end = f"{d.isoformat()}T23:59:59Z"
+        else:
+            today = datetime.now(ny_tz)
+            range_start = today.replace(
+                hour=4, minute=0, second=0, microsecond=0
+            ).isoformat()
+            range_end = "now()"
 
-        try:
-            tables = self._query_api.query(query, org=self.org)
-            results = []
-            for table in tables:
-                for record in table.records:
-                    state = record.values.get("state", "OnWatch")
-                    # Validate state is a valid frontend state
-                    if state not in self.VALID_STATES:
-                        state = "OnWatch"
-                    state_reason = record.values.get("stateReason", "")
-                    results.append(
-                        {
-                            "timestamp": record.get_time(),
-                            "state": state,
-                            "stateReason": state_reason,
-                        }
-                    )
-            return results
-        except Exception as e:
-            logger.error(f"Error querying state history for {ticker}: {e}")
-            return []
+        return range_start, range_end
+
+    def _time_to_ms(self, ts: str) -> int:
+        """Convert ISO timestamp or 'now()' to epoch milliseconds."""
+        if ts == "now()":
+            return int(datetime.now(ZoneInfo("UTC")).timestamp() * 1000)
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return int(dt.timestamp() * 1000)
 
     def get_latest_rank_data(self) -> tuple[List[Dict], Optional[str]]:
         """
         Get latest rank list data from Redis stream.
         Returns tuple of (list matching frontend RankItem interface, timestamp string).
-
-        Only emits columns that are in the stream message:
-        ['symbol', 'rank', 'price', 'change', 'changePercent', 'volume', 'relativeVolume5min', 'relativeVolumeDaily', 'vwap'].
-
-        State and other columns are updated separately by the state stream listener.
         """
         entries = self.redis_client.xrevrange(self.STREAM_NAME, count=1)
 
@@ -401,9 +277,7 @@ class JerryTraderChartDataManager:
 
         entry_id, fields = entries[0]
         data_json = fields.get("data")
-        timestamp = fields.get(
-            "timestamp"
-        )  # This is the snapshot timestamp from backend
+        timestamp = fields.get("timestamp")
 
         if not data_json:
             return [], timestamp
@@ -413,8 +287,6 @@ class JerryTraderChartDataManager:
         except json.JSONDecodeError:
             return [], timestamp
 
-        # Transform to frontend format
-        # Only emit columns from stream message, frontend handles defaults for other columns
         result = []
         for item in tickers_data:
             result.append(
@@ -431,7 +303,6 @@ class JerryTraderChartDataManager:
                 }
             )
 
-        # Sort by rank
         result.sort(key=lambda x: x.get("rank", 999))
         return result, timestamp
 
@@ -449,7 +320,7 @@ class JerryTraderChartDataManager:
             {
                 "seriesData": {
                     "AAPL": {
-                        "data": [{"time": 1737300000, "value": 5.2}, ...],  # time in seconds
+                        "data": [{"time": 1737300000, "value": 5.2}, ...],
                         "states": [{"time": 1737300000, "state": "Best"}, ...]
                     },
                     ...
@@ -468,6 +339,7 @@ class JerryTraderChartDataManager:
 
         # Get top N tickers from latest snapshot (backend sends superset)
         tickers = self.get_top_n_tickers(n=top_n)
+        logger.debug(f"Generating LW Overview chart data for tickers: {tickers}")
         if not tickers:
             return {"seriesData": {}, "rankData": [], "timestamp": None}
 
@@ -484,14 +356,11 @@ class JerryTraderChartDataManager:
 
             for point in ticker_history:
                 ts = point["timestamp"]
-                # Convert to seconds for Lightweight Charts (uses Unix timestamp in seconds)
-                # Ensure plain Python int (not numpy.int64) for JSON serialization
                 time_seconds = int(ts.timestamp())
                 value = point.get("changePercent")
 
                 if value is not None:
-                    # Ensure value is a plain Python float for JSON serialization
-                    value_float = float(value) if value is not None else 0.0
+                    value_float = float(value)
                     data_points.append({"time": time_seconds, "value": value_float})
 
                     # Find the state at this timestamp
@@ -508,7 +377,7 @@ class JerryTraderChartDataManager:
                 "states": state_points,
             }
 
-        # Get rank data for legend/display (returns tuple of data and timestamp)
+        # Get rank data for legend/display
         rank_data, snapshot_timestamp = self.get_latest_rank_data()
 
         result = {
@@ -531,8 +400,6 @@ class JerryTraderChartDataManager:
 
     def close(self):
         """Clean up resources."""
-        if self._influx_client:
-            self._influx_client.close()
         if self.ch_client:
             try:
                 self.ch_client.close()

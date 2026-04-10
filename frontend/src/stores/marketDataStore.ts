@@ -192,31 +192,54 @@ export const useMarketDataStore = create<MarketDataState>()(
     // ============================================================================
     patchSnapshotData: (items, timestamp) => {
       set((state) => {
-        const newEntities = new Map(state.entities);
+        // Track if we actually need to create a new Map
+        let hasChanges = false;
+        let newEntities: Map<string, RankEntity> | null = null;
 
         items.forEach((item) => {
           if (!item.symbol) return;
 
-          const existing = newEntities.get(item.symbol);
+          const existing = state.entities.get(item.symbol);
+
           if (existing) {
-            // Merge snapshot fields onto existing entity, preserving state
-            const patched: RankEntity = { ...existing };
+            // Check if any snapshot fields actually changed
+            let fieldChanged = false;
             SNAPSHOT_FIELDS.forEach((field) => {
-              if (field in item) {
-                (patched as any)[field] = (item as any)[field];
+              if (field in item && (item as any)[field] !== (existing as any)[field]) {
+                fieldChanged = true;
               }
             });
-            // Also merge static fields if included (from BFF's merged response)
-            // Only set if not undefined (null means "not available", undefined means "not included")
             STATIC_FIELDS.forEach((field) => {
-              if (field in item && (item as any)[field] !== undefined) {
-                (patched as any)[field] = (item as any)[field];
+              if (field in item && (item as any)[field] !== undefined && (item as any)[field] !== (existing as any)[field]) {
+                fieldChanged = true;
               }
             });
-            newEntities.set(item.symbol, patched);
+
+            if (fieldChanged) {
+              // Only create new Map when first change is detected
+              if (!newEntities) {
+                newEntities = new Map(state.entities);
+              }
+              // Merge snapshot fields onto existing entity, preserving state
+              const patched: RankEntity = { ...existing };
+              SNAPSHOT_FIELDS.forEach((field) => {
+                if (field in item) {
+                  (patched as any)[field] = (item as any)[field];
+                }
+              });
+              STATIC_FIELDS.forEach((field) => {
+                if (field in item && (item as any)[field] !== undefined) {
+                  (patched as any)[field] = (item as any)[field];
+                }
+              });
+              newEntities.set(item.symbol, patched);
+              hasChanges = true;
+            }
           } else {
-            // New entity - initialize with snapshot fields
-            // Static fields may come from BFF's merged response
+            // New entity - must create new Map
+            if (!newEntities) {
+              newEntities = new Map(state.entities);
+            }
             const newEntity: RankEntity = {
               symbol: item.symbol,
               price: item.price ?? 0,
@@ -227,22 +250,30 @@ export const useMarketDataStore = create<MarketDataState>()(
               relativeVolumeDaily: item.relativeVolumeDaily ?? 0,
               relativeVolume5min: item.relativeVolume5min ?? 0,
               rank: item.rank,
-              // Static fields from BFF merge (may be undefined if not yet fetched)
               marketCap: (item as any).marketCap,
               float: (item as any).float,
               hasNews: (item as any).hasNews,
               country: (item as any).country,
               sector: (item as any).sector,
-              // state is intentionally undefined until state event arrives
             };
             newEntities.set(item.symbol, newEntity);
+            hasChanges = true;
           }
         });
 
-        return {
-          entities: newEntities,
-          rankTimestamp: timestamp ?? state.rankTimestamp,
-        };
+        // Only return new state if we have changes
+        if (hasChanges) {
+          return {
+            entities: newEntities!,
+            rankTimestamp: timestamp ?? state.rankTimestamp,
+          };
+        }
+        // No changes - optionally update timestamp only
+        if (timestamp && timestamp !== state.rankTimestamp) {
+          return { rankTimestamp: timestamp };
+        }
+        // No changes at all - return empty object to keep state unchanged
+        return {};
       });
     },
 
@@ -371,13 +402,15 @@ export const useMarketDataStore = create<MarketDataState>()(
 
     syncVisibility: (allTickers) => {
       set((state) => {
+        // Safety check: ensure hiddenTickers exists
+        const hiddenTickers = state.hiddenTickers ?? new Set();
         const allTickersSet = new Set(allTickers);
         const newVisibleSet = new Set<string>();
 
         // For each ticker in the new data:
         // - If not explicitly hidden, make it visible
         allTickers.forEach((ticker) => {
-          if (!state.hiddenTickers.has(ticker)) {
+          if (!hiddenTickers.has(ticker)) {
             newVisibleSet.add(ticker);
           }
         });
@@ -385,7 +418,7 @@ export const useMarketDataStore = create<MarketDataState>()(
         // Also clean up hiddenTickers: remove tickers that are no longer in data
         // This prevents the hiddenTickers set from growing indefinitely
         const newHiddenSet = new Set<string>();
-        state.hiddenTickers.forEach((ticker) => {
+        hiddenTickers.forEach((ticker) => {
           if (allTickersSet.has(ticker)) {
             newHiddenSet.add(ticker);
           }

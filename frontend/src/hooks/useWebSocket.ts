@@ -55,8 +55,90 @@ const NEWS_CACHE_KEY = 'JerryTrader_news_cache';
 const DATA_STATUS_KEY = 'JerryTrader_data_status';
 const VERSION_CACHE_KEY = 'JerryTrader_version_cache';
 
+// Cache size limits to prevent localStorage overflow and performance issues
+const MAX_PROFILE_CACHE_SIZE = 100;  // Max 100 ticker profiles
+const MAX_NEWS_CACHE_SIZE = 50;      // Max 50 ticker news collections
+const MAX_VERSION_CACHE_SIZE = 100;  // Max 100 ticker version tracking
+const SAVE_THROTTLE_MS = 2000;       // Throttle localStorage saves to reduce I/O
+
 // Version tracking type: symbol -> domain -> version (summary/profile)
 export type VersionCache = Record<string, Record<string, number>>;
+
+// Throttle tracking for localStorage saves
+let lastSaveTime = 0;
+let pendingSaveKeys = new Set<string>();
+
+/**
+ * Prune a Map to keep only the most recent maxSize entries.
+ * Uses insertion order (oldest first) to determine which to remove.
+ */
+function pruneMapCache<T>(map: Map<string, T>, maxSize: number): void {
+  if (map.size <= maxSize) return;
+
+  const deleteCount = map.size - maxSize;
+  let deleted = 0;
+  // Map iteration order is insertion order - delete oldest first
+  for (const key of map.keys()) {
+    if (deleted >= deleteCount) break;
+    map.delete(key);
+    deleted++;
+  }
+  console.debug(`[Cache] Pruned ${deleted} entries from cache (size: ${map.size} -> ${maxSize})`);
+}
+
+/**
+ * Prune version cache to keep only the most recent maxSize symbols.
+ */
+function pruneVersionCache(cache: VersionCache, maxSize: number): void {
+  const symbols = Object.keys(cache);
+  if (symbols.length <= maxSize) return;
+
+  const deleteCount = symbols.length - maxSize;
+  // Delete oldest symbols (first in object)
+  for (let i = 0; i < deleteCount; i++) {
+    delete cache[symbols[i]];
+  }
+  console.debug(`[Cache] Pruned ${deleteCount} symbols from version cache`);
+}
+
+/**
+ * Save map to localStorage with throttling to reduce I/O frequency.
+ * Debounces saves by SAVE_THROTTLE_MS to avoid excessive writes.
+ */
+function saveMapToStorageThrottled<T>(key: string, map: Map<string, T>) {
+  pendingSaveKeys.add(key);
+
+  const now = Date.now();
+  if (now - lastSaveTime >= SAVE_THROTTLE_MS) {
+    // Flush all pending saves immediately
+    flushPendingSaves();
+  } else {
+    // Schedule flush if not already pending
+    if (pendingSaveKeys.size === 1) {
+      setTimeout(flushPendingSaves, SAVE_THROTTLE_MS - (now - lastSaveTime));
+    }
+  }
+}
+
+/**
+ * Flush all pending localStorage saves.
+ */
+function flushPendingSaves() {
+  try {
+    pendingSaveKeys.forEach(key => {
+      const map = key === PROFILE_CACHE_KEY ? staticProfileCache :
+                  key === NEWS_CACHE_KEY ? staticNewsCache :
+                  key === DATA_STATUS_KEY ? dataStatusMap : null;
+      if (map) {
+        saveMapToStorage(key, map as Map<string, any>);
+      }
+    });
+    pendingSaveKeys.clear();
+    lastSaveTime = Date.now();
+  } catch (e) {
+    console.warn('Failed to flush pending saves:', e);
+  }
+}
 
 // Helper functions for localStorage persistence
 function loadMapFromStorage<T>(key: string): Map<string, T> {
@@ -78,6 +160,17 @@ function saveMapToStorage<T>(key: string, map: Map<string, T>) {
     localStorage.setItem(key, JSON.stringify(obj));
   } catch (e) {
     console.warn(`Failed to save ${key} to localStorage:`, e);
+    // If quota exceeded, try pruning and retrying
+    if (e instanceof DOMException && e.name === 'QuotaExceededError') {
+      console.warn('[Cache] localStorage quota exceeded, pruning caches...');
+      pruneAllCaches();
+      try {
+        localStorage.setItem(key, JSON.stringify(obj));
+      } catch (retryError) {
+        console.error('[Cache] Still failed after pruning, clearing cache');
+        clearAllCaches();
+      }
+    }
   }
 }
 
@@ -98,7 +191,25 @@ function saveVersionCacheToStorage(cache: VersionCache) {
     localStorage.setItem(VERSION_CACHE_KEY, JSON.stringify(cache));
   } catch (e) {
     console.warn('Failed to save version cache to localStorage:', e);
+    if (e instanceof DOMException && e.name === 'QuotaExceededError') {
+      pruneVersionCache(cache, MAX_VERSION_CACHE_SIZE);
+      try {
+        localStorage.setItem(VERSION_CACHE_KEY, JSON.stringify(cache));
+      } catch (retryError) {
+        clearAllCaches();
+      }
+    }
   }
+}
+
+/**
+ * Prune all caches to their max sizes.
+ * Called when localStorage quota is exceeded.
+ */
+function pruneAllCaches(): void {
+  pruneMapCache(staticProfileCache, MAX_PROFILE_CACHE_SIZE);
+  pruneMapCache(staticNewsCache, MAX_NEWS_CACHE_SIZE);
+  pruneVersionCache(versionCache, MAX_VERSION_CACHE_SIZE);
 }
 
 // Static profile cache - populated by static_update messages from BFF
@@ -127,11 +238,12 @@ export function getCachedProfile(symbol: string): Record<string, any> | undefine
 
 /**
  * Set cached profile data for a symbol (from API fetch)
- * Also persists to localStorage
+ * Also persists to localStorage with throttling and size limit
  */
 export function setCachedProfile(symbol: string, profile: Record<string, any>) {
   staticProfileCache.set(symbol, profile);
-  saveMapToStorage(PROFILE_CACHE_KEY, staticProfileCache);
+  pruneMapCache(staticProfileCache, MAX_PROFILE_CACHE_SIZE);
+  saveMapToStorageThrottled(PROFILE_CACHE_KEY, staticProfileCache);
   setDataStatus(symbol, 'profile', 'ready');
 }
 
@@ -144,11 +256,12 @@ export function getCachedNews(symbol: string): any[] | undefined {
 
 /**
  * Set cached news data for a symbol (from API fetch)
- * Also persists to localStorage
+ * Also persists to localStorage with throttling and size limit
  */
 export function setCachedNews(symbol: string, news: any[]) {
   staticNewsCache.set(symbol, news);
-  saveMapToStorage(NEWS_CACHE_KEY, staticNewsCache);
+  pruneMapCache(staticNewsCache, MAX_NEWS_CACHE_SIZE);
+  saveMapToStorageThrottled(NEWS_CACHE_KEY, staticNewsCache);
   setDataStatus(symbol, 'news', 'ready');
 }
 
@@ -180,7 +293,7 @@ export function setDataStatus(symbol: string, type: 'profile' | 'news', status: 
   const current = dataStatusMap.get(symbol) || { profile: 'none', news: 'none' };
   current[type] = status;
   dataStatusMap.set(symbol, current);
-  saveMapToStorage(DATA_STATUS_KEY, dataStatusMap);
+  // Note: dataStatusMap is synced with profile/news caches, no separate save needed
 }
 
 /**
@@ -211,6 +324,7 @@ export function updateCachedVersion(symbol: string, domain: string, version: num
     versionCache[symbol] = {};
   }
   versionCache[symbol][domain] = version;
+  pruneVersionCache(versionCache, MAX_VERSION_CACHE_SIZE);
   saveVersionCacheToStorage(versionCache);
   return true;
 }
@@ -554,7 +668,8 @@ function handleMessage(message: WebSocketMessage) {
           const profileVersion = versions.profile ?? 0;
           if (updateCachedVersion(symbol, 'profile', profileVersion)) {
             staticProfileCache.set(symbol, { ...message.profile, _version: profileVersion });
-            saveMapToStorage(PROFILE_CACHE_KEY, staticProfileCache);
+            pruneMapCache(staticProfileCache, MAX_PROFILE_CACHE_SIZE);
+            saveMapToStorageThrottled(PROFILE_CACHE_KEY, staticProfileCache);
             setDataStatus(symbol, 'profile', 'ready');
           } else {
             console.debug(`[WebSocket] Skipping stale profile update for ${symbol}: v${profileVersion}`);
@@ -568,7 +683,8 @@ function handleMessage(message: WebSocketMessage) {
           }
           if (message.profile && Object.keys(message.profile).length > 0) {
             staticProfileCache.set(symbol, message.profile);
-            saveMapToStorage(PROFILE_CACHE_KEY, staticProfileCache);
+            pruneMapCache(staticProfileCache, MAX_PROFILE_CACHE_SIZE);
+            saveMapToStorageThrottled(PROFILE_CACHE_KEY, staticProfileCache);
             setDataStatus(symbol, 'profile', 'ready');
           }
         }
@@ -610,10 +726,11 @@ function handleMessage(message: WebSocketMessage) {
           }
         });
 
-        // Save all updated caches to localStorage
+        // Prune and save all updated caches to localStorage (single batch save)
+        pruneMapCache(staticProfileCache, MAX_PROFILE_CACHE_SIZE);
+        pruneMapCache(staticNewsCache, MAX_NEWS_CACHE_SIZE);
         saveMapToStorage(PROFILE_CACHE_KEY, staticProfileCache);
         saveMapToStorage(NEWS_CACHE_KEY, staticNewsCache);
-        saveMapToStorage(DATA_STATUS_KEY, dataStatusMap);
 
         console.log('[WebSocket] Bootstrap complete:', {
           profiles: staticProfileCache.size,
@@ -646,7 +763,8 @@ function handleMessage(message: WebSocketMessage) {
           const normalizedExisting = existing.map((item) => ({ ...item, isNew: false }));
           const updated = [article, ...normalizedExisting].slice(0, 50);
           staticNewsCache.set(symbol, updated);
-          saveMapToStorage(NEWS_CACHE_KEY, staticNewsCache);
+          pruneMapCache(staticNewsCache, MAX_NEWS_CACHE_SIZE);
+          saveMapToStorageThrottled(NEWS_CACHE_KEY, staticNewsCache);
           setDataStatus(symbol, 'news', 'ready');
           store.patchStaticData(symbol, { hasNews: true });
 
@@ -743,6 +861,9 @@ function getWebSocket(): WebSocket | null {
 
       // Subscribe to market snapshot updates
       sendMessage({ type: 'subscribe_market_snapshot', payload: {} });
+
+      // Request initial chart data
+      sendMessage({ type: 'refresh_chart', payload: { top_n: 20 } });
 
       // Flush message queue
       while (messageQueue.length > 0) {

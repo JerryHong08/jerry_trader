@@ -695,3 +695,139 @@ pub fn load_trades_from_parquet_sync(
 
     Ok(trades)
 }
+
+// ── Standalone quote loader (for backtest) ──────────────────────────
+
+/// Load quotes from parquet for a single symbol/date synchronously.
+///
+/// Returns `Vec<(ts_ms, bid, ask, bid_size, ask_size)>` sorted ascending by timestamp.
+/// Tries partitioned file first, falls back to monolithic.
+///
+/// Mirror of `load_trades_from_parquet_sync` for quote data.
+pub fn load_quotes_from_parquet_sync(
+    lake_data_dir: &str,
+    symbol: &str,
+    date_yyyymmdd: &str,
+    end_ts_ms: i64,
+    start_ts_ms: i64,
+) -> Result<Vec<(i64, f64, f64, i64, i64)>> {
+    let year = &date_yyyymmdd[0..4];
+    let month = &date_yyyymmdd[4..6];
+    let day = &date_yyyymmdd[6..8];
+    let date_iso = format!("{}-{}-{}", year, month, day);
+
+    let base = std::path::Path::new(lake_data_dir).join("us_stocks_sip");
+
+    // Partitioned path: .../quotes_v1_partitioned/{symbol}/{YYYY-MM-DD}.parquet
+    let partitioned_path = base
+        .join("quotes_v1_partitioned")
+        .join(symbol)
+        .join(format!("{}.parquet", date_iso));
+
+    // Monolithic path: .../quotes_v1/{YYYY}/{MM}/{YYYY-MM-DD}.parquet
+    let monolithic_path = base
+        .join("quotes_v1")
+        .join(year)
+        .join(month)
+        .join(format!("{}.parquet", date_iso));
+
+    let load_start = Instant::now();
+
+    let (file_path, needs_ticker_filter) = if partitioned_path.exists() {
+        info!(
+            "load_quotes_from_parquet_sync: {} partitioned {}",
+            symbol,
+            partitioned_path.display()
+        );
+        (partitioned_path, false)
+    } else if monolithic_path.exists() {
+        info!(
+            "load_quotes_from_parquet_sync: {} monolithic {}",
+            symbol,
+            monolithic_path.display()
+        );
+        (monolithic_path, true)
+    } else {
+        anyhow::bail!(
+            "No parquet found for {} on {} (tried {} and {})",
+            symbol,
+            date_yyyymmdd,
+            partitioned_path.display(),
+            monolithic_path.display()
+        );
+    };
+
+    let mut lazy = LazyFrame::scan_parquet(&file_path, Default::default())
+        .context("Failed to scan parquet")?;
+
+    if needs_ticker_filter {
+        lazy = lazy.filter(col("ticker").eq(lit(symbol)));
+    }
+
+    if start_ts_ms > 0 {
+        let start_ts_ns = start_ts_ms * 1_000_000i64;
+        lazy = lazy.filter(
+            col("participant_timestamp")
+                .cast(polars::datatypes::DataType::Int64)
+                .gt_eq(lit(start_ts_ns)),
+        );
+    }
+
+    if end_ts_ms > 0 {
+        let end_ts_ns = end_ts_ms * 1_000_000i64;
+        lazy = lazy.filter(
+            col("participant_timestamp")
+                .cast(polars::datatypes::DataType::Int64)
+                .lt(lit(end_ts_ns)),
+        );
+    }
+
+    let df = lazy
+        .select(&[
+            col("participant_timestamp").cast(polars::datatypes::DataType::Int64),
+            col("bid_price").cast(polars::datatypes::DataType::Float64),
+            col("ask_price").cast(polars::datatypes::DataType::Float64),
+            col("bid_size").cast(polars::datatypes::DataType::Int64),
+            col("ask_size").cast(polars::datatypes::DataType::Int64),
+        ])
+        .sort(
+            ["participant_timestamp"],
+            SortMultipleOptions::default(),
+        )
+        .collect()
+        .context("Failed to collect quotes dataframe")?;
+
+    let n = df.height();
+    if n == 0 {
+        info!(
+            "load_quotes_from_parquet_sync: {} no quotes found in {:.1}ms",
+            symbol,
+            load_start.elapsed().as_secs_f64() * 1000.0
+        );
+        return Ok(Vec::new());
+    }
+
+    let timestamps = df.column("participant_timestamp")?.i64()?;
+    let bid_prices = df.column("bid_price")?.f64()?;
+    let ask_prices = df.column("ask_price")?.f64()?;
+    let bid_sizes = df.column("bid_size")?.i64()?;
+    let ask_sizes = df.column("ask_size")?.i64()?;
+
+    let mut quotes = Vec::with_capacity(n);
+    for i in 0..n {
+        if let (Some(ts_ns), Some(bid), Some(ask), Some(bsize), Some(asize)) =
+            (timestamps.get(i), bid_prices.get(i), ask_prices.get(i), bid_sizes.get(i), ask_sizes.get(i))
+        {
+            quotes.push((ts_ns / 1_000_000, bid, ask, bsize, asize));
+        }
+    }
+
+    info!(
+        "load_quotes_from_parquet_sync: {} loaded {} quotes in {:.1}ms",
+        symbol,
+        quotes.len(),
+        load_start.elapsed().as_secs_f64() * 1000.0
+    );
+
+    Ok(quotes)
+}

@@ -55,8 +55,8 @@ class BarContext:
 
     def get_volumes(self) -> list[int]:
         """Extract volumes from all bars."""
-        return [b.volume for b in self.bars]
+        return [int(b.volume) for b in self.bars]
 
     def get_price_volume_pairs(self) -> list[tuple[float, int]]:
         """Extract (close, volume) pairs for VWAP calculation."""
-        return [(b.close, b.volume) for b in self.bars]
+        return [(b.close, int(b.volume)) for b in self.bars]

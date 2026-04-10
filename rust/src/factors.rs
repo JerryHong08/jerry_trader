@@ -465,3 +465,54 @@ mod tests {
         assert!(result.abs() < 1e-6, "Expected ~0, got {result}");
     }
 }
+
+// ── Quote factor batch computation ─────────────────────────────────
+
+/// Result of batch quote factor computation.
+///
+/// Contains per-quote (spread_pct, mid_price) derived from raw bid/ask data.
+#[pyclass]
+#[derive(Debug, Clone)]
+pub struct QuoteFactorsResult {
+    /// (ts_ms, spread_pct, mid_price) tuples sorted by timestamp.
+    pub factors: Vec<(i64, f64, f64)>,
+}
+
+#[pymethods]
+impl QuoteFactorsResult {
+    #[getter]
+    fn factors(&self) -> Vec<(i64, f64, f64)> {
+        self.factors.clone()
+    }
+}
+
+/// Batch-compute quote-derived factors from raw bid/ask data.
+///
+/// For each quote, computes:
+///   - mid_price = (bid + ask) / 2
+///   - spread_pct = (ask - bid) / mid_price
+///
+/// Filters out quotes where bid <= 0 or ask <= 0 (invalid quotes).
+///
+/// Python signature:
+///   compute_quote_factors(quotes: list[tuple[int, float, float]])
+///   → QuoteFactorsResult
+#[pyfunction]
+#[pyo3(name = "compute_quote_factors")]
+pub fn py_compute_quote_factors(
+    quotes: Vec<(i64, f64, f64)>,
+) -> QuoteFactorsResult {
+    let factors: Vec<(i64, f64, f64)> = quotes
+        .into_iter()
+        .filter_map(|(ts_ms, bid, ask)| {
+            if bid <= 0.0 || ask <= 0.0 {
+                return None;
+            }
+            let mid = (bid + ask) / 2.0;
+            let spread_pct = (ask - bid) / mid;
+            Some((ts_ms, spread_pct, mid))
+        })
+        .collect();
+
+    QuoteFactorsResult { factors }
+}

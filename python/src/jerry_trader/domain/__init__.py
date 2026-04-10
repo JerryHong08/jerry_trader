@@ -4,6 +4,9 @@ This module contains immutable value objects and domain logic.
 No dependencies on infrastructure (Redis, ClickHouse, etc.).
 """
 
+# Backtest
+from jerry_trader.domain.backtest import BacktestResult, Candidate, SignalResult
+
 # Market data
 from jerry_trader.domain.market import (
     Bar,
@@ -56,4 +59,8 @@ __all__ = [
     "SignalType",
     "RiskLimits",
     "RiskState",
+    # Backtest
+    "Candidate",
+    "SignalResult",
+    "BacktestResult",
 ]

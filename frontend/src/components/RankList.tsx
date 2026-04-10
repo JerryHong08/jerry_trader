@@ -3,6 +3,7 @@ import { TrendingUp, TrendingDown, ArrowUpDown, ArrowUp, ArrowDown, Settings, X,
 import type { ModuleProps, RankItem, TickerState, RankListSortColumn, RankListSortDirection } from '../types';
 import { useBackendTimestamp, timestampStore, parseTimestamp } from '../hooks/useBackendTimestamps';
 import { useRankListData, useWebSocketConnection, useTickerVisibility, reconnectMainWebSocket } from '../hooks/useWebSocket';
+import { useTickDataStore } from '../stores/tickDataStore';
 
 // Default column configuration
 const DEFAULT_COLUMNS: RankListSortColumn[] = [
@@ -138,6 +139,10 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
   // Visibility management (pure UI state)
   const { visibleTickers, toggleVisibility, isVisible, showAll } = useTickerVisibility();
 
+  // Get addSymbols from tickDataStore for double-click sync
+  const addSymbols = useTickDataStore((s) => s.addSymbols);
+  const symbols = useTickDataStore((s) => s.symbols);
+
   // Ref to track if auto-visibility has been set (prevents re-running)
   const hasAutoVisibleRef = useRef(false);
 
@@ -210,8 +215,20 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
   }, []);
 
   const handleRowClick = useCallback((symbol: string) => {
+    // Single click: no action (reserved for future use)
+    // Double-click is handled by handleRowDoubleClick for group sync
+  }, []);
+
+  const handleRowDoubleClick = useCallback((symbol: string) => {
+    // Double-click triggers symbol sync to other modules in the same sync group
+    // First, add symbol to global subscription list if not already subscribed
+    const symbolUpper = symbol.toUpperCase();
+    if (!symbols.includes(symbolUpper)) {
+      addSymbols([symbolUpper], ['Q', 'T']);
+    }
+    // Then trigger group sync
     onSymbolSelect?.(symbol);
-  }, [onSymbolSelect]);
+  }, [onSymbolSelect, addSymbols, symbols]);
 
   const handleSort = useCallback((column: RankListSortColumn) => {
     let newDirection: RankListSortDirection = 'desc';
@@ -667,6 +684,7 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
               <tr
                 key={item.symbol}
                 onClick={() => handleRowClick(item.symbol)}
+                onDoubleClick={() => handleRowDoubleClick(item.symbol)}
                 className={`border-b border-zinc-800 hover:bg-zinc-800/50 transition-colors cursor-pointer ${
                   selectedSymbol === item.symbol ? 'bg-zinc-700/50' : ''
                 }`}

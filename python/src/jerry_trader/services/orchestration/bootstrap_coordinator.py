@@ -676,7 +676,7 @@ class BootstrapCoordinator:
 
         ready = event.wait(timeout=timeout)
         if ready:
-            logger.info(f"wait_for_ticker_ready - {symbol}: ready")
+            logger.debug(f"wait_for_ticker_ready - {symbol}: ready")
         else:
             logger.warning(
                 f"wait_for_ticker_ready - {symbol}: timeout after {timeout}s"

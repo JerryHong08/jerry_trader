@@ -83,6 +83,18 @@ mod _rust {
         Ok(factors::bootstrap_trade_rate(timestamps, window_ms, min_trades, compute_interval_ms))
     }
 
+    // ── Quote factor batch computation ───────────────────────────────
+    #[pymodule_export]
+    use super::factors::QuoteFactorsResult;
+
+    #[pyfunction]
+    #[pyo3(name = "compute_quote_factors")]
+    fn py_compute_quote_factors(
+        quotes: Vec<(i64, f64, f64)>,
+    ) -> factors::QuoteFactorsResult {
+        factors::py_compute_quote_factors(quotes)
+    }
+
     // ── Bar builder ─────────────────────────────────────────────────
     #[pymodule_export]
     use super::bars::BarBuilder;
@@ -113,6 +125,27 @@ mod _rust {
         start_ts_ms: i64,
     ) -> PyResult<Vec<(i64, f64, i64)>> {
         replayer::loader::load_trades_from_parquet_sync(
+            lake_data_dir,
+            symbol,
+            date_yyyymmdd,
+            end_ts_ms,
+            start_ts_ms,
+        )
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    // ── Parquet quote loader (for backtest) ─────────────────────────
+    #[pyfunction]
+    #[pyo3(name = "load_quotes_from_parquet")]
+    #[pyo3(signature = (lake_data_dir, symbol, date_yyyymmdd, end_ts_ms=0, start_ts_ms=0))]
+    fn py_load_quotes_from_parquet(
+        lake_data_dir: &str,
+        symbol: &str,
+        date_yyyymmdd: &str,
+        end_ts_ms: i64,
+        start_ts_ms: i64,
+    ) -> PyResult<Vec<(i64, f64, f64, i64, i64)>> {
+        replayer::loader::load_quotes_from_parquet_sync(
             lake_data_dir,
             symbol,
             date_yyyymmdd,

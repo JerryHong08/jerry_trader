@@ -39,29 +39,22 @@ I use my self-built human agent task management system [Topology](https://github
 ## Key Features
 
 ### Real-time Market Data Pipeline
-- Multi-source tick data ingestion (Polygon, Theta Data, local replay)
-- Rust-based BarBuilder with watermark close and late-arrival handling
-- ClickHouse storage for bars and factor snapshots
-
-### Factor Engine
-- Multi-timeframe technical indicators (EMA, Volume Ratio, Trade Rate, etc.)
-- Real-time factor computation and WebSocket streaming
-- Backtest-optimized factor storage with session support
+- multi-source tick data ingestion (Polygon, Theta Data, local replay)
+- rust-based BarBuilder with watermark close and late-arrival handling
+- clickHouse storage for bars and factor snapshots
 
 ### Replay System
-- Distributed clock synchronization across machines
-- Historical tick-by-tick replay with configurable speed
-- Cross-machine time accuracy via Redis heartbeat
+- distributed clock synchronization across machines
+- historical tick-by-tick replay with configurable speed
+- cross-machine time accuracy via Redis heartbeat
 
-### AI Agent Layer
-Rule-driven agent system inspired by ACT-R cognitive architecture:
+### Frontend  Visualization
+- market cross-section snapshot: Rank list, overview chart
+- stock detail: stock info, stock news
+- order: order placement, historical orders, portfolio
+- chart: Real-time bar chart, factor chart via WebSocket streaming
 
-- **Rule Engine**: Real-time monitoring with Strategy DSL (backtest-optimized triggers)
-- **Agent Think**: LLM deep analysis triggered by rules — cost-efficient, only runs on significant events
-- **Backtest Integration**: Validate rules, optimize thresholds, simulate agent decisions
-- **Output**: Notifications (Telegram/Discord), dynamic widgets, alerts
-
-See [roadmap/atcr-agent-system.md](roadmap/atcr-agent-system.md) for architecture details.
+### Strategy-based Backtest Pipeline
 
 ## Installation & Quick Start
 
@@ -180,20 +173,6 @@ poetry run pytest
 # Code formatting
 poetry run black python/
 poetry run isort python/
-```
-
-The proposed layout follows a **layered architecture** with strict dependency rules:
-
-```bash
-┌──────────────────────────────────────────┐
-│           apps/  +  runtime/             │  ← Entry points, HTTP/WS, CLI
-├──────────────────────────────────────────┤
-│               services/                  │  ← Stateful workers, use-cases
-├──────────────────────────────────────────┤
-│               domain/                    │  ← Pure value objects, NO I/O
-├───────────────────┬──────────────────────┤
-│    platform/      │       shared/        │  ← Infra clients  |  Utils
-└───────────────────┴──────────────────────┘
 ```
 
 ## Data Flow

@@ -7,25 +7,21 @@ Usage:
         replay_date="20260115",
         suffix_id="test",
         redis_config={"host": "localhost", "port": 6379, "db": 0},
-        influxdb_config={"influx_url_env": "INFLUXDB_URL"},
     )
     await replayer.start()
 """
 
 import asyncio
 import glob
-import json
 import logging
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
 
-import influxdb_client
 import polars as pl
 import redis
-from influxdb_client.client.delete_api import DeleteApi
 
 from jerry_trader.platform.config.config import cache_dir
 from jerry_trader.platform.config.session import make_session_id
@@ -69,13 +65,8 @@ class MarketSnapshotReplayer:
     - Async-compatible with start()/stop() interface
     - Configurable speed multiplier
     - Resume from specific timestamp
-    - Rollback and clear data utilities
-    - Database config passed via constructor (like NewsWorker)
+    - Rollback and clear Redis data utilities
     """
-
-    # InfluxDB defaults (can be overridden via influxdb_config)
-    DEFAULT_INFLUX_ORG = "jerryhong"
-    DEFAULT_INFLUX_BUCKET = "jerrymmm"
 
     def __init__(
         self,
@@ -104,7 +95,7 @@ class MarketSnapshotReplayer:
             clear: Clear all data before starting (fresh start)
             session_id: Unified session identifier (e.g. '20260115_replay_v1')
             redis_config: Redis connection config dict with host, port, db keys
-            influxdb_config: InfluxDB connection config dict with influx_url_env key
+            influxdb_config: Deprecated, ignored.
         """
         self.replay_date = replay_date
         self.suffix_id = suffix_id
@@ -132,17 +123,6 @@ class MarketSnapshotReplayer:
             host=redis_host, port=redis_port, db=redis_db, decode_responses=True
         )
 
-        # Parse influxdb config
-        influx_cfg = influxdb_config or {}
-        influx_url_env = influx_cfg.get("influx_url_env")
-        self.influx_url = (
-            os.getenv(influx_url_env) if influx_url_env else "http://localhost:8086"
-        )
-        self.influx_org = influx_cfg.get("org", self.DEFAULT_INFLUX_ORG)
-        self.influx_bucket = influx_cfg.get("bucket", self.DEFAULT_INFLUX_BUCKET)
-        influx_token_env = influx_cfg.get("influx_token_env")
-        self.influx_token = os.getenv(influx_token_env) if influx_token_env else None
-
         # Redis key names — all scoped by session_id (from centralized schema)
         self.INPUT_STREAM = market_snapshot_stream(self.session_id)
         self.OUTPUT_STREAM = market_snapshot_processed(self.session_id)
@@ -156,8 +136,7 @@ class MarketSnapshotReplayer:
 
         logger.info(
             f"MarketSnapshotReplayer initialized: date={replay_date}, session_id={self.session_id},\n"
-            f"speed={speed}x, format={file_format}, redis={redis_host}:{redis_port}\n"
-            f"influxdb_url={self.influx_url}, influxdb_bucket={self.influx_bucket}"
+            f"speed={speed}x, format={file_format}, redis={redis_host}:{redis_port}"
         )
 
     async def start(self):
@@ -382,7 +361,7 @@ class MarketSnapshotReplayer:
 
     def _rollback_to_timestamp(self, rollback_time: str) -> None:
         """
-        Rollback all Redis and InfluxDB data to a specific timestamp.
+        Rollback all Redis data to a specific timestamp.
 
         This method cleans up:
         - market_snapshot_stream:{session_id} - Redis Stream (entries after timestamp)
@@ -390,8 +369,6 @@ class MarketSnapshotReplayer:
         - movers_state:{session_id} - Redis Stream (entries after timestamp)
         - movers_subscribed_set:{session_id} - Redis ZSET (tickers first appeared after timestamp)
         - state_cursor:{session_id} - Redis HSET (reset timestamps to rollback point)
-        - InfluxDB market_snapshot measurement (data after timestamp)
-        - InfluxDB movers_state measurement (data after timestamp)
 
         Args:
             rollback_time: The timestamp to rollback to (HHMMSS), e.g., "061652"
@@ -456,8 +433,7 @@ class MarketSnapshotReplayer:
         else:
             logger.info(f"HSET {self.CURSOR_HSET} does not exist, skipping")
 
-        # Rollback InfluxDB data
-        self._rollback_influxdb(rollback_dt)
+        # (ClickHouse data is immutable — use snapshot_builder to regenerate)
 
         logger.info("=" * 70)
         logger.info(f"Rollback completed.")
@@ -485,119 +461,14 @@ class MarketSnapshotReplayer:
 
         return len(entries_to_delete)
 
-    def _rollback_influxdb(self, rollback_dt: datetime) -> None:
-        """Rollback InfluxDB data after the specified datetime."""
-
-        if not self.influx_token:
-            logger.warning("INFLUXDB_TOKEN not set, skipping InfluxDB rollback")
-            return
-
-        try:
-            client = influxdb_client.InfluxDBClient(
-                url=self.influx_url, token=self.influx_token, org=self.influx_org
-            )
-            delete_api = client.delete_api()
-
-            start_delete = rollback_dt + timedelta(seconds=1)
-            stop_delete = rollback_dt.replace(hour=23, minute=59, second=59)
-
-            logger.info(f"Deleting InfluxDB data from {start_delete} to {stop_delete}")
-
-            # Delete from market_snapshot measurement
-            predicate_snapshot = (
-                f'_measurement="market_snapshot" AND session_id="{self.session_id}"'
-            )
-            delete_api.delete(
-                start=start_delete,
-                stop=stop_delete,
-                predicate=predicate_snapshot,
-                bucket=self.influx_bucket,
-                org=self.influx_org,
-            )
-            logger.info(f"Deleted InfluxDB market_snapshot data after {rollback_dt}")
-
-            # Delete from movers_state measurement
-            predicate_state = (
-                f'_measurement="movers_state" AND session_id="{self.session_id}"'
-            )
-            delete_api.delete(
-                start=start_delete,
-                stop=stop_delete,
-                predicate=predicate_state,
-                bucket=self.influx_bucket,
-                org=self.influx_org,
-            )
-            logger.info(f"Deleted InfluxDB movers_state data after {rollback_dt}")
-
-            client.close()
-
-        except Exception as e:
-            logger.error(f"InfluxDB rollback failed: {e}")
-
     def _clear_all_data(self) -> None:
-        """Clear all Redis and InfluxDB data for the replay date (fresh start)."""
+        """Clear all Redis data for the replay date (fresh start)."""
         logger.info("=" * 70)
         logger.info(f"Clearing all data for replay date: {self.replay_date}")
         logger.info("=" * 70)
 
         # Delete ALL session-scoped Redis keys (streams, sets, hashes, etc.)
         clear_session_keys(self.r, self.session_id)
-
-        # Delete InfluxDB data
-
-        if not self.influx_token:
-            logger.warning("INFLUXDB_TOKEN not set, skipping InfluxDB clear")
-            return
-
-        try:
-            client = influxdb_client.InfluxDBClient(
-                url=self.influx_url, token=self.influx_token, org=self.influx_org
-            )
-            delete_api = client.delete_api()
-
-            start_delete = datetime(
-                int(self.replay_date[:4]),
-                int(self.replay_date[4:6]),
-                int(self.replay_date[6:8]),
-                0,
-                0,
-                0,
-                tzinfo=ZoneInfo("America/New_York"),
-            )
-            stop_delete = start_delete + timedelta(days=1)
-
-            logger.info(f"Deleting InfluxDB data from {start_delete} to {stop_delete}")
-
-            # Delete from market_snapshot measurement
-            predicate_snapshot = (
-                f'_measurement="market_snapshot" AND session_id="{self.session_id}"'
-            )
-            delete_api.delete(
-                start=start_delete,
-                stop=stop_delete,
-                predicate=predicate_snapshot,
-                bucket=self.influx_bucket,
-                org=self.influx_org,
-            )
-            logger.info(f"Deleted InfluxDB market_snapshot data for {self.replay_date}")
-
-            # Delete from movers_state measurement
-            predicate_state = (
-                f'_measurement="movers_state" AND session_id="{self.session_id}"'
-            )
-            delete_api.delete(
-                start=start_delete,
-                stop=stop_delete,
-                predicate=predicate_state,
-                bucket=self.influx_bucket,
-                org=self.influx_org,
-            )
-            logger.info(f"Deleted InfluxDB movers_state data for {self.replay_date}")
-
-            client.close()
-
-        except Exception as e:
-            logger.error(f"InfluxDB clear failed: {e}")
 
         logger.info("=" * 70)
         logger.info("Clear completed. Ready for fresh replay.")
@@ -614,14 +485,12 @@ def rollback_to_timestamp(
     rollback_time: str,
     suffix_id: Optional[str] = None,
     redis_config: Optional[Dict[str, Any]] = None,
-    influxdb_config: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Standalone rollback function for CLI usage."""
     replayer = MarketSnapshotReplayer(
         replay_date=replay_date,
         suffix_id=suffix_id,
         redis_config=redis_config,
-        influxdb_config=influxdb_config,
     )
     replayer._rollback_to_timestamp(rollback_time)
 
@@ -630,14 +499,12 @@ def clear_all_data(
     replay_date: str,
     suffix_id: Optional[str] = None,
     redis_config: Optional[Dict[str, Any]] = None,
-    influxdb_config: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Standalone clear function for CLI usage."""
     replayer = MarketSnapshotReplayer(
         replay_date=replay_date,
         suffix_id=suffix_id,
         redis_config=redis_config,
-        influxdb_config=influxdb_config,
     )
     replayer._clear_all_data()
 
@@ -684,7 +551,7 @@ Examples:
     # Clear all data for a fresh start
     python replayer.py --date 20260115 --clear
 
-    # With custom suffix_id (for InfluxDB tagging)
+    # With custom suffix_id (for session identification)
     python replayer.py --date 20260115 --suffix-id test --rollback-to 061652
         """,
     )
@@ -720,7 +587,7 @@ Examples:
         "--suffix-id",
         type=str,
         default=None,
-        help="Custom suffix ID for InfluxDB tagging (default: replay_{date})",
+        help="Custom suffix ID for session identification (default: replay_{date})",
     )
     parser.add_argument("--redis-host", type=str, default="localhost")
     parser.add_argument("--redis-port", type=int, default=6379)

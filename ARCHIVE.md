@@ -8,6 +8,15 @@ Foundation pure business logic value objects.
 - [x] 1.2 Populate domain/order/ with Order, OrderState, Fill models
 - [x] 1.4 Populate domain/factor/ with FactorSnapshot value object
 
+
+## 10. Backtest Data Acquisition & Validation
+
+- [x] 10.1 Polygon downloader — data/downloader.py: S3 download with resume (adapted from quant101)
+- [x] 10.2 CSV.gz → Parquet converter — data/converter.py: Polars streaming conversion
+- [x] 10.3 Data checker — data/checker.py: validate trades/quotes/snapshot completeness
+- [x] 10.4 Snapshot builder — data/snapshot_builder.py: two-stage streaming pipeline (sink_parquet + chunked rank) for 150M+ trades
+- [x] 10.5 Data CLI — data/cli.py: unified CLI (download, convert, check, build-snapshot, prepare)
+
 ## 2. Rust Core
 Performance-critical components rewritten in Rust.
 
@@ -45,6 +54,9 @@ Stateful workers and use-case implementations.
 - [x] 3.18 FactorEngine 重构 - 使用 Registry 创建 indicators
 - [~] 3.19 前端增量更新 - Dropped（前端缓存复杂度高，性价比低）
 
+- [~] 3.20 智能默认 - Factor-Timeframe 映射配置
+- [x] 3.21 Move config_builder.py from platform/config/ to runtime/ (only consumer is backend_starter)
+
 ## 5. Frontend
 React/TradingView UI modules and UX improvements.
 
@@ -69,6 +81,17 @@ React/TradingView UI modules and UX improvements.
   - [x] 5.14.2 TradeRate canvas stability (single fitContent)
   - [x] 5.14.3 Overlay factor rendering timing fix
 
+- [x] 5.15 Fix tick factor real-time update - compute and publish on tick arrival
+- [x] [5.16](roadmap/factor-subscription-scenarios.md) Fix factor subscription lifecycle - timeframe switch, unsubscribe/re-subscribe, multi-chart scenarios
+- [x] 5.17 Cheat method: cleanup ticker on unsubscribe - clear runtime state only, preserve ClickHouse history
+- [x] 5.18 Batch factor updates in factorDataStore -- updateFactors calls set() N times for N factors, causing N React re-renders per tick. Refactor to single set() call with all factors merged at once.
+- [x] 5.20 RankList double-click for group sync - double-click adds symbol to global subscription then triggers group sync
+- [x] 5.25 Remove legacy FactorChartModule - removed component, registry entry, type, template reference, and stale comments
+- [x] 5.26 Fix localStorage unbounded growth - size limits, pruning, throttling implemented in useWebSocket.ts
+- [x] 5.27 Fix TradingView setData loop - seriesInitializedRef tracks init state in OverviewChartModule.tsx
+- [x] 5.28 Fix Zustand Map recreation - only create new Map on actual changes in marketDataStore.ts
+- [x] 5.29 Fix event listener leaks - cleanup in useEffect return in OverviewChartModule.tsx
+
 ## 6. Orchestration
 
 System-wide coordination and backtest infrastructure.
@@ -91,6 +114,7 @@ System-wide coordination and backtest infrastructure.
 - [x] 6.10 Fix clock synchronization - ReplayClock and TickDataReplayer shared time
 - [x] 6.11 Fix factor query - add session filter and remove FINAL
 
+
 ## 7. AI Agent Layer
 
 ATC-R Agent System - ACT-R inspired architecture with production rules (Strategy DSL) as first-class citizens.
@@ -101,7 +125,26 @@ ATC-R Agent System - ACT-R inspired architecture with production rules (Strategy
 - [~] 7.16 Widget sandbox (Phase 4, simplified)
 - [~] 7.17 Right-click interaction (over-engineered)
 
+- [x] [7.1](roadmap/atcr-agent-system.md) Signal Engine — subscribe to factor streams, evaluate DSL rules, trigger on top-20 entry
+- [x] [7.2](roadmap/atcr-agent-system.md) Strategy DSL — YAML rule schema, factor conditions, parser/validator
+- [x] 7.10 Signal event persistence — store trigger events to ClickHouse (rule_id, symbol, trigger_time, factors). Returns computed offline via SQL JOIN with ohlcv bars. Includes SQL schema + Python storage writer.
+
 ## 8. Optional Features
 Enhancements and additional modules.
 - [x] 8.1 Multi-machine SSH deployment configured in config.yaml
 - [x] 8.2 News engine output from log to JSON log
+
+## 9. Backtest Pipeline
+
+- [x] [9.1](roadmap/backtest-pipeline-design.md) Backtest data models — domain/backtest/types.py + services/backtest/config.py
+- [x] [9.2](roadmap/backtest-prefilter-findings.md) Candidate pre-filter — true entry detection from market_snapshot
+- [x] 9.3 Data loader — data_loader.py: Rust loaders for trades/quotes Parquet
+- [x] [9.4](roadmap/backtest-pipeline-design.md) Batch engine — batch_engine.py: FactorEngineBatchAdapter, reuses live FactorRegistry indicators (replaces factor_batch.py)
+- [x] 9.5 Signal evaluator — evaluator.py: evaluate DSL rules against factor timeseries, reuse evaluate_condition/trigger
+- [x] 9.6 Return & metrics — metrics.py: slippage (ask+buffer), returns at multi-horizon, MFE/MAE, time-to-peak
+- [x] 9.7 Output — output.py: console summary table + ClickHouse backtest_results table persistence
+- [x] 9.8 Runner + CLI — runner.py orchestrator + cli.py entry point (--date, --date-range, --rules, --gain-threshold)
+- [x] 9.9 snapshot_builder_v2: 分层输出 ranked_data (Pre-filter) + collector_format (Replay)
+- [x] 9.10 split 预处理
+- [x] 9.11 HistoricalLoader — CH bootstrap for replay mode
+- [x] 9.14 Parquet Snapshot Validator

@@ -419,40 +419,64 @@ export function ChartPanelSystem({
 
       {/* Panels container */}
       <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
-        {panels.filter((p) => p.visible).map((panel) => (
-          <ChartPanelWrapper
-            key={panel.id}
-            id={panel.id}
-            title={panel.id === 'price' ? 'Price' : availableFactors.find((f) => f.id === panel.id)?.display.name || panel.id}
-            collapsed={panel.collapsed}
-            visible={panel.visible}
-            canClose={panel.id !== 'price'} // Price panel cannot be closed
-            onToggleCollapse={() => togglePanelCollapse(panel.id)}
-            onClose={panel.id !== 'price' ? () => closePanel(panel.id) : undefined}
-            className={panel.collapsed ? '' : 'flex-1 min-h-[100px]'}
-          >
-            {panel.id === 'price' ? (
-              <PricePanel
-                moduleId={moduleId}
-                symbol={symbol}
-                timeframe={timeframe}
-                chartState={chartState}
-                overlays={panel.overlays || []}
-                availableFactors={availableFactors}
-                zoom={zoom}
-              />
-            ) : (
-              <FactorPanel
-                moduleId={moduleId}
-                symbol={symbol}
-                factorId={panel.id}
-                timeframe={timeframe}
-                factorSpec={availableFactors.find((f) => f.id === panel.id)}
-                zoom={zoom}
-              />
-            )}
-          </ChartPanelWrapper>
-        ))}
+        {panels.filter((p) => p.visible).map((panel) => {
+          // Compute last value for factor panels
+          let factorLastValue: { value: number; color: string } | null = null;
+          if (panel.id !== 'price' && symbol) {
+            const factorSpec = availableFactors.find((f) => f.id === panel.id);
+            const factorType = factorSpec?.type || 'bar';
+            const factorTimeframe = factorType === 'trade' ? 'trade' : timeframe;
+            const factorKey = factorStoreKey(moduleId, symbol, factorTimeframe);
+            const factorData = symbolFactors[factorKey]?.factors?.[panel.id];
+            const lastPoint = factorData?.[factorData.length - 1];
+            if (lastPoint != null && factorSpec) {
+              factorLastValue = { value: lastPoint.value, color: factorSpec.display.color };
+            }
+          }
+
+          return (
+            <ChartPanelWrapper
+              key={panel.id}
+              id={panel.id}
+              title={panel.id === 'price' ? 'Price' : availableFactors.find((f) => f.id === panel.id)?.display.name || panel.id}
+              collapsed={panel.collapsed}
+              visible={panel.visible}
+              canClose={panel.id !== 'price'}
+              onToggleCollapse={() => togglePanelCollapse(panel.id)}
+              onClose={panel.id !== 'price' ? () => closePanel(panel.id) : undefined}
+              className={panel.collapsed ? '' : 'flex-1 min-h-[100px]'}
+              headerRight={factorLastValue ? (
+                <span
+                  className="text-[11px] font-mono font-semibold px-1.5 py-0.5 rounded"
+                  style={{ color: factorLastValue.color, backgroundColor: factorLastValue.color + '15' }}
+                >
+                  {factorLastValue.value.toFixed(2)}
+                </span>
+              ) : undefined}
+            >
+              {panel.id === 'price' ? (
+                <PricePanel
+                  moduleId={moduleId}
+                  symbol={symbol}
+                  timeframe={timeframe}
+                  chartState={chartState}
+                  overlays={panel.overlays || []}
+                  availableFactors={availableFactors}
+                  zoom={zoom}
+                />
+              ) : (
+                <FactorPanel
+                  moduleId={moduleId}
+                  symbol={symbol}
+                  factorId={panel.id}
+                  timeframe={timeframe}
+                  factorSpec={availableFactors.find((f) => f.id === panel.id)}
+                  zoom={zoom}
+                />
+              )}
+            </ChartPanelWrapper>
+          );
+        })}
       </div>
 
       {/* Empty state */}

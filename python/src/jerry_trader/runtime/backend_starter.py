@@ -90,6 +90,9 @@ class JerryTraderBackendStarter:
         self._running = False
         self._services = []
         self._threads = []
+        self._bootstrap_coordinator = (
+            None  # Set later if BarsBuilder/FactorEngine enabled
+        )
 
         # Setup signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -281,6 +284,7 @@ class JerryTraderBackendStarter:
         else:
             self.collector = None
 
+        # Parquet-based Replayer (reads from cache/market_mover parquet files)
         if "Replayer" in self.roles:
             from jerry_trader.apps.snapshot_app.replayer import MarketSnapshotReplayer
 
@@ -331,7 +335,6 @@ class JerryTraderBackendStarter:
                 rollback_to=role_cfg.get("rollback_to"),
                 clear=role_cfg.get("clear", False),
                 redis_config=role_cfg.get("redis"),
-                influxdb_config=role_cfg.get("influxdb"),
                 remote_clock=_remote_clock,
             )
             self._services.append(("Replayer", self.replayer))
@@ -856,6 +859,76 @@ class JerryTraderBackendStarter:
         if self.processor:
             self.processor.start()
             logger.info("SnapshotProcessor started")
+
+            # In replay mode, bootstrap from ClickHouse using HistoricalLoader
+            if self.replay_date:
+                from jerry_trader.services.market_snapshot.historical_loader import (
+                    HistoricalLoader,
+                )
+
+                # Get ClickHouse config
+                ch_cfg = self.roles.get("SnapshotProcessor", {}).get("clickhouse", {})
+                ch_host = ch_cfg.get("host", "localhost")
+                ch_port = ch_cfg.get("port", 8123)
+                ch_user = ch_cfg.get("user", "default")
+                ch_db = ch_cfg.get("database", "jerry_trader")
+                ch_password = os.getenv(
+                    ch_cfg.get("password_env", "CLICKHOUSE_PASSWORD"), ""
+                )
+
+                import clickhouse_connect
+
+                ch_client = clickhouse_connect.get_client(
+                    host=ch_host,
+                    port=ch_port,
+                    username=ch_user,
+                    password=ch_password,
+                    database=ch_db,
+                )
+
+                # Bootstrap settings from config
+                bootstrap_cfg = self.roles.get("SnapshotProcessor", {}).get(
+                    "bootstrap", {}
+                )
+                bootstrap_start = bootstrap_cfg.get(
+                    "start_ms"
+                )  # Optional: start from specific time
+                bootstrap_end = bootstrap_cfg.get(
+                    "end_ms"
+                )  # Optional: end at specific time
+
+                def _run_bootstrap():
+                    loader = HistoricalLoader(
+                        processor=self.processor,
+                        ch_client=ch_client,
+                        session_id=self.session_id,
+                    )
+                    logger.info(
+                        f"Starting ClickHouse bootstrap: start={bootstrap_start}, end={bootstrap_end}"
+                    )
+                    result = loader.bootstrap(
+                        start_ms=bootstrap_start, end_ms=bootstrap_end
+                    )
+                    logger.info(f"Bootstrap complete: {result}")
+
+                    # Jump clock to bootstrap end so replay continues from there
+                    if result.get("success") and result.get("end_ms"):
+                        from jerry_trader import clock
+
+                        end_ts_ns = int(result["end_ms"]) * 1_000_000
+                        clock.jump_to(end_ts_ns)
+                        end_dt = datetime.fromtimestamp(
+                            result["end_ms"] / 1000, tz=self.tz
+                        )
+                        logger.info(
+                            f"🕐 Clock jumped to bootstrap end: {end_dt.strftime('%H:%M:%S')} ET"
+                        )
+
+                bootstrap_thread = Thread(
+                    target=_run_bootstrap, name="CHBootstrap", daemon=True
+                )
+                bootstrap_thread.start()
+                self._threads.append(bootstrap_thread)
 
         # Start StateEngine (it creates its own thread internally)
         if self.state_engine:

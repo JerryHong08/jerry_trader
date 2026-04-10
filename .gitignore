@@ -127,3 +127,5 @@ skills-lock.json
 
 .topology.json
 .topology/*
+
+validation_report.json

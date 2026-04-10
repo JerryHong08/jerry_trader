@@ -8,7 +8,7 @@ Architecture:
 - Redis Stream Input: market_snapshot_stream:{date} (from collector)
 - Redis Stream Output: market_snapshot_processed:{date} (for BFF and StateEngine)
 - Redis Set: movers_subscribed_set:{date} (subscription tracking)
-- InfluxDB market_snapshot: stores all subscribed tickers' historical snapshot data
+- ClickHouse market_snapshot: stores all subscribed tickers' historical snapshot data
 
 Computation is delegated to core.snapshot.compute (or Rust via _bridge).
 """
@@ -25,19 +25,54 @@ from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import clickhouse_connect
-import influxdb_client
 import polars as pl
 import redis
 from dotenv import load_dotenv
-from influxdb_client.client.write_api import SYNCHRONOUS
 
 load_dotenv()
-from jerry_trader._rust import (
-    VolumeTracker,
-    compute_derived_metrics,
-    compute_ranks,
-    compute_weighted_mid_price,
-)
+from jerry_trader._rust import VolumeTracker
+
+
+# Python implementations of compute functions (moved from Rust)
+def compute_ranks(df: pl.DataFrame) -> pl.DataFrame:
+    """Compute ordinal ranks based on changePercent (descending)."""
+    if "rank" in df.columns:
+        # Already has rank (from replay), return as-is
+        return df
+    return df.with_columns(
+        pl.col("changePercent")
+        .rank(method="ordinal", descending=True)
+        .cast(pl.Int32)
+        .alias("rank")
+    )
+
+
+def compute_derived_metrics(
+    df: pl.DataFrame,
+    timestamp: datetime,
+    volume_tracker: VolumeTracker,
+) -> pl.DataFrame:
+    """Compute derived metrics: relativeVolume5min."""
+    # Relative volume (5min)
+    tickers = df["ticker"].to_list()
+    timestamps = [timestamp] * len(tickers)
+    volumes = df["volume"].to_list()
+
+    rel_vols = volume_tracker.compute_batch(tickers, timestamps, volumes)
+
+    return df.with_columns(pl.Series("relativeVolume5min", rel_vols))
+
+
+def compute_weighted_mid_price(df: pl.DataFrame) -> pl.DataFrame:
+    """Compute weighted mid-price from bid/ask."""
+    return df.with_columns(
+        (
+            (pl.col("bid") * pl.col("ask_size") + pl.col("ask") * pl.col("bid_size"))
+            / (pl.col("bid_size") + pl.col("ask_size"))
+        ).alias("weighted_mid")
+    )
+
+
 from jerry_trader.platform.config.config import cache_dir
 from jerry_trader.platform.config.session import (
     db_date_to_date,
@@ -67,7 +102,7 @@ class SnapshotProcessor:
     - Receives data from Redis stream or local files
     - Computes ranks and derived metrics (via core.snapshot.compute / Rust)
     - Manages subscription set
-    - Writes to output Redis Stream and InfluxDB
+    - Writes to output Redis Stream and ClickHouse
 
     Does NOT handle state computation (delegated to StateEngine).
     """
@@ -89,39 +124,7 @@ class SnapshotProcessor:
 
         self.load_history = load_history
 
-        # ---------- InfluxDB Configuration ----------
-        self._influx_client = None
-        self._write_api = None
-        self._query_api = None
-
-        influx_cfg = influxdb_config or {}
-        self.org = influx_cfg.get("org", "jerryhong")
-        self.bucket = influx_cfg.get("bucket", "")
-        self.influx_url = None
-
-        if influx_cfg:
-            influx_token_env = influx_cfg.get("influx_token_env")
-            token = os.environ.get(influx_token_env) if influx_token_env else None
-
-            influx_url_env = influx_cfg.get("influx_url_env")
-            self.influx_url = (
-                os.getenv(influx_url_env) if influx_url_env else "http://localhost:8086"
-            )
-
-            self._influx_client = influxdb_client.InfluxDBClient(
-                url=self.influx_url, token=token, org=self.org
-            )
-            self._write_api = self._influx_client.write_api(write_options=SYNCHRONOUS)
-            self._query_api = self._influx_client.query_api()
-            logger.info(
-                f"__init__ - InfluxDB configured: url={self.influx_url}, bucket={self.bucket}"
-            )
-        else:
-            logger.info(
-                "__init__ - InfluxDB not configured; ClickHouse-only mode enabled"
-            )
-
-        # ---------- ClickHouse Configuration (gradual migration) ----------
+        # ---------- ClickHouse Configuration ----------
         self.ch_client = None
         ch_cfg = clickhouse_config or {}
         if ch_cfg:
@@ -144,15 +147,8 @@ class SnapshotProcessor:
                     f"__init__ - ClickHouse connected: {ch_host}:{ch_port}/{ch_db}"
                 )
             except Exception as e:
-                logger.warning(
-                    f"__init__ - ClickHouse unavailable, keeping Influx-only mode: {e}"
-                )
+                logger.warning(f"__init__ - ClickHouse unavailable: {e}")
                 self.ch_client = None
-
-        if not self.ch_client and not self._influx_client:
-            raise ValueError(
-                "SnapshotProcessor requires at least one backend: influxdb or clickhouse"
-            )
 
         # ---------- Redis Configuration ----------
         redis_cfg = redis_config or {}
@@ -194,14 +190,13 @@ class SnapshotProcessor:
         # Volume tracking — delegated to VolumeTracker (compute.py / Rust)
         self._volume_tracker = VolumeTracker()
 
-        # Reload volume history for recovery (prefer ClickHouse, fallback InfluxDB)
+        # Reload volume history for recovery
         self._reload_volume_history()
 
         logger.info(
             f"__init__ - SnapshotProcessor initialized: mode={self.run_mode}, "
             f"session_id={self.session_id}, INPUT={self.INPUT_STREAM_NAME}, OUTPUT={self.OUTPUT_STREAM_NAME}"
-            f", influxdb_url={self.influx_url}, bucket={self.bucket}, "
-            f"clickhouse={'connected' if self.ch_client else 'unavailable'}"
+            f", clickhouse={'connected' if self.ch_client else 'unavailable'}"
         )
 
     # =========================================================================
@@ -270,6 +265,12 @@ class SnapshotProcessor:
     def _process_stream_message(self, message_id, message_data):
         """Process a single message from the input stream."""
         try:
+            # Extract timestamp from message level
+            ts_value = message_data.get("timestamp") or message_data.get(b"timestamp")
+            if isinstance(ts_value, bytes):
+                ts_value = ts_value.decode("utf-8")
+            timestamp_ms = int(ts_value) if ts_value else None
+
             json_data = message_data.get("data") or message_data.get(b"data")
             if isinstance(json_data, bytes):
                 json_data = json_data.decode("utf-8")
@@ -277,6 +278,11 @@ class SnapshotProcessor:
             df = pl.read_json(
                 json_data.encode() if isinstance(json_data, str) else json_data
             )
+
+            # Add timestamp column from message level
+            if timestamp_ms and "timestamp" not in df.columns:
+                df = df.with_columns(pl.lit(timestamp_ms).alias("timestamp"))
+
             result = self._process_snapshot(df, is_historical=False)
 
             # Acknowledge the message
@@ -429,7 +435,13 @@ class SnapshotProcessor:
     # CORE PROCESSING
     # =========================================================================
 
-    def _process_snapshot(self, df: pl.DataFrame, is_historical: bool = False) -> Dict:
+    def _process_snapshot(
+        self,
+        df: pl.DataFrame,
+        is_historical: bool = False,
+        skip_redis: bool = False,
+        skip_ch: bool = False,
+    ) -> Dict:
         """
         Main processing entry point.
 
@@ -438,7 +450,14 @@ class SnapshotProcessor:
         2. Compute ranks (via _bridge → Rust or Python)
         3. Compute derived metrics (via _bridge → Rust or Python)
         4. Update subscription set
-        5. Write to output Redis Stream and InfluxDB
+        5. Write to ClickHouse (unless skip_ch=True)
+        6. Write to Redis OUTPUT Stream (unless skip_redis=True)
+
+        Args:
+            df: Input snapshot DataFrame
+            is_historical: Whether this is historical data loading
+            skip_redis: If True, skip Redis write (bootstrap mode)
+            skip_ch: If True, skip ClickHouse write (bootstrap mode — data already in CH)
         """
         # Step 0: Prepare data (filter common stocks, handle missing data)
         prepared_df = self._prepare_data(df)
@@ -468,9 +487,16 @@ class SnapshotProcessor:
             )
             new_subscriptions = []
 
-        # Step 5: Get all subscribed tickers and write to output stream + InfluxDB
-        all_subscribed = self._get_all_subscribed_tickers()
-        self._write_to_output_stream_and_influx(enriched_df, all_subscribed, timestamp)
+        # Step 5: Get all subscribed tickers and write to output stream + ClickHouse
+        # In bootstrap mode (skip_redis=True), only write to ClickHouse, not Redis
+        # In full bootstrap mode (skip_ch=True), skip both — data already in CH
+        if not skip_ch:
+            all_subscribed = self._get_all_subscribed_tickers()
+            self._write_to_output_stream_and_ch(
+                enriched_df, all_subscribed, timestamp, skip_redis=skip_redis
+            )
+        else:
+            all_subscribed = self._get_all_subscribed_tickers()
 
         # Update last_df for data filling
         self.last_df = prepared_df
@@ -516,25 +542,37 @@ class SnapshotProcessor:
             logger.error(f"_prepare_data - Error filtering common stocks: {e}")
             filtered_df = lf.sort("changePercent", descending=True).collect()
 
+        # Compute weighted mid-price BEFORE schema comparison
+        # so new data matches last_df's schema
+        filtered_df = compute_weighted_mid_price(filtered_df)
+
         # Fill missing data from last snapshot if needed
         if len(self.last_df) > 0 and len(self.last_df) != len(filtered_df):
-            # Dynamically get all columns except the grouping column
-            all_columns = filtered_df.columns
-            agg_columns = [col for col in all_columns if col != "ticker"]
+            # Check schema compatibility before concat
+            last_cols = set(self.last_df.columns)
+            new_cols = set(filtered_df.columns)
+            if last_cols != new_cols:
+                logger.debug(
+                    f"_prepare_data - Schema mismatch, resetting last_df: "
+                    f"last={last_cols}, new={new_cols}"
+                )
+                self.last_df = pl.DataFrame()
+                filled_df = filtered_df
+            else:
+                # Dynamically get all columns except the grouping column
+                all_columns = filtered_df.columns
+                agg_columns = [col for col in all_columns if col != "ticker"]
 
-            filled_df = (
-                pl.concat([self.last_df.lazy(), filtered_df.lazy()], how="vertical")
-                .sort("timestamp")
-                .group_by(["ticker"])
-                .agg([pl.col(col).last() for col in agg_columns])
-                .sort("changePercent", descending=True)
-                .collect()
-            )
+                filled_df = (
+                    pl.concat([self.last_df.lazy(), filtered_df.lazy()], how="vertical")
+                    .sort("timestamp")
+                    .group_by(["ticker"])
+                    .agg([pl.col(col).last() for col in agg_columns])
+                    .sort("changePercent", descending=True)
+                    .collect()
+                )
         else:
             filled_df = filtered_df
-
-        # Weighted mid-price (delegated to compute module)
-        filled_df = compute_weighted_mid_price(filled_df)
 
         return filled_df
 
@@ -621,19 +659,26 @@ class SnapshotProcessor:
         return [ticker for ticker, rank in current_membership]
 
     # =========================================================================
-    # OUTPUT: REDIS STREAM & INFLUXDB
+    # OUTPUT: REDIS STREAM & CLICKHOUSE
     # =========================================================================
 
-    def _write_to_output_stream_and_influx(
+    def _write_to_output_stream_and_ch(
         self,
         enriched_df: pl.DataFrame,
         subscribed_tickers: List[str],
         timestamp: datetime,
+        skip_redis: bool = False,
     ) -> None:
-        """Write to output Redis Stream and InfluxDB market_snapshot."""
+        """Write to output Redis Stream and ClickHouse market_snapshot.
+
+        Args:
+            enriched_df: DataFrame with computed metrics
+            subscribed_tickers: List of tickers to include
+            timestamp: Snapshot timestamp
+            skip_redis: If True, skip Redis write (bootstrap mode - only write to CH)
+        """
         df_dict = {row["ticker"]: row for row in enriched_df.iter_rows(named=True)}
 
-        influx_points = []
         clickhouse_rows = []
         timestamp_iso = timestamp.isoformat()
         stream_tickers_data = []
@@ -649,18 +694,8 @@ class SnapshotProcessor:
             if row is None:
                 continue
 
-            # Dynamically build stream data and InfluxDB point
             stream_data = {"symbol": ticker}
             date_tag, mode_tag = session_to_influx_tags(self.session_id)
-            influx_enabled = self._write_api is not None and bool(self.bucket)
-            point = None
-            if influx_enabled:
-                point = (
-                    influxdb_client.Point("market_snapshot")
-                    .tag("symbol", ticker)
-                    .tag("date", date_tag)
-                    .tag("mode", mode_tag)
-                )
 
             # Process all fields dynamically
             for field_name, field_value in row.items():
@@ -683,15 +718,10 @@ class SnapshotProcessor:
                     continue
 
                 stream_data[field_name] = numeric_value
-                if point is not None:
-                    point = point.field(field_name, numeric_value)
 
             stream_tickers_data.append(stream_data)
-            if point is not None:
-                point = point.time(timestamp)
-                influx_points.append(point)
 
-            # Gradual migration: add ClickHouse row in parallel with Influx write
+            # ClickHouse row
             event_time_ms = int(timestamp.timestamp() * 1000)
             clickhouse_rows.append(
                 [
@@ -719,27 +749,16 @@ class SnapshotProcessor:
                 ]
             )
 
-        # Write to output stream
-        if stream_tickers_data:
-            logger.debug(
-                "_write_to_output_stream_and_influx - Writing to output stream"
-            )
+        # Write to output stream (skip in bootstrap mode)
+        if stream_tickers_data and not skip_redis:
+            logger.debug("_write_to_output_stream_and_ch - Writing to output stream")
             stream_message = {
                 "timestamp": timestamp_iso,
                 "data": json.dumps(stream_tickers_data),
             }
             self.r.xadd(self.OUTPUT_STREAM_NAME, stream_message, maxlen=100)
 
-        # Write to InfluxDB
-        if influx_points and self._write_api is not None:
-            self._write_api.write(
-                bucket=self.bucket, org=self.org, record=influx_points
-            )
-            logger.debug(
-                f"_write_to_output_stream_and_influx - Wrote {len(influx_points)} points"
-            )
-
-        # Dual-write supplement: ClickHouse snapshot table
+        # Write to ClickHouse (always)
         if self.ch_client and clickhouse_rows:
             try:
                 self.ch_client.insert(
@@ -770,11 +789,11 @@ class SnapshotProcessor:
                     ],
                 )
                 logger.debug(
-                    f"_write_to_output_stream_and_influx - Wrote {len(clickhouse_rows)} rows to ClickHouse"
+                    f"_write_to_output_stream_and_ch - Wrote {len(clickhouse_rows)} rows to ClickHouse"
                 )
             except Exception as e:
                 logger.warning(
-                    f"_write_to_output_stream_and_influx - ClickHouse write failed (Influx still written): {e}"
+                    f"_write_to_output_stream_and_ch - ClickHouse write failed: {e}"
                 )
 
         # Set 19-hour TTL on stream
@@ -786,26 +805,14 @@ class SnapshotProcessor:
     # =========================================================================
 
     def _reload_volume_history(self) -> None:
-        """Reload volume history for recovery.
+        """Reload volume history from ClickHouse for recovery."""
+        if not self.ch_client:
+            logger.info("_reload_volume_history - ClickHouse not configured; skipping")
+            return
 
-        Preference order:
-        1) ClickHouse (new path)
-        2) InfluxDB fallback (legacy path)
-        """
-        if self.ch_client:
-            loaded = self._reload_volume_history_from_clickhouse()
-            if loaded > 0:
-                return
-            logger.info(
-                "_reload_volume_history - ClickHouse returned no data; falling back to InfluxDB"
-            )
-
-        if self._query_api is not None and self.bucket:
-            self._reload_volume_history_from_influx()
-        else:
-            logger.info(
-                "_reload_volume_history - InfluxDB not configured; skipping fallback reload"
-            )
+        loaded = self._reload_volume_history_from_clickhouse()
+        if loaded == 0:
+            logger.info("_reload_volume_history - No history data available")
 
     def _reload_volume_history_from_clickhouse(self) -> int:
         """Reload volume history from ClickHouse for recovery.
@@ -876,7 +883,7 @@ class SnapshotProcessor:
         return total_loaded
 
     def _time_expr_to_epoch_ms(self, value: str) -> int:
-        """Convert Influx-style time expression or ISO timestamp to epoch ms."""
+        """Convert time expression or ISO timestamp to epoch ms."""
         text = (value or "").strip()
 
         if text == "now()":
@@ -908,61 +915,8 @@ class SnapshotProcessor:
             parsed = parsed.replace(tzinfo=ZoneInfo("UTC"))
         return int(parsed.timestamp() * 1000)
 
-    def _reload_volume_history_from_influx(self) -> None:
-        """Reload volume history from InfluxDB for recovery."""
-        if self._query_api is None or not self.bucket:
-            logger.info("_reload_volume_history_from_influx - InfluxDB unavailable")
-            return
-
-        subscribed = self._get_all_subscribed_tickers()
-        if not subscribed:
-            logger.info("_reload_volume_history_from_influx - No subscribed tickers")
-            return
-
-        range_start, range_end = self._get_reload_time_range(lookback_minutes=6)
-
-        logger.info(
-            f"_reload_volume_history_from_influx - Reloading for {len(subscribed)} tickers "
-            f"(range: {range_start} to {range_end})..."
-        )
-
-        date_tag, mode_tag = session_to_influx_tags(self.session_id)
-        for ticker in subscribed:
-            query = f"""
-            from(bucket: "{self.bucket}")
-                |> range(start: {range_start}, stop: {range_end})
-                |> filter(fn: (r) => r["_measurement"] == "market_snapshot")
-                |> filter(fn: (r) => r["symbol"] == "{ticker}")
-                |> filter(fn: (r) => r["date"] == "{date_tag}")
-                |> filter(fn: (r) => r["mode"] == "{mode_tag}")
-                |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
-                |> sort(columns: ["_time"], desc: false)
-            """
-            try:
-                tables = self._query_api.query(query, org=self.org)
-                entries = []
-                for table in tables:
-                    for record in table.records:
-                        ts = record.get_time()
-                        volume = record.values.get("volume", 0)
-                        if volume is not None:
-                            entries.append((ts, float(volume)))
-                if entries:
-                    self._volume_tracker.reload_history(ticker, entries)
-            except Exception as e:
-                logger.error(
-                    f"_reload_volume_history_from_influx - Error for {ticker}: {e}"
-                )
-
-        tickers_with_history = sum(
-            1 for v in self._volume_tracker.history.values() if v
-        )
-        logger.info(
-            f"_reload_volume_history_from_influx - Reloaded for {tickers_with_history} tickers"
-        )
-
     def _get_reload_time_range(self, lookback_minutes: int = 0) -> Tuple[str, str]:
-        """Get time range for InfluxDB reload queries."""
+        """Get time range for volume history reload queries."""
         if self.run_mode == "replay":
             cursors = self.r.hgetall(self.CURSOR_HSET_NAME)
 
@@ -1003,8 +957,6 @@ class SnapshotProcessor:
 
     def close(self):
         """Clean up resources."""
-        if self._influx_client:
-            self._influx_client.close()
         if self.ch_client:
             try:
                 self.ch_client.close()

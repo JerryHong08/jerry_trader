@@ -47,6 +47,7 @@ I use my self-built human agent task management system [Topology](https://github
 - distributed clock synchronization across machines
 - historical tick-by-tick replay with configurable speed
 - cross-machine time accuracy via Redis heartbeat
+- ClickHouse as primary data source with Parquet fallback for replayer preload
 
 ### Frontend  Visualization
 - market cross-section snapshot: Rank list, overview chart
@@ -54,7 +55,17 @@ I use my self-built human agent task management system [Topology](https://github
 - order: order placement, historical orders, portfolio
 - chart: Real-time bar chart, factor chart via WebSocket streaming
 
+### Signal Engine & Strategy DSL
+- real-time rule evaluation with configurable DSL strategies
+- factor threshold, news classifier, and compound condition triggers
+- signal cooldown/dedup and per-rule backtest evaluation
+
 ### Strategy-based Backtest Pipeline
+- data CLI: download, convert (CSV.gz → Parquet), integrity check, snapshot build
+- snapshot builder: trades → ranked market snapshots in ClickHouse
+- CHReplayer: replays historical snapshots from ClickHouse with clock-based bootstrap
+- signal backtesting: evaluate DSL rules on historical data with grouped statistics
+- visualization notebooks: snapshot exploration, backtest result analysis
 
 ## Installation & Quick Start
 
@@ -240,7 +251,7 @@ MarketsnapshotCollector ──► Redis B (raw snapshot)
 ### Replay Mode
 
 ```bash
-Parquet Lake (Machine A)
+ClickHouse (trades/quotes) ──► Parquet fallback
       │
       ▼
 TickDataReplayer (Rust)          ReplayClock (Rust)

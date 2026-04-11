@@ -1041,6 +1041,8 @@ class BarsBuilderService:
             try:
                 data = await q.get()
                 normalized = self.ws_manager.normalize_data(data)
+                if normalized is None:
+                    continue  # Filtered out (e.g., delayed TRF trade)
                 self._on_trade(normalized)
             except asyncio.CancelledError:
                 logger.info(f"_consume_stream_key - {stream_key}: cancelled")

@@ -218,10 +218,16 @@ class PolygonWebSocketManager:
                                 "symbol": symbol,
                                 "price": item.get("p"),
                                 "size": item.get("s"),
+                                "exchange": item.get("x"),  # Exchange ID (4 = TRF)
                                 "tape": item.get("z"),
                                 "sequence_number": item.get("i"),
-                                "timestamp": item.get("t"),
-                                "trtf": item.get("trf_ts"),
+                                "sip_timestamp": item.get("t"),  # SIP timestamp
+                                "trf_timestamp": item.get(
+                                    "trf_ts"
+                                ),  # TRF timestamp (for delayed detection)
+                                "timestamp": item.get(
+                                    "t"
+                                ),  # Keep for backward compatibility
                             }
                             stream_key = f"T.{symbol}"
                             # Fan out to all client queues

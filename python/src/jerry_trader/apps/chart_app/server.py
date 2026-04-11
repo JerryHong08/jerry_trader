@@ -1158,6 +1158,8 @@ async def _consume_stream(
 
             # Normalize data format for frontend
             normalized_data = manager.normalize_data(data)
+            if normalized_data is None:
+                continue  # Filtered out (e.g., delayed TRF trade)
 
             await websocket.send_json(normalized_data)
     except asyncio.CancelledError:

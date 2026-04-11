@@ -110,9 +110,26 @@ def compute_weighted_mid_price(df: pl.DataFrame) -> pl.DataFrame:
 
 ## Files to Modify
 
-1. **`unified_tick_manager.py`**: Add TRF delay filter in `normalize_data()`
-2. **`bars_builder_service.py`**: Add filter in `trades_backfill()` (Parquet path)
-3. **`processor.py`**: Ensure `weighted_mid` is used for snapshot price (already done)
+1. **`unified_tick_manager.py`**: Add TRF delay filter in `normalize_data()` ✅ DONE
+2. **`polygon_manager.py`**: Add `exchange`, `sip_timestamp`, `trf_timestamp` fields ✅ DONE
+3. **`bars_builder_service.py`**: Handle `None` return from `normalize_data()` ✅ DONE
+4. **`factor_engine.py`**: Handle `None` return from `normalize_data()` ✅ DONE
+5. **`chart_app/server.py`**: Handle `None` return from `normalize_data()` ✅ DONE
+6. **`bars_builder_service.py`**: Add filter in `trades_backfill()` (Parquet path) — TODO (requires Rust changes)
+7. **`processor.py`**: Ensure `weighted_mid` is used for snapshot price (already done)
+
+### Rust Changes Needed (Deferred)
+
+`load_trades_from_parquet_sync` in `rust/src/replayer/loader.rs` currently only loads:
+- `participant_timestamp`
+- `price`
+- `size`
+
+To add TRF filtering, it needs to also load:
+- `sip_timestamp`
+- `exchange`
+
+Then we can filter `exchange==4 && (sip_timestamp - participant_timestamp) > 1s` in Rust or Python.
 
 ## References
 

@@ -353,7 +353,7 @@ class UnifiedTickManager:
     # Data Normalization
     # ========================================================================
 
-    def normalize_data(self, data: Dict) -> Dict:
+    def normalize_data(self, data: Dict) -> Optional[Dict]:
         """
         Normalize data from any provider to unified format.
 
@@ -363,13 +363,39 @@ class UnifiedTickManager:
 
         All timestamps are normalized to milliseconds (13 digits).
 
+        TRF Delayed Trade Filtering:
+        For Polygon trades, filter out FINRA TRF (exchange=4) delayed reports
+        where sip_timestamp - trf_timestamp > 1s. These stale trades pollute
+        price-based factors during the 8:00 ET batch release.
+
+        See roadmap/trf-trade-filtering.md for design rationale.
+
         Args:
             data: Raw data from provider
 
         Returns:
-            Normalized data dict
+            Normalized data dict, or None if filtered out (delayed TRF trade)
         """
         if self.provider in ("polygon", "replayer", "synced-replayer"):
+            # Apply TRF delayed trade filter for Polygon trades
+            if data.get("event_type") == "T":
+                exchange = data.get("exchange")
+                sip_ts = data.get("sip_timestamp")
+                trf_ts = data.get("trf_timestamp")
+
+                if exchange == 4 and sip_ts and trf_ts:
+                    # Convert to milliseconds for comparison
+                    sip_ms = self._to_milliseconds(sip_ts)
+                    trf_ms = self._to_milliseconds(trf_ts)
+                    delay_ms = sip_ms - trf_ms
+
+                    if delay_ms > 1000:  # >1s delay = stale TRF trade
+                        logger.debug(
+                            f"TRF delayed trade filtered: {data.get('symbol')} "
+                            f"delay={delay_ms}ms, exchange={exchange}"
+                        )
+                        return None  # Filter out this trade
+
             normalized = data.copy()
             if "timestamp" in normalized:
                 normalized["timestamp"] = self._to_milliseconds(normalized["timestamp"])

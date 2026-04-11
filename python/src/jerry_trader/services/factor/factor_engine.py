@@ -1491,6 +1491,8 @@ class FactorEngine:
             try:
                 data = await q.get()
                 normalized = self.ws_manager.normalize_data(data)
+                if normalized is None:
+                    continue  # Filtered out (e.g., delayed TRF trade)
                 if is_quote:
                     self._on_quote(normalized)
                 else:

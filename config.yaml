@@ -116,10 +116,21 @@ machines:
         redis: "redis-a"
         clickhouse: "clickhouse-a"
         bootstrap:  # Bootstrap settings (for replay mode)
-          start_ms: null      # Optional: start from specific timestamp
-          end_ms: null        # Optional: end at specific timestamp
-          filter_start_et: "04:00"  # Premarket start (ET)
-          filter_end_et: "09:30"    # Market open (ET)
+          start_time: "040000"  # HHMMSS, e.g., "040000" for 04:00:00 ET
+          end_time: "080500"    # HHMMSS, e.g., "080500" for 08:05:00 ET
+      Replayer:
+        enabled: true
+        speed: 1.0
+        start_time: null    # HHMMSS, e.g., "080500" for 08:05:00 ET — set by bootstrap after completion
+        end_time: null      # HHMMSS, e.g., "093000" for 09:30:00 ET
+        rollback_to: null
+        clear: false
+        redis: "redis-a"
+        clickhouse: "clickhouse-a"
+        # clock_redis: points to the clock-master machine's Redis so the
+        # replayer can follow the shared ReplayClock via RemoteClockFollower.
+        # clock_redis: "redis-a@WSL2"
+        clock_redis: "redis-a"
 
   mibuntu:
     limit: "market_open"    # market_open | market_close | null (never stop)
@@ -167,12 +178,13 @@ machines:
         redis: "redis-b"
         # influxdb: "influxdb-b"
         clickhouse: "clickhouse-a"
-      # Replayer: Reads pre-built snapshots from ClickHouse → pushes to Redis INPUT Stream
+      # Replayer: Reads snapshots from CH market_snapshot_collector → Redis INPUT Stream
       # SnapshotProcessor handles filtering/ranking (same as live mode)
       # Replayer:
       #   enabled: true
       #   speed: 1.0
-      #   min_interval_ms: 50
+      #   start_time: null    # HHMMSS
+      #   end_time: null      # HHMMSS
       #   redis: "redis-b"
       #   clickhouse: "clickhouse-a"
 
@@ -188,30 +200,31 @@ machines:
     limit: null               # replayer never auto-stops
     roles:
       Replayer:
-        enabled: false
+        enabled: true
         speed: 1.0
-        format: "parquet"
+        start_time: null    # HHMMSS, e.g., "080500" for 08:05:00 ET
+        end_time: null      # HHMMSS, e.g., "093000" for 09:30:00 ET
         rollback_to: null
-        start_from: null
         clear: false
-        redis: "redis-b"
-        influxdb: "influxdb-b"
+        redis: "redis-a"
+        clickhouse: "clickhouse-a"
         # clock_redis: points to the clock-master machine's Redis so the
         # replayer can follow the shared ReplayClock via RemoteClockFollower.
-        # Use the same db-reference format as other redis configs when running
-        # on a separate machine from
-        # the TickDataServer (e.g. mibuntu following wsl2's clock).
-        clock_redis: "redis-a@WSL2"
+        # clock_redis: "redis-a@WSL2"
+        clock_redis: "redis-a"
 
 # =============================================================================
 # Defaults
 # =============================================================================
 defaults:
-  replay_date: 20260306 #YYYYMMDD set to trigger bootstrap from ClickHouse
-  replay_time: null #HHMMSS 080015
+  replay_date: null #YYYYMMDD set to trigger bootstrap from ClickHouse
+  # replay_date: 20260306 #YYYYMMDD set to trigger bootstrap from ClickHouse
+  # Global replay start time for ReplayClock initialization
+  replay_start_time: null  # HHMMSS, e.g., "040000" for 04:00:00 ET
   # Used only when TickDataServer.manager_type == "synced-replayer"
-  preload_tickers: null # list of tickers to preload for synced-replayer mode (null or empty = preload all)
+  # preload_tickers: list of tickers to preload for synced-replayer mode (null or empty = preload all)
   # preload_tickers: ["NIPG","PRSO"]
+  preload_tickers: ["BIAF","ISPC"]
   suffix_id: null
   load_history: null
   log_level: "DEBUG"

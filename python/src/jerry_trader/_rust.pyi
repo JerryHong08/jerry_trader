@@ -281,6 +281,10 @@ class TickDataReplayer:
         speed: float = 1.0,
         start_time: Optional[str] = None,
         max_gap_ms: Optional[int] = None,
+        clickhouse_url: Optional[str] = None,
+        clickhouse_user: Optional[str] = None,
+        clickhouse_password: Optional[str] = None,
+        clickhouse_database: Optional[str] = None,
     ) -> None:
         """Create a new replayer.
 
@@ -301,6 +305,11 @@ class TickDataReplayer:
             speed: (Legacy) Replay speed multiplier. Ignored if `shared_time` is provided.
             start_time: Optional ``"HH:MM"`` or ``"HH:MM:SS"`` (ET).
             max_gap_ms: Threshold for logging large time gaps (ms).
+            clickhouse_url: ClickHouse HTTP URL, e.g. ``"http://localhost:8123"``.
+                When provided, replayer queries CH first (Parquet fallback).
+            clickhouse_user: ClickHouse username.
+            clickhouse_password: ClickHouse password.
+            clickhouse_database: ClickHouse database name.
         """
         ...
 

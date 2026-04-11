@@ -13,6 +13,7 @@ Performance-critical components rewritten in Rust.
 - [-] 2.1 StateEngine rewrite in Rust
 - [-] 2.2 FactorEngine rewrite in Rust
 - [x] 2.3 Add ClickHouse data source to Rust replayer — use `clickhouse` crate to query trades/quotes from CH as primary source (Parquet fallback), unify backtest data path, config-driven (date + ticker list)
+- [ ] 2.4 Initialize Rust `env_logger` or pyo3 logging bridge so Rust `log::info!` / `log::warn!` messages appear in Python logs instead of being silently dropped
 
 ## 3. Services Layer
 

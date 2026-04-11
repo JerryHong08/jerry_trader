@@ -198,6 +198,10 @@ def create_tick_replayer(
     *,
     start_time: str | None = None,
     max_gap_ms: int | None = None,
+    clickhouse_url: str | None = None,
+    clickhouse_user: str | None = None,
+    clickhouse_password: str | None = None,
+    clickhouse_database: str | None = None,
 ) -> TickDataReplayer:
     """Create a ``TickDataReplayer`` that shares the active clock's time.
 
@@ -210,6 +214,10 @@ def create_tick_replayer(
         lake_data_dir: Path to the data-lake root.
         start_time: Optional start time in "HH:MM" or "HH:MM:SS" (ET).
         max_gap_ms: Threshold for logging large time gaps (ms).
+        clickhouse_url: ClickHouse HTTP URL for primary data source.
+        clickhouse_user: ClickHouse username.
+        clickhouse_password: ClickHouse password.
+        clickhouse_database: ClickHouse database name.
 
     Returns:
         TickDataReplayer: A replayer that uses the shared clock time.
@@ -229,6 +237,10 @@ def create_tick_replayer(
         shared_time=shared_time,
         start_time=start_time,
         max_gap_ms=max_gap_ms,
+        clickhouse_url=clickhouse_url,
+        clickhouse_user=clickhouse_user,
+        clickhouse_password=clickhouse_password,
+        clickhouse_database=clickhouse_database,
     )
 
 

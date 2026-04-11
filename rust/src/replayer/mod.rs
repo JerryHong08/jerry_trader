@@ -13,6 +13,7 @@
 pub mod config;
 pub mod engine;
 pub mod loader;
+pub mod loader_ch;
 pub mod stats;
 pub mod types;
 
@@ -24,7 +25,7 @@ use log::info;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use config::ReplayConfig;
+use config::{ClickHouseConfig, ReplayConfig};
 use engine::{ReplayCommand, Timeline};
 use types::DataType;
 
@@ -100,8 +101,12 @@ impl TickDataReplayer {
     ///     speed: (Legacy) Replay speed multiplier. Ignored if `shared_time` is provided.
     ///     start_time: Optional start time in ``"HH:MM"`` or ``"HH:MM:SS"``.
     ///     max_gap_ms: Threshold for logging large time gaps (ms).
+    ///     clickhouse_url: ClickHouse HTTP URL, e.g. ``"http://localhost:8123"``.
+    ///     clickhouse_user: ClickHouse username.
+    ///     clickhouse_password: ClickHouse password.
+    ///     clickhouse_database: ClickHouse database name.
     #[new]
-    #[pyo3(signature = (replay_date, lake_data_dir, shared_time=None, data_start_ts_ns=0, speed=1.0, start_time=None, max_gap_ms=None))]
+    #[pyo3(signature = (replay_date, lake_data_dir, shared_time=None, data_start_ts_ns=0, speed=1.0, start_time=None, max_gap_ms=None, clickhouse_url=None, clickhouse_user=None, clickhouse_password=None, clickhouse_database=None))]
     fn new(
         replay_date: &str,
         lake_data_dir: &str,
@@ -110,18 +115,39 @@ impl TickDataReplayer {
         speed: f64,
         start_time: Option<&str>,
         max_gap_ms: Option<u64>,
+        clickhouse_url: Option<&str>,
+        clickhouse_user: Option<&str>,
+        clickhouse_password: Option<&str>,
+        clickhouse_database: Option<&str>,
     ) -> PyResult<Self> {
         let start_timestamp_ns = start_time
             .map(|st| parse_start_time(replay_date, st))
             .transpose()
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{}", e)))?;
 
+        let clickhouse = clickhouse_url.map(|url| ClickHouseConfig {
+            url: url.to_string(),
+            user: clickhouse_user.unwrap_or("default").to_string(),
+            password: clickhouse_password.unwrap_or("").to_string(),
+            database: clickhouse_database.unwrap_or("jerry_trader").to_string(),
+        });
+
         let config = ReplayConfig {
             replay_date: replay_date.to_string(),
             start_timestamp_ns,
             lake_data_dir: lake_data_dir.to_string(),
             max_gap_ms,
+            clickhouse,
         };
+
+        if let Some(ref ch) = config.clickhouse {
+            eprintln!(
+                "[replayer] ClickHouse configured: {}/{} (data source: CH → Parquet fallback)",
+                ch.url, ch.database
+            );
+        } else {
+            eprintln!("[replayer] No ClickHouse config — using Parquet only");
+        }
 
         // Use shared time if provided, otherwise create standalone timeline
         let (timeline, effective_speed) = if let Some(ref handle) = shared_time {

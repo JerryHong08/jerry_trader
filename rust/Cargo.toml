@@ -29,3 +29,7 @@ anyhow = "1.0"
 
 # Parallel iteration
 rayon = "1.10"
+
+# ClickHouse client (primary data source for replayer, fallback to Parquet)
+clickhouse = "0.13"
+serde = { version = "1", features = ["derive"] }

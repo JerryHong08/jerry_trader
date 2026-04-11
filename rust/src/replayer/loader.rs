@@ -24,11 +24,43 @@ pub struct PreloadedData {
     pub data_type: DataType,
 }
 
+/// Load data for a single (symbol, data_type).
+///
+/// Tries ClickHouse first if configured, then falls back to Parquet.
+pub async fn load_symbol_data(
+    config: &ReplayConfig,
+    symbol: &str,
+    data_type: DataType,
+) -> Result<PreloadedData> {
+    // Try ClickHouse first
+    if config.clickhouse.is_some() {
+        let syms = vec![symbol.to_string()];
+        match super::loader_ch::load_multi(config, &syms, &[data_type]).await {
+            Ok(data) => {
+                if let Some(preloaded) = data.into_values().next() {
+                    let has_data = preloaded.quotes.as_ref().map_or(false, |q| !q.is_empty())
+                        || preloaded.trades.as_ref().map_or(false, |t| !t.is_empty());
+                    if has_data {
+                        info!("Loaded {} {:?} from ClickHouse", symbol, data_type);
+                        return Ok(preloaded);
+                    }
+                }
+                warn!("CH returned empty for {} {:?}, falling back to Parquet", symbol, data_type);
+            }
+            Err(e) => {
+                warn!("CH load failed for {} {:?}: {}, falling back to Parquet", symbol, data_type, e);
+            }
+        }
+    }
+
+    load_symbol_from_parquet(config, symbol, data_type).await
+}
+
 /// Load Parquet data for a single (symbol, data_type).
 ///
 /// Runs the heavy I/O inside `spawn_blocking` to avoid stalling
 /// the tokio event-loop.
-pub async fn load_symbol_data(
+async fn load_symbol_from_parquet(
     config: &ReplayConfig,
     symbol: &str,
     data_type: DataType,
@@ -273,6 +305,36 @@ fn extract_trades(df: &DataFrame) -> Result<Vec<RawTrade>> {
 /// Returns `HashMap<cache_key, PreloadedData>` where
 /// `cache_key = "{symbol}_{DataType:?}"`.
 pub async fn load_multi_symbol_data(
+    config: &ReplayConfig,
+    symbols: &[String],
+    data_types: &[DataType],
+) -> Result<HashMap<String, PreloadedData>> {
+    // Try ClickHouse first if configured
+    if config.clickhouse.is_some() {
+        eprintln!("[loader] Attempting ClickHouse load for {} symbols", symbols.len());
+        match super::loader_ch::load_multi(config, symbols, data_types).await {
+            Ok(data) => {
+                let non_empty = data.values().any(|d| {
+                    d.quotes.as_ref().map_or(false, |q| !q.is_empty())
+                        || d.trades.as_ref().map_or(false, |t| !t.is_empty())
+                });
+                if non_empty {
+                    eprintln!("[loader] ClickHouse load successful: {} cache entries", data.len());
+                    return Ok(data);
+                }
+                eprintln!("[loader] CH returned empty, falling back to Parquet");
+            }
+            Err(e) => {
+                eprintln!("[loader] CH load failed: {}, falling back to Parquet", e);
+            }
+        }
+    }
+
+    load_multi_from_parquet(config, symbols, data_types).await
+}
+
+/// Load multi-symbol data from Parquet files (fallback when CH unavailable).
+async fn load_multi_from_parquet(
     config: &ReplayConfig,
     symbols: &[String],
     data_types: &[DataType],

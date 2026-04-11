@@ -439,10 +439,29 @@ class JerryTraderBackendStarter:
                 if "Replayer" in self.roles:
                     replayer_speed = float(self.roles["Replayer"].get("speed", 1.0))
 
+                # Resolve ClickHouse config from BarsBuilder role (or Replayer role)
+                _ch_cfg = role_cfg.get("clickhouse")
+                if not _ch_cfg and "Replayer" in self.roles:
+                    _ch_cfg = self.roles["Replayer"].get("clickhouse")
+                ch_url = None
+                ch_user = None
+                ch_password = None
+                ch_database = None
+                if isinstance(_ch_cfg, dict):
+                    ch_url = f"http://{_ch_cfg.get('host', 'localhost')}:{_ch_cfg.get('port', 8123)}"
+                    ch_user = _ch_cfg.get("user", "default")
+                    ch_database = _ch_cfg.get("database", "jerry_trader")
+                    _pw_env = _ch_cfg.get("password_env", "CLICKHOUSE_PASSWORD")
+                    ch_password = os.getenv(_pw_env, "")
+
                 tick_replayer = create_tick_replayer(
                     replay_date=self.replay_date,
                     lake_data_dir=lake_data_dir,
                     start_time=start_time_hms,
+                    clickhouse_url=ch_url,
+                    clickhouse_user=ch_user,
+                    clickhouse_password=ch_password,
+                    clickhouse_database=ch_database,
                 )
                 synced_mgr = SyncedReplayerManager(tick_replayer)
                 self._shared_ws_manager = UnifiedTickManager(

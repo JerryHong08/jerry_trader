@@ -4,6 +4,16 @@
 
 use std::path::{Path, PathBuf};
 
+/// ClickHouse connection configuration.
+#[derive(Debug, Clone)]
+pub struct ClickHouseConfig {
+    /// HTTP URL, e.g. `"http://localhost:8123"`.
+    pub url: String,
+    pub user: String,
+    pub password: String,
+    pub database: String,
+}
+
 /// Replay configuration — constructed from Python arguments in
 /// `TickDataReplayer::new()`.
 #[derive(Debug, Clone)]
@@ -16,9 +26,20 @@ pub struct ReplayConfig {
     pub lake_data_dir: String,
     /// Threshold for logging large market gaps (ms).  `None` = disabled.
     pub max_gap_ms: Option<u64>,
+    /// ClickHouse connection config. When `Some`, replayer queries CH first
+    /// and falls back to Parquet files on failure.
+    pub clickhouse: Option<ClickHouseConfig>,
 }
 
 impl ReplayConfig {
+    /// Replay date in ISO format: `"2026-03-13"`.
+    pub fn replay_date_iso(&self) -> String {
+        let y = &self.replay_date[0..4];
+        let m = &self.replay_date[4..6];
+        let d = &self.replay_date[6..8];
+        format!("{}-{}-{}", y, m, d)
+    }
+
     /// Build the Parquet path for a given data subdir (e.g. `"quotes_v1"`).
     ///
     /// Pattern: `{lake_data_dir}/us_stocks_sip/{subdir}/{YYYY}/{MM}/{YYYY-MM-DD}.parquet`

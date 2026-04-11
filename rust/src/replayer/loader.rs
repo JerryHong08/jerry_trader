@@ -563,12 +563,18 @@ pub async fn load_multi_symbol_data(
 /// Returns `Vec<(ts_ms, price, size)>` sorted ascending by timestamp.
 /// Tries partitioned file first, falls back to monolithic.
 ///
-/// `end_ts_ms` — if > 0, only trades with `participant_timestamp < end_ts_ms`
+/// **TRF Delayed Trade Filtering**:
+/// Filters out FINRA TRF (exchange=4) delayed reports where
+/// `sip_timestamp - participant_timestamp > 1s`. These stale trades
+/// pollute price-based factors during the 8:00 ET batch release.
+/// See roadmap/trf-trade-filtering.md for design rationale.
+///
+/// `end_ts_ms` — if > 0, only trades with `sip_timestamp < end_ts_ms`
 /// (in milliseconds) are returned.  The filter is pushed down into the
-/// Polars scan as `participant_timestamp < end_ts_ns` for efficiency.
+/// Polars scan for efficiency.
 ///
 /// This is a simpler, non-async alternative to `load_symbol_data`
-/// designed for the 10s bootstrap path which runs on a Python thread.
+/// designed for the bootstrap path which runs on a Python thread.
 pub fn load_trades_from_parquet_sync(
     lake_data_dir: &str,
     symbol: &str,
@@ -629,34 +635,50 @@ pub fn load_trades_from_parquet_sync(
         lazy = lazy.filter(col("ticker").eq(lit(symbol)));
     }
 
-    // Apply lower-bound time filter (predicate pushdown)
+    // Apply lower-bound time filter on SIP timestamp (predicate pushdown)
+    // Use sip_timestamp for filtering since that's the arrival time
     if start_ts_ms > 0 {
         let start_ts_ns = start_ts_ms * 1_000_000i64;
         lazy = lazy.filter(
-            col("participant_timestamp")
+            col("sip_timestamp")
                 .cast(polars::datatypes::DataType::Int64)
                 .gt_eq(lit(start_ts_ns)),
         );
     }
 
-    // Apply upper-bound time filter (predicate pushdown)
+    // Apply upper-bound time filter on SIP timestamp (predicate pushdown)
     if end_ts_ms > 0 {
         let end_ts_ns = end_ts_ms * 1_000_000i64;
         lazy = lazy.filter(
-            col("participant_timestamp")
+            col("sip_timestamp")
                 .cast(polars::datatypes::DataType::Int64)
                 .lt(lit(end_ts_ns)),
         );
     }
 
+    // TRF delayed trade filter: exclude exchange=4 with >1s delay
+    // sip_timestamp - participant_timestamp > 1_000_000_000 nanoseconds
+    lazy = lazy.filter(
+        // Keep all non-TRF trades
+        col("exchange")
+            .cast(polars::datatypes::DataType::Int64)
+            .neq(lit(4i64))
+        // OR keep TRF trades with <=1s delay
+        .or(
+            (col("sip_timestamp").cast(polars::datatypes::DataType::Int64)
+                - col("participant_timestamp").cast(polars::datatypes::DataType::Int64))
+            .lt_eq(lit(1_000_000_000i64))
+        )
+    );
+
     let df = lazy
         .select(&[
-            col("participant_timestamp").cast(polars::datatypes::DataType::Int64),
+            col("sip_timestamp").cast(polars::datatypes::DataType::Int64),
             col("price").cast(polars::datatypes::DataType::Float64),
             col("size").cast(polars::datatypes::DataType::Int64),
         ])
         .sort(
-            ["participant_timestamp"],
+            ["sip_timestamp"],
             SortMultipleOptions::default(),
         )
         .collect()
@@ -672,7 +694,7 @@ pub fn load_trades_from_parquet_sync(
         return Ok(Vec::new());
     }
 
-    let timestamps = df.column("participant_timestamp")?.i64()?;
+    let timestamps = df.column("sip_timestamp")?.i64()?;
     let prices = df.column("price")?.f64()?;
     let sizes = df.column("size")?.i64()?;
 
@@ -687,7 +709,7 @@ pub fn load_trades_from_parquet_sync(
     }
 
     info!(
-        "load_trades_from_parquet_sync: {} loaded {} trades in {:.1}ms",
+        "load_trades_from_parquet_sync: {} loaded {} trades in {:.1}ms (TRF delayed filtered)",
         symbol,
         trades.len(),
         load_start.elapsed().as_secs_f64() * 1000.0

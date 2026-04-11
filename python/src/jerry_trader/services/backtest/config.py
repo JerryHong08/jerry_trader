@@ -98,6 +98,12 @@ class BacktestConfig:
     slippage_buffer: float = 0.001
     default_slippage: float = 0.002
     horizons_ms: list[int] = field(default_factory=lambda: list(DEFAULT_HORIZONS_MS))
+    cooldown_ms: int = 60_000  # Min gap between same-rule triggers for same ticker
+    session_start: str = "040000"  # Pre-market start HHMMSS (ET)
+    session_end: str = "093000"  # Pre-market end HHMMSS (ET)
+    metrics_end: str = (
+        ""  # End time for return horizon data loading (default: session_end + max horizon)
+    )
     pre_filter: PreFilterConfig = field(default_factory=PreFilterConfig)
     output_clickhouse: bool = True
     output_console: bool = True
@@ -109,6 +115,35 @@ class BacktestConfig:
         # Sync gain_threshold into pre_filter if pre_filter still has default
         if self.pre_filter.min_gain_pct == 2.0 and self.gain_threshold != 2.0:
             self.pre_filter.min_gain_pct = self.gain_threshold
+
+    def session_range_ms(self) -> tuple[int, int]:
+        """Return (start_ms, end_ms) epoch milliseconds for the session window."""
+        from jerry_trader.shared.time.timezone import hhmm_to_epoch_ms
+
+        date_yyyymmdd = self.date.replace("-", "")
+        start_ms = hhmm_to_epoch_ms(date_yyyymmdd, self.session_start)
+        end_ms = hhmm_to_epoch_ms(date_yyyymmdd, self.session_end)
+        return start_ms, end_ms
+
+    def data_range_ms(self) -> tuple[int, int]:
+        """Return (start_ms, end_ms) for data loading.
+
+        Same as session_range_ms for start, but extends end to cover
+        the longest return horizon after session_end.
+        """
+        from jerry_trader.shared.time.timezone import hhmm_to_epoch_ms
+
+        date_yyyymmdd = self.date.replace("-", "")
+        start_ms = hhmm_to_epoch_ms(date_yyyymmdd, self.session_start)
+
+        if self.metrics_end:
+            end_ms = hhmm_to_epoch_ms(date_yyyymmdd, self.metrics_end)
+        else:
+            _, session_end_ms = self.session_range_ms()
+            max_horizon = max(self.horizons_ms) if self.horizons_ms else 3_600_000
+            end_ms = session_end_ms + max_horizon
+
+        return start_ms, end_ms
 
 
 @dataclass

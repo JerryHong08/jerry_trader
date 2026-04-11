@@ -1,14 +1,13 @@
 """Data loader for batch backtest.
 
-Loads trades, quotes (from Parquet via Rust), and 1m bars (from ClickHouse)
-for a list of candidate tickers on a given date.
+Loads trades and quotes from ClickHouse (preferred) or Parquet (fallback),
+and 1m bars from ClickHouse for a list of candidate tickers on a given date.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from jerry_trader._rust import load_quotes_from_parquet, load_trades_from_parquet
 from jerry_trader.domain.backtest.types import Candidate
 from jerry_trader.domain.market import Bar
 from jerry_trader.services.backtest.config import BacktestConfig, TickerData
@@ -20,9 +19,9 @@ logger = setup_logger("backtest.data_loader", log_to_file=True)
 class DataLoader:
     """Load all data needed for a set of backtest candidates.
 
-    Three data sources:
-      1. Trades — Parquet via Rust load_trades_from_parquet
-      2. Quotes — Parquet via Rust load_quotes_from_parquet
+    Data sources (in priority order):
+      1. Trades — ClickHouse trades table (preferred), Parquet fallback
+      2. Quotes — ClickHouse quotes table (preferred), Parquet fallback
       3. Bars 1m — ClickHouse ohlcv_bars
     """
 
@@ -43,19 +42,30 @@ class DataLoader:
 
         Args:
             candidates: Pre-filtered candidate list.
-            config: BacktestConfig with trades_dir, quotes_dir, date.
+            config: BacktestConfig with date, trades_dir, quotes_dir, session times.
 
         Returns:
             dict mapping symbol → TickerData.
         """
-        date_yyyymmdd = config.date.replace("-", "")
+        date = config.date
+        start_ms, end_ms = config.data_range_ms()
         result: dict[str, TickerData] = {}
 
-        # 1. Load trades + quotes from Parquet (per ticker)
+        # 1. Load trades + quotes (CH preferred, parquet fallback)
         for candidate in candidates:
             symbol = candidate.symbol
-            trades = self._load_trades(symbol, date_yyyymmdd, config.trades_dir)
-            quotes = self._load_quotes(symbol, date_yyyymmdd, config.quotes_dir)
+
+            trades = self._load_trades_ch(symbol, date, start_ms, end_ms)
+            if not trades:
+                trades = self._load_trades_parquet(
+                    symbol, date.replace("-", ""), config.trades_dir
+                )
+
+            quotes = self._load_quotes_ch(symbol, date, start_ms, end_ms)
+            if not quotes:
+                quotes = self._load_quotes_parquet(
+                    symbol, date.replace("-", ""), config.quotes_dir
+                )
 
             result[symbol] = TickerData(
                 symbol=symbol,
@@ -67,7 +77,7 @@ class DataLoader:
         # 2. Load 1m bars from ClickHouse (batch for all candidates)
         if self._ch:
             symbols = [c.symbol for c in candidates]
-            bars_map = self._load_bars_batch(symbols, config.date)
+            bars_map = self._load_bars_batch(symbols, date)
             for symbol, bars in bars_map.items():
                 if symbol in result:
                     result[symbol].bars_1m = bars
@@ -82,31 +92,129 @@ class DataLoader:
 
         return result
 
+    # =========================================================================
+    # ClickHouse loaders (preferred)
+    # =========================================================================
+
+    def _load_trades_ch(
+        self, symbol: str, date: str, start_ms: int = 0, end_ms: int = 0
+    ) -> list[tuple[int, float, int]]:
+        """Load trades from ClickHouse: (timestamp_ms, price, size).
+
+        Filters out FINRA TRF (exchange=4) delayed reports where
+        sip_timestamp - participant_timestamp > 1s. These stale trades
+        pollute price-based factors during the 8:00 ET batch release.
+        Real-time TRF trades (delay <1s) are kept.
+
+        See roadmap/trf-trade-filtering.md for design rationale.
+        """
+        if not self._ch:
+            return []
+        try:
+            time_filter = ""
+            params: dict[str, str | int] = {"date": date, "ticker": symbol}
+            if start_ms > 0 and end_ms > 0:
+                time_filter = (
+                    f"AND sip_timestamp >= {{start_ns:Int64}} "
+                    f"AND sip_timestamp < {{end_ns:Int64}} "
+                )
+                params["start_ns"] = start_ms * 1_000_000
+                params["end_ns"] = end_ms * 1_000_000
+
+            result = self._ch.query(
+                f"SELECT sip_timestamp, price, size "
+                f"FROM {self._database}.trades FINAL "
+                f"WHERE date = {{date:String}} AND ticker = {{ticker:String}} "
+                f"{time_filter}"
+                f"AND (exchange != 4 "
+                f"     OR sip_timestamp - participant_timestamp <= 1000000000) "
+                f"ORDER BY sip_timestamp",
+                parameters=params,
+            )
+            return [
+                (int(row[0] // 1_000_000), float(row[1]), int(row[2]))
+                for row in result.result_rows
+            ]
+        except Exception as e:
+            logger.debug(f"CH trades load failed for {symbol}: {e}")
+            return []
+
+    def _load_quotes_ch(
+        self, symbol: str, date: str, start_ms: int = 0, end_ms: int = 0
+    ) -> list[tuple[int, float, float, int, int]]:
+        """Load quotes from ClickHouse: (timestamp_ms, bid, ask, bid_size, ask_size)."""
+        if not self._ch:
+            return []
+        try:
+            time_filter = ""
+            params: dict[str, str | int] = {"date": date, "ticker": symbol}
+            if start_ms > 0 and end_ms > 0:
+                time_filter = (
+                    f"AND sip_timestamp >= {{start_ns:Int64}} "
+                    f"AND sip_timestamp < {{end_ns:Int64}} "
+                )
+                params["start_ns"] = start_ms * 1_000_000
+                params["end_ns"] = end_ms * 1_000_000
+
+            result = self._ch.query(
+                f"SELECT sip_timestamp, bid_price, ask_price, bid_size, ask_size "
+                f"FROM {self._database}.quotes FINAL "
+                f"WHERE date = {{date:String}} AND ticker = {{ticker:String}} "
+                f"{time_filter}"
+                f"ORDER BY sip_timestamp",
+                parameters=params,
+            )
+            return [
+                (
+                    int(row[0] // 1_000_000),
+                    float(row[1]),
+                    float(row[2]),
+                    int(row[3]),
+                    int(row[4]),
+                )
+                for row in result.result_rows
+            ]
+        except Exception as e:
+            logger.debug(f"CH quotes load failed for {symbol}: {e}")
+            return []
+
+    # =========================================================================
+    # Parquet loaders (fallback)
+    # =========================================================================
+
     @staticmethod
-    def _load_trades(
+    def _load_trades_parquet(
         symbol: str, date_yyyymmdd: str, trades_dir: str
     ) -> list[tuple[int, float, int]]:
         """Load trades from Parquet via Rust."""
         if not trades_dir:
             return []
         try:
+            from jerry_trader._rust import load_trades_from_parquet
+
             return load_trades_from_parquet(trades_dir, symbol, date_yyyymmdd)
         except Exception as e:
             logger.warning(f"Trades load failed for {symbol}: {e}")
             return []
 
     @staticmethod
-    def _load_quotes(
+    def _load_quotes_parquet(
         symbol: str, date_yyyymmdd: str, quotes_dir: str
     ) -> list[tuple[int, float, float, int, int]]:
         """Load quotes from Parquet via Rust."""
         if not quotes_dir:
             return []
         try:
+            from jerry_trader._rust import load_quotes_from_parquet
+
             return load_quotes_from_parquet(quotes_dir, symbol, date_yyyymmdd)
         except Exception as e:
             logger.warning(f"Quotes load failed for {symbol}: {e}")
             return []
+
+    # =========================================================================
+    # Bars (ClickHouse only)
+    # =========================================================================
 
     def _load_bars_batch(self, symbols: list[str], date: str) -> dict[str, list[Bar]]:
         """Load 1m bars from ClickHouse for multiple symbols."""

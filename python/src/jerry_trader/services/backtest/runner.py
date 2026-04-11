@@ -120,7 +120,11 @@ class BacktestRunner:
             BacktestResult with all signals and aggregate metrics.
         """
         config = self._config
-        logger.info(f"BacktestRunner: starting for {config.date}")
+        start_ms, end_ms = config.session_range_ms()
+        logger.info(
+            f"BacktestRunner: starting for {config.date} "
+            f"session {config.session_start}-{config.session_end} ET"
+        )
 
         # Step 1: Pre-filter candidates
         candidates = self._step_prefilter(config)
@@ -220,6 +224,7 @@ class BacktestRunner:
             f"Step 4: Computing factors + evaluating signals "
             f"for {len(ticker_data_map)} tickers..."
         )
+        session_start_ms, session_end_ms = config.session_range_ms()
         batch_engine = FactorEngineBatchAdapter()
         all_signals: list[SignalResult] = []
 
@@ -236,14 +241,28 @@ class BacktestRunner:
                 continue
 
             # 4b. Evaluate signals
-            eval_result = evaluator.evaluate(symbol, factor_ts)
+            eval_result = evaluator.evaluate(
+                symbol, factor_ts, cooldown_ms=config.cooldown_ms
+            )
             if not eval_result.triggers:
                 logger.debug(f"  {symbol}: no triggers")
                 continue
 
+            # 4b-filter: Only keep triggers within session window
+            session_triggers = [
+                t
+                for t in eval_result.triggers
+                if session_start_ms <= t.trigger_time_ms < session_end_ms
+            ]
+            if not session_triggers:
+                logger.debug(
+                    f"  {symbol}: {len(eval_result.triggers)} triggers, all outside session"
+                )
+                continue
+
             # 4c. Compute metrics
             signals = compute_batch_metrics(
-                eval_result.triggers,
+                session_triggers,
                 td,
                 factor_ts,
                 config.horizons_ms,
@@ -255,7 +274,8 @@ class BacktestRunner:
             if signals:
                 logger.info(
                     f"  [{i+1}/{len(ticker_data_map)}] {symbol}: "
-                    f"{len(eval_result.triggers)} triggers → {len(signals)} signals"
+                    f"{len(eval_result.triggers)} triggers "
+                    f"({len(session_triggers)} in session) → {len(signals)} signals"
                 )
 
         logger.info(f"  → {len(all_signals)} total signals across all tickers")

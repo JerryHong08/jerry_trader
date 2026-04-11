@@ -276,9 +276,10 @@ def _normalize_date_fields(config: dict) -> None:
     """
     date_fields = [
         "replay_date",
-        "replay_time",
+        "replay_start_time",
         "load_history",
-        "start_from",
+        "start_time",
+        "end_time",
         "rollback_to",
     ]
 
@@ -293,3 +294,13 @@ def _normalize_date_fields(config: dict) -> None:
                 for field in date_fields:
                     if field in role_cfg and role_cfg[field] is not None:
                         role_cfg[field] = str(role_cfg[field])
+                # Also check nested bootstrap config
+                if "bootstrap" in role_cfg and isinstance(role_cfg["bootstrap"], dict):
+                    for field in date_fields:
+                        if (
+                            field in role_cfg["bootstrap"]
+                            and role_cfg["bootstrap"][field] is not None
+                        ):
+                            role_cfg["bootstrap"][field] = str(
+                                role_cfg["bootstrap"][field]
+                            )

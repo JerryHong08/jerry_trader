@@ -24,6 +24,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 from datetime import datetime
 from datetime import time as dtime
@@ -44,6 +45,7 @@ from jerry_trader.runtime.config_builder import (
     parse_override_args,
 )
 from jerry_trader.shared.logging.logger import setup_logger
+from jerry_trader.shared.time.timezone import hhmm_to_epoch_ms
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.INFO)
 
@@ -73,7 +75,8 @@ class JerryTraderBackendStarter:
 
         # Extract common params from config
         self.replay_date = config.get("replay_date", "")
-        self.replay_time = config.get("replay_time")  # HHMMSS (optional)
+        # Global replay start time for ReplayClock initialization
+        self.replay_start_time = config.get("replay_start_time")  # HHMMSS
         self.suffix_id = config.get("suffix_id")
         self.load_history = config.get("load_history")
         self.limit = config.get("limit")  # market_open | market_close | None
@@ -93,6 +96,9 @@ class JerryTraderBackendStarter:
         self._bootstrap_coordinator = (
             None  # Set later if BarsBuilder/FactorEngine enabled
         )
+        self._bootstrap_complete_event = (
+            threading.Event()
+        )  # Signal when bootstrap finishes
 
         # Setup signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -120,11 +126,10 @@ class JerryTraderBackendStarter:
         from jerry_trader import clock
 
         if self.replay_date:
-            # Build replay start timestamp from replay_date (YYYYMMDD) + replay_time (HHMMSS).
+            # Build replay start timestamp from replay_date (YYYYMMDD) + replay_start_time (HHMMSS).
             # Priority for start time:
-            #   1. defaults.replay_time (HHMMSS)  — CLI or config.yaml
-            #   2. Replayer role's start_from (HH:MM)
-            #   3. 04:00:00 ET (premarket open)
+            #   1. defaults.replay_start_time (HHMMSS)  — CLI or config.yaml
+            #   2. 04:00:00 ET (premarket open)
             rd = str(self.replay_date)
 
             if len(rd) != 8 or not rd.isdigit():
@@ -132,24 +137,18 @@ class JerryTraderBackendStarter:
 
             year, month, day = int(rd[:4]), int(rd[4:6]), int(rd[6:8])
 
-            rt = str(self.replay_time).zfill(6) if self.replay_time else None
-            if rt and len(rt) == 6 and rt.isdigit():
-                # replay_time = HHMMSS
-                hour, minute, second = int(rt[:2]), int(rt[2:4]), int(rt[4:6])
-            elif rt and len(rt) == 4 and rt.isdigit():
-                # replay_time = HHMM
-                hour, minute, second = int(rt[:2]), int(rt[2:4]), 0
+            rst = (
+                str(self.replay_start_time).zfill(6) if self.replay_start_time else None
+            )
+            if rst and len(rst) == 6 and rst.isdigit():
+                # replay_start_time = HHMMSS
+                hour, minute, second = int(rst[:2]), int(rst[2:4]), int(rst[4:6])
+            elif rst and len(rst) == 4 and rst.isdigit():
+                # replay_start_time = HHMM
+                hour, minute, second = int(rst[:2]), int(rst[2:4]), 0
             else:
-                second = 0
-                # Fallback: Replayer role's start_from (HH:MM)
-                start_time_str = None
-                if "Replayer" in self.roles:
-                    start_time_str = self.roles["Replayer"].get("start_from")
-                if start_time_str:
-                    parts = start_time_str.split(":")
-                    hour, minute = int(parts[0]), int(parts[1])
-                else:
-                    hour, minute = 4, 0  # premarket open
+                # Default: premarket open
+                hour, minute, second = 4, 0, 0
 
             replay_start_dt = datetime(
                 year, month, day, hour, minute, second, tzinfo=self.tz
@@ -161,8 +160,10 @@ class JerryTraderBackendStarter:
                 replay_speed = self.roles["Replayer"].get("speed", 1.0)
 
             clock.init_replay(data_start_ts_ns, speed=replay_speed)
+            # Pause clock immediately — bootstrap will jump_to + resume when ready
+            clock.pause()
             logger.info(
-                f"🕐 ReplayClock initialized: {replay_start_dt.strftime('%Y-%m-%d %H:%M')} ET, "
+                f"🕐 ReplayClock initialized (paused): {replay_start_dt.strftime('%Y-%m-%d %H:%M:%S')} ET, "
                 f"speed={replay_speed}x"
             )
         else:
@@ -203,6 +204,7 @@ class JerryTraderBackendStarter:
                 redis_config=role_cfg.get("redis"),
                 influxdb_config=role_cfg.get("influxdb"),
                 clickhouse_config=role_cfg.get("clickhouse"),
+                bootstrap_complete_event=self._bootstrap_complete_event,
             )
             self._services.append(("SnapshotProcessor", self.processor))
         else:
@@ -284,15 +286,13 @@ class JerryTraderBackendStarter:
         else:
             self.collector = None
 
-        # Parquet-based Replayer (reads from cache/market_mover parquet files)
+        # CH-based Replayer (reads from market_snapshot_collector CH table)
         if "Replayer" in self.roles:
-            from jerry_trader.apps.snapshot_app.replayer import MarketSnapshotReplayer
+            from jerry_trader.apps.snapshot_app.ch_replayer import CHReplayer
 
             role_cfg = self.roles["Replayer"]
 
-            # If clock_redis is configured and we're in replay mode, create a
-            # RemoteClockFollower so the replayer is driven by the master
-            # ReplayClock on the other machine instead of local asyncio.sleep.
+            # RemoteClockFollower for cross-machine clock sync
             _remote_clock = None
             _clock_redis_cfg = role_cfg.get("clock_redis")
             if _clock_redis_cfg and self.replay_date:
@@ -326,16 +326,50 @@ class JerryTraderBackendStarter:
                         f"(master Redis: {_clock_host}:{_clock_port})"
                     )
 
-            self.replayer = MarketSnapshotReplayer(
+            # CH client for replayer
+            _replay_ch_cfg = role_cfg.get("clickhouse", {})
+            _replay_ch_host = _replay_ch_cfg.get("host", "localhost")
+            _replay_ch_port = _replay_ch_cfg.get("port", 8123)
+            _replay_ch_user = _replay_ch_cfg.get("user", "default")
+            _replay_ch_db = _replay_ch_cfg.get("database", "jerry_trader")
+            _replay_ch_password = os.getenv(
+                _replay_ch_cfg.get("password_env", "CLICKHOUSE_PASSWORD"), ""
+            )
+
+            import clickhouse_connect
+
+            _replay_ch_client = clickhouse_connect.get_client(
+                host=_replay_ch_host,
+                port=_replay_ch_port,
+                username=_replay_ch_user,
+                password=_replay_ch_password,
+                database=_replay_ch_db,
+            )
+
+            # Parse start_time/end_time (HHMMSS) to epoch ms
+            # Note: start_from_ms will be updated by bootstrap after it completes
+            _start_from_ms = None
+            _start_time = role_cfg.get("start_time")
+            if _start_time and self.replay_date:
+                _start_from_ms = hhmm_to_epoch_ms(self.replay_date, _start_time)
+
+            _end_ms = None
+            _end_time = role_cfg.get("end_time")
+            if _end_time and self.replay_date:
+                _end_ms = hhmm_to_epoch_ms(self.replay_date, _end_time)
+
+            self.replayer = CHReplayer(
                 replay_date=self.replay_date,
+                ch_client=_replay_ch_client,
+                redis_config=role_cfg.get("redis"),
                 session_id=self.session_id,
                 speed=role_cfg.get("speed", 1.0),
-                file_format=role_cfg.get("format", "parquet"),
-                start_from=role_cfg.get("start_from"),
+                start_from_ms=_start_from_ms,
+                end_ms=_end_ms,
+                remote_clock=_remote_clock,
                 rollback_to=role_cfg.get("rollback_to"),
                 clear=role_cfg.get("clear", False),
-                redis_config=role_cfg.get("redis"),
-                remote_clock=_remote_clock,
+                bootstrap_complete_event=self._bootstrap_complete_event,
             )
             self._services.append(("Replayer", self.replayer))
         else:
@@ -392,15 +426,14 @@ class JerryTraderBackendStarter:
                         "synced-replayer requires defaults.replay_date in config"
                     )
 
-                # Build start_time in HH:MM:SS for the Rust replayer
+                # Build start_time in HH:MM:SS for the Rust replayer (from unified config)
                 start_time_hms: str | None = None
-                if self.replay_time:
-                    t = str(self.replay_time).zfill(6)  # "080015" → "08:00:15"
+                if self.replay_start_time:
+                    t = str(self.replay_start_time).zfill(6)  # "080015" → "08:00:15"
                     start_time_hms = f"{t[:2]}:{t[2:4]}:{t[4:6]}"
-                elif "Replayer" in self.roles and self.roles["Replayer"].get(
-                    "start_from"
-                ):
-                    start_time_hms = self.roles["Replayer"]["start_from"]
+                else:
+                    # Default to premarket open
+                    start_time_hms = "04:00:00"
 
                 replayer_speed = 1.0
                 if "Replayer" in self.roles:
@@ -857,6 +890,14 @@ class JerryTraderBackendStarter:
 
         # Start SnapshotProcessor (it creates its own thread internally)
         if self.processor:
+            # If no bootstrap needed, signal event immediately so processor
+            # doesn't wait forever in _stream_listener
+            if not self.replay_date:
+                self._bootstrap_complete_event.set()
+                logger.info(
+                    "No bootstrap needed, event signaled immediately for SnapshotProcessor"
+                )
+
             self.processor.start()
             logger.info("SnapshotProcessor started")
 
@@ -890,12 +931,25 @@ class JerryTraderBackendStarter:
                 bootstrap_cfg = self.roles.get("SnapshotProcessor", {}).get(
                     "bootstrap", {}
                 )
-                bootstrap_start = bootstrap_cfg.get(
-                    "start_ms"
-                )  # Optional: start from specific time
-                bootstrap_end = bootstrap_cfg.get(
-                    "end_ms"
-                )  # Optional: end at specific time
+
+                # Convert HHMMSS start_time/end_time to epoch ms
+                bootstrap_start = None
+                bootstrap_end = None
+
+                start_time = bootstrap_cfg.get("start_time")
+                if start_time and self.replay_date:
+                    bootstrap_start = hhmm_to_epoch_ms(self.replay_date, start_time)
+
+                end_time = bootstrap_cfg.get("end_time")
+                if end_time and self.replay_date:
+                    bootstrap_end = hhmm_to_epoch_ms(self.replay_date, end_time)
+
+                logger.info(
+                    f"Bootstrap time range: start_ms={bootstrap_start} "
+                    f"({datetime.fromtimestamp(bootstrap_start / 1000, tz=self.tz).isoformat() if bootstrap_start else 'None'}), "
+                    f"end_ms={bootstrap_end} "
+                    f"({datetime.fromtimestamp(bootstrap_end / 1000, tz=self.tz).isoformat() if bootstrap_end else 'None'})"
+                )
 
                 def _run_bootstrap():
                     loader = HistoricalLoader(
@@ -917,12 +971,24 @@ class JerryTraderBackendStarter:
 
                         end_ts_ns = int(result["end_ms"]) * 1_000_000
                         clock.jump_to(end_ts_ns)
+                        clock.resume()
+
+                        # Tell replayer to start from bootstrap end (avoid re-processing)
+                        if self.replayer:
+                            self.replayer.start_from_ms = result["end_ms"]
+                            logger.info(
+                                f"Replayer start_from_ms set to {result['end_ms']}"
+                            )
                         end_dt = datetime.fromtimestamp(
                             result["end_ms"] / 1000, tz=self.tz
                         )
                         logger.info(
-                            f"🕐 Clock jumped to bootstrap end: {end_dt.strftime('%H:%M:%S')} ET"
+                            f"🕐 Clock resumed at bootstrap end: {end_dt.strftime('%H:%M:%S')} ET"
                         )
+
+                    # Signal that bootstrap is complete (even if no result)
+                    self._bootstrap_complete_event.set()
+                    logger.info("Bootstrap complete event signaled")
 
                 bootstrap_thread = Thread(
                     target=_run_bootstrap, name="CHBootstrap", daemon=True
@@ -1032,6 +1098,15 @@ class JerryTraderBackendStarter:
         if self.signal_engine:
             self.signal_engine.start()
             logger.info("SignalEngine started")
+
+        # If clock is paused and no bootstrap is running, resume it now
+        # (bootstrap handles its own resume after jump_to)
+        if self.replay_date and not (self.processor and self.replay_date):
+            from jerry_trader import clock as _clock_mod
+
+            if _clock_mod.get_clock() and _clock_mod.get_clock().is_paused:
+                _clock_mod.resume()
+                logger.info("🕐 Clock resumed (no bootstrap needed)")
 
         # Run BFF in the main thread (blocking) if enabled
         if self.bff:

@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import socket
+import threading
 import time
 from datetime import datetime, timedelta
 from threading import Thread
@@ -52,7 +53,7 @@ def compute_derived_metrics(
     timestamp: datetime,
     volume_tracker: VolumeTracker,
 ) -> pl.DataFrame:
-    """Compute derived metrics: relativeVolume5min."""
+    """Compute derived metrics: relativeVolume5min and relativeVolumeDaily."""
     # Relative volume (5min)
     tickers = df["ticker"].to_list()
     timestamps = [timestamp] * len(tickers)
@@ -60,7 +61,18 @@ def compute_derived_metrics(
 
     rel_vols = volume_tracker.compute_batch(tickers, timestamps, volumes)
 
-    return df.with_columns(pl.Series("relativeVolume5min", rel_vols))
+    result = df.with_columns(pl.Series("relativeVolume5min", rel_vols))
+
+    # Relative volume daily = cumulative_volume / prev_volume
+    if "prev_volume" in result.columns:
+        result = result.with_columns(
+            pl.when(pl.col("prev_volume") > 0)
+            .then(pl.col("volume") / pl.col("prev_volume"))
+            .otherwise(pl.lit(1.0))
+            .alias("relativeVolumeDaily")
+        )
+
+    return result
 
 
 def compute_weighted_mid_price(df: pl.DataFrame) -> pl.DataFrame:
@@ -90,8 +102,8 @@ from jerry_trader.shared.ids.redis_keys import (
     static_pending,
 )
 from jerry_trader.shared.logging.logger import setup_logger
+from jerry_trader.shared.time.timezone import parse_to_et_datetime
 from jerry_trader.shared.utils.data_utils import get_common_stocks
-from jerry_trader.shared.utils.parse import _parse_transfrom_timetamp
 
 logger = setup_logger(__name__, log_to_file=True, level=logging.DEBUG)
 
@@ -116,6 +128,7 @@ class SnapshotProcessor:
         redis_config: Optional[Dict[str, Any]] = None,
         influxdb_config: Optional[Dict[str, Any]] = None,
         clickhouse_config: Optional[Dict[str, Any]] = None,
+        bootstrap_complete_event: Optional[threading.Event] = None,
     ):
 
         # Unified session id — single source of truth for mode & date
@@ -123,6 +136,9 @@ class SnapshotProcessor:
         self.db_date, self.run_mode = parse_session_id(self.session_id)
 
         self.load_history = load_history
+
+        # Event to wait for bootstrap completion before starting Redis loop
+        self._bootstrap_complete_event = bootstrap_complete_event
 
         # ---------- ClickHouse Configuration ----------
         self.ch_client = None
@@ -215,6 +231,12 @@ class SnapshotProcessor:
         logger.info(
             f"_stream_listener - Starting Redis Stream consumer {self.CONSUMER_NAME}..."
         )
+
+        # Wait for bootstrap to complete before starting Redis loop
+        if self._bootstrap_complete_event is not None:
+            logger.info("_stream_listener - Waiting for bootstrap to complete...")
+            self._bootstrap_complete_event.wait()
+            logger.info("_stream_listener - Bootstrap complete, starting Redis loop")
 
         # Load historical data if requested
         if self.load_history:
@@ -582,7 +604,7 @@ class SnapshotProcessor:
             timestamp_value = df["timestamp"].max()
         else:
             timestamp_value = None
-        return _parse_transfrom_timetamp(timestamp_value)
+        return parse_to_et_datetime(timestamp_value)
 
     # =========================================================================
     # SUBSCRIPTION MANAGEMENT

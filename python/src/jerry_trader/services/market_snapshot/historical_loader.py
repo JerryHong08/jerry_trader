@@ -27,7 +27,7 @@ from jerry_trader.services.market_snapshot.processor import (
     compute_weighted_mid_price,
 )
 from jerry_trader.shared.logging.logger import setup_logger
-from jerry_trader.shared.utils.parse import _parse_transfrom_timetamp
+from jerry_trader.shared.time.timezone import ms_to_hhmmss, parse_to_et_datetime
 
 logger = setup_logger(__name__, log_to_file=True)
 
@@ -55,11 +55,6 @@ _CH_SNAPSHOT_COLUMNS = [
     "relativeVolumeDaily",
     "relativeVolume5min",
 ]
-
-
-def _ms_to_time(ms: int) -> str:
-    """Convert epoch ms to HH:MM:SS for logging."""
-    return datetime.fromtimestamp(ms / 1000).strftime("%H:%M:%S")
 
 
 class HistoricalLoader:
@@ -155,7 +150,7 @@ class HistoricalLoader:
         raw_windows = sorted(all_df["timestamp"].unique().to_list())
         logger.info(
             f"bootstrap - Read {len(all_df):,} rows ({len(raw_windows)} windows) in {t_read - t0:.1f}s, "
-            f"range: {_ms_to_time(raw_windows[0])} - {_ms_to_time(raw_windows[-1])}"
+            f"range: {ms_to_hhmmss(raw_windows[0])} - {ms_to_hhmmss(raw_windows[-1])}"
         )
 
         # Step 2: Filter common stocks once for entire dataset
@@ -198,7 +193,8 @@ class HistoricalLoader:
             ranked_df = compute_ranks(df)
 
             # Derived metrics (updates VolumeTracker — stateful)
-            timestamp = _parse_transfrom_timetamp(window_ms)
+            # Also computes relativeVolumeDaily if prev_volume is present
+            timestamp = parse_to_et_datetime(window_ms)
             enriched_df = compute_derived_metrics(
                 ranked_df, timestamp, self.processor._volume_tracker
             )
@@ -285,7 +281,7 @@ class HistoricalLoader:
     ) -> Dict[str, Any]:
         """Seek to a specific time point."""
         logger.info(
-            f"seek_to - Seeking to {_ms_to_time(target_ms)}, clear_after={clear_after}"
+            f"seek_to - Seeking to {ms_to_hhmmss(target_ms)}, clear_after={clear_after}"
         )
         result = self.bootstrap(end_ms=target_ms)
         if clear_after and result.get("success"):
@@ -363,7 +359,7 @@ class HistoricalLoader:
                 event_time = ts
             else:
                 event_time_ms = int(ts)
-                event_time = _parse_transfrom_timetamp(ts)
+                event_time = parse_to_et_datetime(ts)
 
             clickhouse_rows.append(
                 [
@@ -501,5 +497,5 @@ class HistoricalLoader:
     def _clear_after_timestamp(self, timestamp_ms: int) -> None:
         """Clear data after timestamp in Redis and ClickHouse."""
         logger.info(
-            f"_clear_after_timestamp - Clearing data after {_ms_to_time(timestamp_ms)}"
+            f"_clear_after_timestamp - Clearing data after {ms_to_hhmmss(timestamp_ms)}"
         )

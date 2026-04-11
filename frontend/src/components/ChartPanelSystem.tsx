@@ -614,21 +614,25 @@ function PricePanel({
     if (!chartRef.current || !candleSeriesRef.current) return;
     if (!chartState?.bars?.length) return;
 
-    const candleData = chartState.bars.map((bar: any) => ({
-      time: bar.time as Time,
-      open: bar.open,
-      high: bar.high,
-      low: bar.low,
-      close: bar.close,
-    }));
+    const candleData = chartState.bars
+      .map((bar: any) => ({
+        time: Number(bar.time) as Time,
+        open: Number(bar.open),
+        high: Number(bar.high),
+        low: Number(bar.low),
+        close: Number(bar.close),
+      }))
+      .filter((bar: any) => Number.isFinite(bar.time));
 
     candleSeriesRef.current.setData(candleData);
 
-    const volumeData = chartState.bars.map((bar: any) => ({
-      time: bar.time as Time,
-      value: bar.volume,
-      color: bar.close >= bar.open ? '#22c55e40' : '#ef444440',
-    }));
+    const volumeData = chartState.bars
+      .map((bar: any) => ({
+        time: Number(bar.time) as Time,
+        value: Number(bar.volume),
+        color: Number(bar.close) >= Number(bar.open) ? '#22c55e40' : '#ef444440',
+      }))
+      .filter((bar: any) => Number.isFinite(bar.time));
 
     volumeSeriesRef.current?.setData(volumeData);
 
@@ -637,7 +641,8 @@ function PricePanel({
     // Initialize current bar from last historical bar for real-time updates
     const lastBar = chartState.bars[chartState.bars.length - 1];
     if (lastBar) {
-      const lastBarTime = typeof lastBar.time === 'number' ? lastBar.time : parseInt(String(lastBar.time));
+      const lastBarTime = Number(lastBar.time);
+      if (!Number.isFinite(lastBarTime)) return;
       lastHistoricalBarTimeRef.current = lastBarTime;
       // Initialize current bar from last historical bar
       currentBarRef.current = {
@@ -660,6 +665,7 @@ function PricePanel({
     // Skip until bars are loaded and chart is ready
     if (!barsLoadedRef.current || !candleSeriesRef.current) return;
     if (!latestTrade || latestTrade === prevTradeRef.current) return;
+    if (typeof latestTrade.price !== 'number' || typeof latestTrade.timestamp !== 'number') return;
 
     prevTradeRef.current = latestTrade;
     const barDuration = TIMEFRAME_DURATION[timeframe];
@@ -692,20 +698,27 @@ function PricePanel({
     }
 
     // Update the candlestick series
-    candleSeriesRef.current.update({
-      time: currentBarRef.current.time as Time,
-      open: currentBarRef.current.open,
-      high: currentBarRef.current.high,
-      low: currentBarRef.current.low,
-      close: currentBarRef.current.close,
-    });
+    const barTime = currentBarRef.current.time;
+    if (!Number.isFinite(barTime)) return;
+
+    try {
+      candleSeriesRef.current.update({
+        time: barTime as Time,
+        open: currentBarRef.current.open,
+        high: currentBarRef.current.high,
+        low: currentBarRef.current.low,
+        close: currentBarRef.current.close,
+      });
+    } catch { /* ignore out-of-order updates */ }
 
     // Update volume
-    volumeSeriesRef.current?.update({
-      time: currentBarRef.current.time as Time,
-      value: currentBarRef.current.volume,
-      color: currentBarRef.current.close >= currentBarRef.current.open ? '#22c55e40' : '#ef444440',
-    });
+    try {
+      volumeSeriesRef.current?.update({
+        time: barTime as Time,
+        value: currentBarRef.current.volume,
+        color: currentBarRef.current.close >= currentBarRef.current.open ? '#22c55e40' : '#ef444440',
+      });
+    } catch { /* ignore out-of-order updates */ }
   }, [latestTrade, timeframe]);
 
   // Render overlays
@@ -721,7 +734,14 @@ function PricePanel({
       const factorState = symbolFactors[factorKey];
       const factorData = factorState?.factors?.[factorId];
 
-      if (!factorData) continue;
+      if (!factorData || factorData.length === 0) {
+        // Clear stale overlay data when switching timeframes and new TF has no data
+        if (overlaySeriesRef.current[factorId]) {
+          overlaySeriesRef.current[factorId].setData([]);
+          overlayDataLengthRef.current[factorId] = 0;
+        }
+        continue;
+      }
 
       // Create overlay series if needed - overlays share price scale with candlesticks
       if (!overlaySeriesRef.current[factorId]) {

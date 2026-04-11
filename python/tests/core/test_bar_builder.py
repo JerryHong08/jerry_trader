@@ -102,14 +102,22 @@ class TestTradeIngestion:
         assert bar["session"] == "regular"
 
     def test_multi_bar_completions(self):
-        """Skipping a whole bar still returns only the one completed bar."""
+        """Skipping a whole bar: completes the original bar + forward-fills the gap."""
         b = BarBuilder(["1m"])
         b.ingest_trade("AAPL", 100.0, 50, _ts(9, 30, 5))
 
-        # Jump ahead 2 minutes → completes the 09:30 bar
+        # Jump ahead 2 minutes → completes 09:30 bar + forward-fills 09:31 bar
         completed = b.ingest_trade("AAPL", 105.0, 30, _ts(9, 32, 5))
-        assert len(completed) == 1
+        assert len(completed) == 2
+        # First: the real completed bar (09:30)
         assert completed[0]["open"] == 100.0
+        assert completed[0]["volume"] == 50.0
+        assert completed[0]["trade_count"] == 1
+        # Second: the forward-filled bar (09:31) — OHLC = prev close, V=0
+        assert completed[1]["open"] == 100.0
+        assert completed[1]["close"] == 100.0
+        assert completed[1]["volume"] == 0.0
+        assert completed[1]["trade_count"] == 0
 
 
 # ── VWAP ─────────────────────────────────────────────────────────────
@@ -419,3 +427,74 @@ class TestAdvance:
         expired = b.advance(_ts(9, 31, 0))
         assert len(expired) == 1
         assert set(expired[0].keys()) == TestBarDictFields.EXPECTED_KEYS
+
+
+# ── Forward-Fill ───────────────────────────────────────────────────
+
+
+class TestForwardFill:
+    """Tests for forward-fill of empty bar periods after first trade."""
+
+    def test_no_fill_before_first_trade(self):
+        """No forward-fill happens before any trade (no reference price)."""
+        b = BarBuilder(["1m"])
+        # First trade at 9:32 — no fill before this
+        completed = b.ingest_trade("AAPL", 100.0, 50, _ts(9, 32, 5))
+        assert len(completed) == 0
+
+    def test_fill_one_gap_bar(self):
+        """One missing bar period gets forward-filled."""
+        b = BarBuilder(["1m"])
+        b.ingest_trade("AAPL", 100.0, 50, _ts(9, 30, 5))
+
+        # Trade 2 minutes later → 09:30 bar completes + 09:31 fill
+        completed = b.ingest_trade("AAPL", 105.0, 30, _ts(9, 32, 5))
+        assert len(completed) == 2
+        # First: real bar (09:30)
+        assert completed[0]["volume"] == 50.0
+        # Second: forward-filled (09:31)
+        assert completed[1]["open"] == 100.0
+        assert completed[1]["close"] == 100.0
+        assert completed[1]["high"] == 100.0
+        assert completed[1]["low"] == 100.0
+        assert completed[1]["volume"] == 0.0
+        assert completed[1]["trade_count"] == 0
+
+    def test_fill_multiple_gap_bars(self):
+        """Multiple missing bar periods all get forward-filled."""
+        b = BarBuilder(["1m"])
+        b.ingest_trade("AAPL", 100.0, 50, _ts(9, 30, 5))
+
+        # Trade 5 minutes later → 1 real + 4 fills
+        completed = b.ingest_trade("AAPL", 105.0, 30, _ts(9, 35, 5))
+        assert len(completed) == 5
+        # First: real bar (09:30)
+        assert completed[0]["volume"] == 50.0
+        # Rest: forward-filled bars (09:31, 09:32, 09:33, 09:34)
+        for i in range(1, 5):
+            assert completed[i]["open"] == 100.0
+            assert completed[i]["close"] == 100.0
+            assert completed[i]["volume"] == 0.0
+            assert completed[i]["trade_count"] == 0
+
+    def test_fill_uses_latest_close_price(self):
+        """Forward-fill uses the most recent close price, not the first."""
+        b = BarBuilder(["1m"])
+        b.ingest_trade("AAPL", 100.0, 50, _ts(9, 30, 5))
+        # Second trade in same bar → updates close to 110
+        b.ingest_trade("AAPL", 110.0, 30, _ts(9, 30, 30))
+
+        # Trade 2 minutes later → fills at 110
+        completed = b.ingest_trade("AAPL", 115.0, 20, _ts(9, 32, 5))
+        assert len(completed) == 2
+        # Fill bar uses 110 as reference
+        assert completed[1]["open"] == 110.0
+        assert completed[1]["close"] == 110.0
+
+    def test_no_fill_when_no_gap(self):
+        """No forward-fill when trades arrive in adjacent bars."""
+        b = BarBuilder(["1m"])
+        b.ingest_trade("AAPL", 100.0, 50, _ts(9, 30, 5))
+        completed = b.ingest_trade("AAPL", 105.0, 30, _ts(9, 31, 5))
+        # Only the real bar (09:30) completes, no fill needed
+        assert len(completed) == 1

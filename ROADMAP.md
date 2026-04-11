@@ -12,6 +12,7 @@ Performance-critical components rewritten in Rust.
 
 - [-] 2.1 StateEngine rewrite in Rust
 - [-] 2.2 FactorEngine rewrite in Rust
+- [x] 2.3 Add ClickHouse data source to Rust replayer — use `clickhouse` crate to query trades/quotes from CH as primary source (Parquet fallback), unify backtest data path, config-driven (date + ticker list)
 
 ## 3. Services Layer
 
@@ -23,7 +24,8 @@ Stateful workers and use-case implementations.
 - [ ] 3.6 Risk engine integration with order execution
 
 - [ ] [3.22](roadmap/live-trf-filtering-apply-delay-threshold-filter-across-real-time-pipeline-components-collector-unified-ticker-manager-bars-builder-factor-engine.md) Live TRF filtering — apply delay threshold filter across real-time pipeline components (collector, unified_ticker_manager, bars_builder, factor_engine)
-- [ ] [3.23](roadmap/fix-meeting-bar-merge-race-condition.md) Fix meeting bar merge race condition in bars_builder
+- [x] [3.23](roadmap/fix-meeting-bar-merge-race-condition.md) Fix meeting bar merge race condition in bars_builder
+- [x] [3.24](roadmap/forward-fill-null-bars-from-first-trade-in-barbuilder.md) Forward-fill null bars from first trade in BarBuilder
 ## 4. ML Pipeline
 
 Machine learning for breakout-compute-analyze context model.

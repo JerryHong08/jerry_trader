@@ -169,6 +169,11 @@ class ClickHouseClient:
                     }
 
             # 2. Append the current in-progress (partial) bar
+            #    ONLY if it's newer than all existing bars.
+            #    Do NOT overwrite existing CH bars — a partial bar is
+            #    incomplete (still building) and may differ from the
+            #    completed bar already stored in ClickHouse (e.g. from
+            #    trades_backfill or a prior flush).
             partial = self._bars_builder.get_partial_bar(ticker, builder_tf)
             if partial is not None:
                 partial_time = partial["bar_start"] // 1000
@@ -187,19 +192,10 @@ class ClickHouseClient:
                             "volume": partial["volume"],
                         }
                     )
-                elif partial_time == last_time and is_meaningful:
-                    bars[-1] = {
-                        "time": partial_time,
-                        "open": partial["open"],
-                        "high": partial["high"],
-                        "low": partial["low"],
-                        "close": partial["close"],
-                        "volume": partial["volume"],
-                    }
                 else:
                     logger.debug(
                         f"_append_partial_bar - {ticker}/{builder_tf}: "
-                        f"skipping flat partial bar (time={'new' if partial_time > last_time else 'same'}, "
+                        f"skipping partial bar (time={'same-as-last' if partial_time == last_time else 'stale'}, "
                         f"partial time is {self._ms_to_readable(partial_time)}, "
                         f"trades={partial_trades}, O={partial['open']:.2f}, "
                         f"H={partial['high']:.2f}, L={partial['low']:.2f}, C={partial['close']:.2f})"

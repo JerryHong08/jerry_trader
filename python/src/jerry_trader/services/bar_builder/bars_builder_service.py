@@ -230,18 +230,18 @@ class BarsBuilderService:
         # Computed once: intersection of configured TFs with bootstrappable TFs
         self._bootstrap_tfs_set = set(self.timeframes) & BOOTSTRAP_TIMEFRAMES
 
-        # first_ws_tick_ts:  epoch ms of the first WS tick per ticker
-        # meeting_bar_start: ticker → {tf → bar_start} — the bar straddling
-        #                    the REST→WS boundary per timeframe
-        # rest_meeting_bars: ticker → {tf → bar dict} — REST half of meeting bar
-        #                    stored by trades_backfill, merged when WS completes
+        # first_ws_tick_ts:  epoch ms of the first WS tick per ticker (Python-side tracking)
         # bootstrap_done:    ticker → set of TFs that completed bootstrap
         # bootstrap_events:  ticker → threading.Event, set when trades_backfill
         #                    completes so tickdata_server can wait before
         #                    serving REST bar responses with stale gap data.
+        #
+        # Meeting bar merge state is now in the Rust BarBuilder:
+        #   bar_builder.set_first_ws_tick_ts()  — first WS tick
+        #   bar_builder.detect_meeting_bars()    — identify straddling bars
+        #   bar_builder.set_rest_partial()       — store REST half
+        #   bar_builder.drain_completed()        — returns merged bars
         self._first_ws_tick_ts: Dict[str, int] = {}
-        self._meeting_bar_start: Dict[str, Dict[str, int]] = {}
-        self._rest_meeting_bars: Dict[str, Dict[str, Bar]] = {}
         self._bootstrap_done: Dict[str, set] = {}
         self._bootstrap_events: Dict[str, Event] = {}
 
@@ -589,23 +589,25 @@ class BarsBuilderService:
             self._enqueue_bars(completed, source="remove_ticker")
             self._stats["bars_completed"] += len(completed)
 
-        # Flush any unmerged REST meeting bar partials before clearing state.
+        # Flush any pending WS meeting bars and REST partials from Rust.
         # If trades_backfill stored REST partials but the WS meeting bar never
-        # completed (e.g., quick unsubscribe), write them as-is.
-        rest_partials = self._rest_meeting_bars.pop(symbol, {})
+        # completed (e.g., quick unsubscribe), drain them as-is.
+        rest_partials = self.bar_builder.get_rest_partials(symbol)
         if rest_partials:
-            for tf, rest_bar in rest_partials.items():
-                self._enqueue_bars(
-                    [rest_bar.to_clickhouse_dict()], source="remove_ticker/rest_partial"
-                )
+            for tf, bar_dict in rest_partials.items():
+                bar_dict["bar_start"] = self._et_ms_to_utc_ms(bar_dict["bar_start"])
+                bar_dict["bar_end"] = self._et_ms_to_utc_ms(bar_dict["bar_end"])
+                self._enqueue_bars([bar_dict], source="remove_ticker/rest_partial")
                 logger.info(
                     f"remove_ticker - {symbol}/{tf}: flushing unmerged "
                     f"REST meeting bar partial"
                 )
 
-        # Clear bootstrap/merge state so re-subscribe triggers fresh bootstrap
+        # Clear meeting bar state in Rust BarBuilder
+        self.bar_builder.clear_meeting_bar_state(symbol)
+
+        # Clear bootstrap state so re-subscribe triggers fresh bootstrap
         self._first_ws_tick_ts.pop(symbol, None)
-        self._meeting_bar_start.pop(symbol, None)
         self._bootstrap_done.pop(symbol, None)
         # Remove bootstrap event (trades_backfill may still be running —
         # setting it ensures any wait_for_bootstrap() call returns immediately)
@@ -794,7 +796,9 @@ class BarsBuilderService:
             bars = [Bar.from_rust_dict(bar) for bar in bootstrap_bars]
 
             # ── Separate meeting bars from clean bars per TF ──────────
-            meeting_starts = self._meeting_bar_start.get(symbol, {})
+            # Get meeting bar starts from Rust BarBuilder (detected on first WS tick)
+            rust_meeting = self.bar_builder.detect_meeting_bars(symbol)
+            meeting_starts = rust_meeting if rust_meeting else {}
             clean_bars: List[Bar] = []
             rest_meeting_bars: Dict[str, Bar] = {}  # tf → Bar
 
@@ -806,12 +810,6 @@ class BarsBuilderService:
                     clean_bars.append(bar)
 
             # ── Re-subscribe dedup: skip bars already in ClickHouse ─
-            # On re-subscribe, bars with bar_start < that TF's last
-            # bar_start already exist correctly from the prior
-            # subscription. Only keep:
-            #   - bar_start == per_tf_starts[tf]: partial bar that needs
-            #     rebuild (flushed incomplete during unsubscribe)
-            #   - bar_start > per_tf_starts[tf]: new gap-fill bars
             if per_tf_starts:
                 original_count = len(clean_bars)
                 clean_bars = [
@@ -826,25 +824,45 @@ class BarsBuilderService:
                         f"already-existing bars (re-subscribe dedup)"
                     )
 
-            # Write clean bars (no overlap with WS) - convert to dict for queue
+            # Write clean bars (no overlap with WS)
             clean_dicts = [b.to_clickhouse_dict() for b in clean_bars]
             self._enqueue_bars(clean_dicts, source="trades_backfill/clean")
 
-            # ── Store REST meeting bar partials for deferred merge ────
-            # The WS meeting bars haven't completed yet (the bar's time
-            # boundary hasn't been reached).  Store the REST halves in
-            # _rest_meeting_bars — when the WS bar completes later in
-            # _on_trade, it will be merged there before writing.
+            # ── Store REST meeting bar partials in Rust ──────────────
+            # Rust handles the merge: if WS bar is already pending, merges
+            # immediately and adds to completed_queue. Otherwise stores for
+            # later merge when WS bar completes.
             if rest_meeting_bars:
-                rest_store = self._rest_meeting_bars.setdefault(symbol, {})
                 for tf, rest_bar in rest_meeting_bars.items():
-                    rest_store[tf] = rest_bar
+                    # Convert to dict, then convert timestamps back to ET for Rust
+                    rest_et = rest_bar.to_clickhouse_dict()
+                    rest_et["bar_start"] = self._utc_ms_to_et_ms(rest_et["bar_start"])
+                    rest_et["bar_end"] = self._utc_ms_to_et_ms(rest_et["bar_end"])
+                    self.bar_builder.set_rest_partial(symbol, tf, rest_et)
                     logger.info(
                         f"trades_backfill - {symbol}/{tf}: stored REST meeting bar "
-                        f"partial for deferred merge "
+                        f"partial in Rust for merge "
                         f"(bar_start={self._ms_to_et(rest_bar.bar_start)}, "
                         f"trades={rest_bar.trade_count})"
                     )
+
+                # Drain any bars that were merged by set_rest_partial
+                merged_drain = self.bar_builder.drain_completed()
+                if merged_drain:
+                    merged_bars = [
+                        Bar.from_rust_dict(self._convert_bar_et_to_utc(d))
+                        for d in merged_drain
+                    ]
+                    merged_dicts = [b.to_clickhouse_dict() for b in merged_bars]
+                    self._enqueue_bars(
+                        merged_dicts, source="trades_backfill/meeting_merge"
+                    )
+                    for mb in merged_bars:
+                        logger.info(
+                            f"MEETING_BAR_MERGED - {symbol}/{mb.timeframe}: "
+                            f"bar_start={self._ms_to_et(mb.bar_start)}, "
+                            f"trades={mb.trade_count}, vol={mb.volume}"
+                        )
 
             total_bars = len(clean_bars) + len(rest_meeting_bars)
             logger.info(
@@ -953,57 +971,6 @@ class BarsBuilderService:
             return True  # no bootstrap in progress
         return evt.wait(timeout=timeout)
 
-    def _try_merge_meeting_bar(self, bar: Bar) -> Bar:
-        """If this completed bar is a meeting bar with a stored REST partial,
-        merge them and return the merged bar. Otherwise return the original.
-
-        Called for every completed bar (from ingest_trade rollover or advance).
-        The merge combines:
-          REST partial  [bar_start … first_ws_ts)   — from trades_backfill
-          WS   partial  [first_ws_ts … bar_end)      — from live WS ticks
-
-        After merging, the REST partial is removed from state.
-        """
-        ticker = bar.symbol
-        tf = bar.timeframe
-
-        # Check if this bar matches a meeting bar start
-        tf_starts = self._meeting_bar_start.get(ticker, {})
-        expected_start = tf_starts.get(tf)
-        if expected_start is None or bar.bar_start != expected_start:
-            return bar  # not a meeting bar
-
-        # Check if REST partial exists for merging
-        rest_bars = self._rest_meeting_bars.get(ticker, {})
-        rest_bar = rest_bars.get(tf)
-        if rest_bar:
-            # Use domain Bar.merge() for clean business logic
-            merged = rest_bar.merge(bar)
-            # Clean up: remove REST partial and meeting bar start for this TF
-            del rest_bars[tf]
-            if not rest_bars:
-                self._rest_meeting_bars.pop(ticker, None)
-            del tf_starts[tf]
-            if not tf_starts:
-                self._meeting_bar_start.pop(ticker, None)
-            logger.info(
-                f"MEETING_BAR_MERGED - {ticker}/{tf}: "
-                f"bar_start={self._ms_to_et(merged.bar_start)}, "
-                f"REST trades={rest_bar.trade_count}, "
-                f"WS trades={bar.trade_count}, "
-                f"merged trades={merged.trade_count}"
-            )
-            return merged
-
-        # REST partial not yet available (trades_backfill still running).
-        # This is rare but possible in fast replay. Just return the raw
-        # WS bar — trades_backfill will handle merge when it finishes.
-        logger.debug(
-            f"MEETING_BAR_WS - {ticker}/{tf}: WS meeting bar completed "
-            f"but REST partial not ready yet (trades_backfill still running?)"
-        )
-        return bar
-
     # Timezone helpers — thin wrappers around jerry_trader.shared.utils.timezone
     # so existing call sites (self._ms_to_et, etc.) keep working.
     _ms_to_et = staticmethod(ms_to_et)
@@ -1068,42 +1035,36 @@ class BarsBuilderService:
         if ts_ms <= 0:
             return
 
-        # Log first WebSocket tick — record timestamp for bootstrap merge
-        if symbol not in self._first_ws_tick_ts:
-            self._first_ws_tick_ts[symbol] = ts_ms
-            logger.info(
-                f"_on_trade - FIRST_WS_TICK - {symbol}: "
-                f"ts={self._ms_to_et(ts_ms)}, price={price}, size={size}"
-            )
-
         # Convert UTC → ET for Rust BarBuilder
-        # Rust expects timestamps in US/Eastern time for correct session boundary calculations
         ts_et_ms = self._utc_ms_to_et_ms(ts_ms)
 
         # Feed to Rust BarBuilder (completed bars are drained by _flush_loop)
         self.bar_builder.ingest_trade(symbol, float(price), float(size), ts_et_ms)
         self._stats["ticks_ingested"] += 1
 
-        # Detect meeting bars for all bootstrap TFs on first WS tick.
-        # Skip if bootstrap already completed (avoid spurious re-detection).
+        # On first WS tick: record timestamp in Rust and detect meeting bars.
+        # The Rust BarBuilder handles all meeting bar merge logic internally.
         if (
-            symbol not in self._meeting_bar_start
+            symbol not in self._first_ws_tick_ts
             and symbol not in self._bootstrap_done
             and self._bootstrap_tfs_set
         ):
-            meeting_starts: Dict[str, int] = {}
-            for tf in self._bootstrap_tfs_set:
-                partial = self.bar_builder.get_current_bar(symbol, tf)
-                if partial:
-                    # Convert ET → UTC before storing meeting bar start
-                    partial = self._convert_bar_et_to_utc(partial)
-                    meeting_starts[tf] = partial["bar_start"]
+            self._first_ws_tick_ts[symbol] = ts_ms
+            logger.info(
+                f"_on_trade - FIRST_WS_TICK - {symbol}: "
+                f"ts={self._ms_to_et(ts_ms)}, price={price}, size={size}"
+            )
+
+            # Record first WS tick in Rust BarBuilder (ET timestamp)
+            is_new = self.bar_builder.set_first_ws_tick_ts(symbol, ts_et_ms)
+            if is_new:
+                # Detect which bars straddle the REST→WS boundary
+                meeting = self.bar_builder.detect_meeting_bars(symbol)
+                if meeting:
                     logger.info(
-                        f"_on_trade - MEETING_BAR - {symbol}/{tf}: "
-                        f"bar_start={self._ms_to_et(partial['bar_start'])}"
+                        f"_on_trade - MEETING_BAR - {symbol}: "
+                        f"detected meeting bars at {meeting}"
                     )
-            if meeting_starts:
-                self._meeting_bar_start[symbol] = meeting_starts
 
     # ════════════════════════════════════════════════════════════════════
     # Redis pub/sub: broadcast completed bars
@@ -1182,22 +1143,21 @@ class BarsBuilderService:
 
             completed = self.bar_builder.drain_completed()
             if completed:
-                # Convert Rust dicts to domain Bar objects for type safety
+                # Rust BarBuilder already handles meeting bar merge internally.
+                # Deferred bars (REST not yet available) are held in Rust and
+                # will be returned on the next drain after set_rest_partial().
                 bars = [
                     Bar.from_rust_dict(self._convert_bar_et_to_utc(d))
                     for d in completed
                 ]
                 self._stats["bars_completed"] += len(bars)
 
-                # Merge meeting bars using domain logic
-                merged = [self._try_merge_meeting_bar(bar) for bar in bars]
-
-                # Convert back to dicts for queue and ClickHouse
-                merged_dicts = [b.to_clickhouse_dict() for b in merged]
-                self._enqueue_bars(merged_dicts, source="flush_loop/drain_completed")
+                # Convert to dicts for ClickHouse
+                bar_dicts = [b.to_clickhouse_dict() for b in bars]
+                self._enqueue_bars(bar_dicts, source="flush_loop/drain_completed")
 
                 # Publish completed bars to Redis pub/sub
-                for bar in merged:
+                for bar in bars:
                     self._publish_bar(bar.to_event_dict())
 
             # Flush to ClickHouse immediately when bars are pending.

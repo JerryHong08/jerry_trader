@@ -161,11 +161,19 @@ def compute_returns_and_metrics(
         SignalResult with all computed metrics.
     """
     trigger_ms = trigger.trigger_time_ms
-    trigger_price = (
-        trigger.trigger_price or ticker_data.candidate.price_at_entry
-        if ticker_data.candidate
-        else 0.0
-    )
+
+    # Build trade price index early — needed for fallback price lookup
+    trade_ts, trade_prices = _build_trade_price_index(ticker_data.trades)
+
+    # Resolve trigger_price: factor value > nearest trade price > candidate price
+    trigger_price = trigger.trigger_price
+    if not trigger_price or trigger_price <= 0:
+        # Fallback: use the actual trade price at or just before trigger time
+        trigger_price = get_price_at(trade_ts, trade_prices, trigger_ms)
+    if not trigger_price or trigger_price <= 0:
+        trigger_price = (
+            ticker_data.candidate.price_at_entry if ticker_data.candidate else 0.0
+        )
 
     if trigger_price <= 0:
         # Fallback: use first available trade price
@@ -175,19 +183,16 @@ def compute_returns_and_metrics(
             logger.warning(f"No price for {trigger.symbol} at trigger, skipping")
             trigger_price = 0.0
 
-    # 1. Slippage
+    # 2. Slippage
     ask_price = find_ask_at_time(ticker_data.quotes, trigger_ms)
     entry_price, slippage_pct = compute_entry_price(
         trigger_price, ask_price, slippage_buffer, default_slippage
     )
 
-    # 2. Build trade price index for lookups
-    trade_ts, trade_prices = _build_trade_price_index(ticker_data.trades)
-
-    # Find the trade index at trigger time (start scanning from here)
+    # 3. Find trade index at trigger time (for MFE/MAE scan)
     trigger_idx = bisect_left(trade_ts, trigger_ms)
 
-    # 3. Compute returns at each horizon
+    # 4. Compute returns at each horizon
     returns: dict[str, float] = {}
     for h_ms in horizons_ms:
         target_ms = trigger_ms + h_ms
@@ -217,7 +222,7 @@ def compute_returns_and_metrics(
         ret = (price - entry_price) / entry_price
         if ret > max_return:
             max_return = ret
-            time_to_peak_ms = ts
+            time_to_peak_ms = ts - trigger_ms
         mfe = max(mfe, ret)
         mae = min(mae, ret)
 

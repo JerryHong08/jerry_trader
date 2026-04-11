@@ -3,11 +3,7 @@
 Queries market_snapshot in ClickHouse to find stocks that newly entered
 the top N movers during a trading session.
 
-Design decisions (see roadmap/backtest-prefilter-findings.md):
-- mode field is 'live'/'replay', NOT 'premarket'/'regular'
-- date format: YYYY-MM-DD
-- Only selects stocks that NEWLY entered top N (excludes open-in-top20)
-- Uses CTE to identify initial top N, then filters them out
+Tries tables in order: market_snapshot → market_snapshot_collector.
 """
 
 from __future__ import annotations
@@ -20,12 +16,15 @@ from jerry_trader.shared.logging.logger import setup_logger
 
 logger = setup_logger("backtest.pre_filter", log_to_file=True)
 
-# ClickHouse database/table — configurable via method param
-_DEFAULT_TABLE = "market_snapshot"
+# Table resolution order: enriched → collector
+_TABLE_ORDER = [
+    ("market_snapshot", False),  # Full enriched, canonical columns
+    ("market_snapshot_collector", True),  # Full data, different column names
+]
 
 
 class PreFilter:
-    """Find candidate stocks from market_snapshot for backtesting.
+    """Find candidate stocks for backtesting.
 
     Queries ClickHouse to identify stocks that newly entered the top N
     movers during a session, with configurable filters.
@@ -35,9 +34,28 @@ class PreFilter:
         self._ch = ch_client
         self._database = database
 
-    @property
-    def _table(self) -> str:
-        return f"{self._database}.{_DEFAULT_TABLE}"
+    def _resolve_table(self, date: str) -> tuple[str, bool]:
+        """Find the best available table for this date.
+
+        Returns (table_fqn, is_collector).
+        is_collector=True means column names differ (ticker, timestamp, etc.)
+        """
+        for table, is_collector in _TABLE_ORDER:
+            fqn = f"{self._database}.{table}"
+            try:
+                r = self._ch.query(
+                    f"SELECT count() FROM {fqn} FINAL WHERE date = %(date)s",
+                    parameters={"date": date},
+                )
+                count = r.result_rows[0][0] if r.result_rows else 0
+            except Exception:
+                count = 0
+
+            if count > 0:
+                logger.info(f"PreFilter: using {fqn} ({count:,} rows)")
+                return fqn, is_collector
+
+        return f"{self._database}.{_TABLE_ORDER[-1][0]}", _TABLE_ORDER[-1][1]
 
     def find(
         self,
@@ -54,12 +72,13 @@ class PreFilter:
             List of Candidate objects, sorted by first_entry_ms.
         """
         config = config or PreFilterConfig()
-        mode = "live"  # Default mode for backtest queries
+
+        table, is_collector = self._resolve_table(date)
 
         if config.new_entry_only:
-            candidates = self._find_new_entries(date, mode, config)
+            candidates = self._find_new_entries(date, config, table, is_collector)
         else:
-            candidates = self._find_all_top_n(date, mode, config)
+            candidates = self._find_all_top_n(date, config, table, is_collector)
 
         # Apply post-query filters
         candidates = self._apply_filters(candidates, config)
@@ -77,78 +96,84 @@ class PreFilter:
         return candidates
 
     def _find_new_entries(
-        self, date: str, mode: str, config: PreFilterConfig
+        self,
+        date: str,
+        config: PreFilterConfig,
+        table: str,
+        is_collector: bool,
     ) -> list[Candidate]:
-        """Find stocks that newly entered top N (excludes initial top N).
+        """Find stocks that newly entered top N (excludes initial top N)."""
+        sym = "ticker" if is_collector else "symbol"
+        ts = "timestamp" if is_collector else "event_time_ms"
+        price_col = "price"  # Both collector and snapshot have price
+        vol_col = "volume"
+        pc_col = "prev_close"
+        rv_col = "relativeVolumeDaily"
 
-        Uses CTE to identify stocks in the initial snapshot's top N,
-        then filters them out.
-        """
         query = f"""
             WITH initial_top20 AS (
-                SELECT DISTINCT symbol
-                FROM {self._table} FINAL
+                SELECT DISTINCT {sym}
+                FROM {table} FINAL
                 WHERE date = %(date)s
-                  AND mode = %(mode)s
-                  AND event_time_ms = (
-                      SELECT min(event_time_ms)
-                      FROM {self._table} FINAL
+                  AND {ts} = (
+                      SELECT min({ts})
+                      FROM {table} FINAL
                       WHERE date = %(date)s
-                        AND mode = %(mode)s
                         AND rank <= %(top_n)s
                   )
                   AND rank <= %(top_n)s
             )
             SELECT
-                symbol,
-                min(event_time_ms) as first_entry_ms,
-                argMin(changePercent, event_time_ms) as gain_at_entry,
-                argMin(price, event_time_ms) as price_at_entry,
-                any(prev_close) as prev_close,
-                argMin(volume, event_time_ms) as volume_at_entry,
-                argMin(relativeVolumeDaily, event_time_ms) as relative_volume,
+                {sym},
+                min({ts}) as first_entry_ms,
+                argMin(changePercent, {ts}) as gain_at_entry,
+                argMin({price_col}, {ts}) as price_at_entry,
+                any({pc_col}) as prev_close,
+                argMin({vol_col}, {ts}) as volume_at_entry,
+                argMin({rv_col}, {ts}) as relative_volume,
                 max(changePercent) as max_gain
-            FROM {self._table} FINAL
+            FROM {table} FINAL
             WHERE date = %(date)s
-              AND mode = %(mode)s
               AND rank <= %(top_n)s
-              AND symbol NOT IN (SELECT symbol FROM initial_top20)
-            GROUP BY symbol
+              AND {sym} NOT IN (SELECT {sym} FROM initial_top20)
+            GROUP BY {sym}
             ORDER BY first_entry_ms
         """
-        params = {
-            "date": date,
-            "mode": mode,
-            "top_n": config.top_n,
-        }
+        params = {"date": date, "top_n": config.top_n}
         return self._execute_query(query, params)
 
     def _find_all_top_n(
-        self, date: str, mode: str, config: PreFilterConfig
+        self,
+        date: str,
+        config: PreFilterConfig,
+        table: str,
+        is_collector: bool,
     ) -> list[Candidate]:
         """Find all stocks that were in top N at any point."""
+        sym = "ticker" if is_collector else "symbol"
+        ts = "timestamp" if is_collector else "event_time_ms"
+        price_col = "price"
+        vol_col = "volume"
+        pc_col = "prev_close"
+        rv_col = "relativeVolumeDaily"
+
         query = f"""
             SELECT
-                symbol,
-                min(event_time_ms) as first_entry_ms,
-                argMin(changePercent, event_time_ms) as gain_at_entry,
-                argMin(price, event_time_ms) as price_at_entry,
-                any(prev_close) as prev_close,
-                argMin(volume, event_time_ms) as volume_at_entry,
-                argMin(relativeVolumeDaily, event_time_ms) as relative_volume,
+                {sym},
+                min({ts}) as first_entry_ms,
+                argMin(changePercent, {ts}) as gain_at_entry,
+                argMin({price_col}, {ts}) as price_at_entry,
+                any({pc_col}) as prev_close,
+                argMin({vol_col}, {ts}) as volume_at_entry,
+                argMin({rv_col}, {ts}) as relative_volume,
                 max(changePercent) as max_gain
-            FROM {self._table} FINAL
+            FROM {table} FINAL
             WHERE date = %(date)s
-              AND mode = %(mode)s
               AND rank <= %(top_n)s
-            GROUP BY symbol
+            GROUP BY {sym}
             ORDER BY first_entry_ms
         """
-        params = {
-            "date": date,
-            "mode": mode,
-            "top_n": config.top_n,
-        }
+        params = {"date": date, "top_n": config.top_n}
         return self._execute_query(query, params)
 
     def _execute_query(self, query: str, params: dict) -> list[Candidate]:

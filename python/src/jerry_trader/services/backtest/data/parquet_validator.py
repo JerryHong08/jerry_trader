@@ -33,6 +33,7 @@ import polars as pl
 
 from jerry_trader.platform.config.config import cache_dir
 from jerry_trader.shared.logging.logger import setup_logger
+from jerry_trader.shared.time.timezone import ms_to_hhmmss
 
 logger = setup_logger(__name__, log_to_file=True)
 
@@ -129,8 +130,8 @@ class DateValidationResult:
             "date": self.date,
             "snapshot_count": self.snapshot_count,
             "time_range": {
-                "start": self._ms_to_time(self.time_range[0]),
-                "end": self._ms_to_time(self.time_range[1]),
+                "start": ms_to_hhmmss(self.time_range[0]),
+                "end": ms_to_hhmmss(self.time_range[1]),
             },
             "intervals": {
                 "min_ms": self.min_interval_ms,
@@ -150,13 +151,6 @@ class DateValidationResult:
             "is_valid": self.is_valid,
             "issues": self.issues,
         }
-
-    @staticmethod
-    def _ms_to_time(ms: int) -> str:
-        """Convert epoch ms to HH:MM:SS."""
-        return datetime.fromtimestamp(
-            ms / 1000, tz=ZoneInfo("America/New_York")
-        ).strftime("%H:%M:%S")
 
 
 # =============================================================================
@@ -435,7 +429,7 @@ class ParquetSnapshotValidator:
             ]
             result.issues.append(
                 f"Found {result.gap_count} gaps > {MAX_GAP_MS}ms: "
-                f"{[DateValidationResult._ms_to_time(t) for t, _ in gap_times[:3]]}"
+                f"{[ms_to_hhmmss(t) for t, _ in gap_times[:3]]}"
             )
 
     def _analyze_row_counts(

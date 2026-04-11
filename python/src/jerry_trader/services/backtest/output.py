@@ -67,7 +67,88 @@ def print_summary(result: BacktestResult) -> None:
         peak_sec = result.avg_time_to_peak_ms / 1000
         print(f"  AVG TIME PEAK: {peak_sec:.0f}s ({peak_sec / 60:.1f}m)")
 
+    # Per-rule grouped stats
+    if by_rule:
+        print(f"\n  Per-Rule Statistics")
+        print(f"  {'─' * 76}")
+        _print_grouped_stats("Rule", by_rule)
+
+    # Per-ticker grouped stats
+    by_ticker: dict[str, list[SignalResult]] = {}
+    for sig in result.signals:
+        by_ticker.setdefault(sig.symbol, []).append(sig)
+    if by_ticker and len(by_ticker) > 1:
+        print(f"\n  Per-Ticker Statistics")
+        print(f"  {'─' * 76}")
+        _print_grouped_stats("Ticker", by_ticker)
+
     print("=" * 80 + "\n")
+
+
+def _print_grouped_stats(
+    label: str,
+    groups: dict[str, list[SignalResult]],
+) -> None:
+    """Print grouped statistics (per-rule or per-ticker).
+
+    Shows count, win rate, avg return, profit factor, avg MFE/MAE per group.
+    """
+    print(
+        f"  {label:<16} {'#':>4} {'Win%':>6} "
+        f"{'AvgRet':>8} {'PF':>6} {'MFE':>7} {'MAE':>7} {'Slip':>6}"
+    )
+    print(f"  {'─' * 76}")
+
+    # Sort groups by signal count descending
+    sorted_groups = sorted(groups.items(), key=lambda x: len(x[1]), reverse=True)
+
+    for group_id, signals in sorted_groups:
+        n = len(signals)
+
+        # Collect horizons
+        all_horizons: set[str] = set()
+        for sig in signals:
+            all_horizons.update(sig.returns.keys())
+
+        # Use first horizon for win rate and avg return
+        primary_horizon = min(all_horizons) if all_horizons else None
+        if primary_horizon:
+            values = [
+                sig.returns[primary_horizon]
+                for sig in signals
+                if primary_horizon in sig.returns
+            ]
+            wins = [v for v in values if v > 0]
+            win_pct = len(wins) / len(values) if values else 0.0
+            avg_ret = sum(values) / len(values) if values else 0.0
+        else:
+            win_pct = sum(1 for s in signals if s.is_winner) / n if n else 0.0
+            avg_ret = 0.0
+
+        # Profit factor
+        rets: list[float] = []
+        for sig in signals:
+            for h in sorted(all_horizons):
+                if h in sig.returns:
+                    rets.append(sig.returns[h])
+                    break
+        gross_wins = sum(r for r in rets if r > 0)
+        gross_losses = abs(sum(r for r in rets if r < 0))
+        pf = gross_wins / gross_losses if gross_losses > 0 else 0.0
+
+        # MFE / MAE / Slippage
+        mfes = [s.mfe for s in signals if s.mfe is not None]
+        maes = [s.mae for s in signals if s.mae is not None]
+        slips = [s.slippage_pct for s in signals]
+        avg_mfe = sum(mfes) / len(mfes) if mfes else 0.0
+        avg_mae = sum(maes) / len(maes) if maes else 0.0
+        avg_slip = sum(slips) / len(slips) if slips else 0.0
+
+        print(
+            f"  {group_id:<16} {n:>4} {win_pct:>5.0%} "
+            f"{avg_ret:>+7.2%} {pf:>6.2f} {avg_mfe:>+6.2%} {avg_mae:>+6.2%} "
+            f"{avg_slip:>5.2%}"
+        )
 
 
 def _print_rule_summary(rule_id: str, signals: list[SignalResult]) -> None:
@@ -177,10 +258,18 @@ def persist_results(
     ensure_backtest_table(ch_client)
 
     rows: list[list] = []
+    from datetime import date as date_type
+
+    result_date = result.date
+    if isinstance(result_date, str):
+        result_date = datetime.strptime(result_date, "%Y-%m-%d").date()
+    elif isinstance(result_date, datetime):
+        result_date = result_date.date()
+
     for sig in result.signals:
         row = [
             run_id,
-            result.date,
+            result_date,
             sig.rule_id,
             sig.symbol,
             sig.trigger_time_ns,

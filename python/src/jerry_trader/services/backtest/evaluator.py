@@ -91,6 +91,7 @@ class SignalEvaluator:
         ts: FactorTimeseries,
         *,
         price_source: str = "close",
+        cooldown_ms: int = 60_000,
     ) -> EvalResult:
         """Evaluate all rules against a ticker's factor timeseries.
 
@@ -98,6 +99,8 @@ class SignalEvaluator:
             symbol: Ticker symbol.
             ts: FactorTimeseries = {timestamp_ms: {factor_name: value}}.
             price_source: Factor name to use as trigger price (default "close").
+            cooldown_ms: Min gap (ms) between same-rule triggers for same ticker.
+                0 = no cooldown (every timestamp evaluated independently).
 
         Returns:
             EvalResult with all trigger points found.
@@ -109,10 +112,19 @@ class SignalEvaluator:
         result = EvalResult(symbol=symbol)
         sorted_times = sorted(ts.keys())
 
+        # Track last trigger time per rule for cooldown
+        last_trigger_ms: dict[str, int] = {}
+
         for ts_ms in sorted_times:
             factors = ts[ts_ms]
 
             for rule in self._rules:
+                # Cooldown: skip if this rule fired within cooldown window
+                if cooldown_ms > 0:
+                    last_ms = last_trigger_ms.get(rule.id)
+                    if last_ms is not None and (ts_ms - last_ms) < cooldown_ms:
+                        continue
+
                 # Phase 1: evaluate all conditions against the merged factor dict
                 if not evaluate_trigger(
                     rule.trigger.conditions, rule.trigger.type, factors
@@ -131,6 +143,7 @@ class SignalEvaluator:
                         factors=dict(factors),
                     )
                 )
+                last_trigger_ms[rule.id] = ts_ms
 
         logger.debug(
             f"Evaluator: {symbol} — {len(result.triggers)} triggers "

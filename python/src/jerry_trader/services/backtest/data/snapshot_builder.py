@@ -1,6 +1,6 @@
 """Snapshot builder — batch generate market_snapshot from trades + quotes Parquet.
 
-THREE-STAGE STREAMING PIPELINE (memory-safe for 150M+ trades):
+TWO-STAGE STREAMING PIPELINE (memory-safe for 150M+ trades):
 
   Stage 1 — sink_parquet (streaming, bounded memory):
     scan trades → join prev_close → bucket into windows → aggregate OHLCV
@@ -12,10 +12,7 @@ THREE-STAGE STREAMING PIPELINE (memory-safe for 150M+ trades):
     Split by time ranges (30-min chunks)
     → rank + sort each chunk separately
     → merge chunks via scan → sink_parquet
-
-  Stage 3 — dual output:
-    A. ranked_data: minimal (symbol, event_time_ms, changePercent, rank) for Pre-filter
-    B. collector_format: full format matching Polygon Collector API for Replay
+    → output collector_format matching Polygon Collector API for Replay
 
 This avoids loading the full 150M-row trades into memory at any point.
 """
@@ -31,6 +28,7 @@ import polars as pl
 
 from jerry_trader.platform.config.config import get_splits_data, lake_data_dir
 from jerry_trader.shared.logging.logger import setup_logger
+from jerry_trader.shared.time.timezone import ms_to_hhmmss
 
 ET = ZoneInfo("America/New_York")
 
@@ -63,17 +61,6 @@ _SNAPSHOT_COLUMNS = [
     "change",
     "relativeVolumeDaily",
     "relativeVolume5min",
-]
-
-# Ranked data columns (minimal for Pre-filter)
-_RANKED_COLUMNS = [
-    "symbol",
-    "event_time_ms",
-    "changePercent",
-    "rank",
-    "date",
-    "mode",
-    "session_id",
 ]
 
 # Collector format columns (matching Polygon API output)
@@ -125,11 +112,6 @@ def _et_to_epoch_ms(date: str, time_et: str) -> int:
     h, m = map(int, time_et.split(":"))
     aware = datetime(dt.year, dt.month, dt.day, h, m, tzinfo=ET)
     return int(aware.timestamp() * 1000)
-
-
-def _ms_to_time(ms: int) -> str:
-    """Convert epoch ms to HH:MM:SS for logging."""
-    return datetime.fromtimestamp(ms / 1000).strftime("%H:%M:%S")
 
 
 def _adjust_prev_close_for_splits(
@@ -229,39 +211,39 @@ def _stage1_aggregate_trades(
             (pl.col(ts_col) >= start_ns) & (pl.col(ts_col) < end_ns)
         )
 
-    pipeline = (
-        trades_lazy.join(prev_close_df.lazy(), on="ticker", how="left")
-        .select(
-            [
-                pl.col("ticker"),
-                pl.col("price"),
-                pl.col("size"),
-                pl.col("prev_close"),
-                (pl.col(ts_col) // 1_000_000 // window_ms * window_ms).alias("_ws"),
-            ]
+        pipeline = (
+            trades_lazy.join(prev_close_df.lazy(), on="ticker", how="left")
+            .select(
+                [
+                    pl.col("ticker"),
+                    pl.col("price"),
+                    pl.col("size"),
+                    pl.col("prev_close"),
+                    pl.col("prev_volume"),
+                    (pl.col(ts_col) // 1_000_000 // window_ms * window_ms).alias("_ws"),
+                ]
+            )
+            .group_by(["ticker", "_ws"])
+            .agg(
+                [
+                    pl.col("price").last().alias("price"),
+                    pl.col("size").sum().alias("volume"),
+                    (pl.col("price") * pl.col("size")).sum().alias("_turnover"),
+                    pl.col("prev_close").first().alias("prev_close"),
+                    pl.col("prev_volume").first().alias("prev_volume"),
+                ]
+            )
+            .with_columns(
+                [
+                    (
+                        (pl.col("price") - pl.col("prev_close"))
+                        / pl.col("prev_close")
+                        * 100
+                    ).alias("changePercent"),
+                    (pl.col("price") - pl.col("prev_close")).alias("change"),
+                ]
+            )
         )
-        .group_by(["ticker", "_ws"])
-        .agg(
-            [
-                pl.col("price").last().alias("price"),
-                pl.col("size").sum().alias("volume"),
-                ((pl.col("price") * pl.col("size")).sum() / pl.col("size").sum()).alias(
-                    "vwap"
-                ),
-                pl.col("prev_close").first().alias("prev_close"),
-            ]
-        )
-        .with_columns(
-            [
-                (
-                    (pl.col("price") - pl.col("prev_close"))
-                    / pl.col("prev_close")
-                    * 100
-                ).alias("changePercent"),
-                (pl.col("price") - pl.col("prev_close")).alias("change"),
-            ]
-        )
-    )
 
     Path(agg_output).parent.mkdir(parents=True, exist_ok=True)
     pipeline.sink_parquet(agg_output, compression="zstd", compression_level=3)
@@ -323,11 +305,11 @@ def _stage2_join_and_rank(
     mode: str = "live",
     session_id: str = "",
     include_quotes: bool = True,
-) -> tuple[str, str]:
-    """Stage 2: Join trades + quotes, compute ranks, output dual formats.
+) -> str:
+    """Stage 2: Join trades + quotes, compute ranks, output collector format.
 
     Returns:
-        (ranked_path, collector_path) - paths to output files
+        collector_path - path to output file
     """
     trades_agg = pl.scan_parquet(trades_agg_path)
 
@@ -359,12 +341,13 @@ def _stage2_join_and_rank(
     ).collect()
     ws_min: int = int(bounds["lo"][0])
     ws_max: int = int(bounds["hi"][0])
-    logger.info(f"Stage 2: time range {_ms_to_time(ws_min)} → {_ms_to_time(ws_max)}")
+    logger.info(f"Stage 2: time range {ms_to_hhmmss(ws_min)} → {ms_to_hhmmss(ws_max)}")
 
     # Process in 30-minute chunks
     chunk_ms = 30 * 60 * 1000
-    ranked_chunks: list[str] = []
     collector_chunks: list[str] = []
+    # Carry-over from previous chunk: ticker -> (cum_volume, cum_turnover)
+    prev_cum: dict[str, tuple[float, float]] = {}
 
     for chunk_start in range(ws_min, ws_max + chunk_ms, chunk_ms):
         chunk_end = chunk_start + chunk_ms
@@ -387,28 +370,82 @@ def _stage2_join_and_rank(
         if len(chunk_df) == 0:
             continue
 
-        # Output A: ranked_data (minimal, for Pre-filter)
-        ranked_chunk = chunk_df.select(
-            [
-                pl.col("ticker").alias("symbol"),
-                pl.col("_ws").alias("event_time_ms"),
-                pl.col("changePercent"),
-                pl.col("rank"),
-            ]
+        # Convert per-window incremental volume/turnover to cumulative per ticker.
+        # Live mode sends cumulative volume (min.av from Polygon API), so replay
+        # must match to keep VolumeTracker's relativeVolume5min calculation correct.
+        chunk_df = (
+            chunk_df.sort(["ticker", "_ws"])
+            .with_columns(
+                pl.col("volume")
+                .cast(pl.Float64)
+                .cum_sum()
+                .over("ticker")
+                .alias("volume")
+            )
+            .with_columns(
+                pl.col("_turnover")
+                .cast(pl.Float64)
+                .cum_sum()
+                .over("ticker")
+                .alias("_cum_turnover")
+            )
         )
-        ranked_path = f"{output_dir}/.ranked_chunk_{chunk_start}.parquet"
-        ranked_chunk.write_parquet(ranked_path)
-        ranked_chunks.append(ranked_path)
 
-        # Output B: collector_format (full, for Replay)
+        # Add carry-over from previous chunk so cumulative values span the
+        # full session instead of resetting every 30 minutes.
+        if prev_cum:
+            cum_volume_offset = pl.Series(
+                "volume",
+                [prev_cum.get(t, (0.0, 0.0))[0] for t in chunk_df["ticker"].to_list()],
+                dtype=pl.Float64,
+            )
+            cum_turnover_offset = pl.Series(
+                "_cum_turnover",
+                [prev_cum.get(t, (0.0, 0.0))[1] for t in chunk_df["ticker"].to_list()],
+                dtype=pl.Float64,
+            )
+            chunk_df = chunk_df.with_columns(
+                (pl.col("volume") + cum_volume_offset).alias("volume"),
+                (pl.col("_cum_turnover") + cum_turnover_offset).alias("_cum_turnover"),
+            )
+
+        # Cumulative VWAP = cumulative turnover / cumulative volume
+        chunk_df = chunk_df.with_columns(
+            pl.when(pl.col("volume") > 0)
+            .then(pl.col("_cum_turnover") / pl.col("volume"))
+            .otherwise(pl.lit(0.0))
+            .alias("vwap")
+        )
+
+        # Save carry-over for next chunk BEFORE dropping helper columns.
+        # Use pre-round volume for accurate carry-over.
+        last_per_ticker = (
+            chunk_df.sort(["ticker", "_ws"])
+            .group_by("ticker")
+            .agg(
+                [
+                    pl.col("volume").last().alias("_cv"),
+                    pl.col("_cum_turnover").last().alias("_ct"),
+                ]
+            )
+        )
+        for row in last_per_ticker.iter_rows(named=True):
+            prev_cum[row["ticker"]] = (float(row["_cv"]), float(row["_ct"]))
+
+        # Round volume to integer (shares) to avoid float precision noise
+        chunk_df = chunk_df.with_columns(pl.col("volume").round(0)).drop(
+            "_turnover", "_cum_turnover"
+        )
+
+        # Output: collector_format (full, for Replay)
         collector_chunk = chunk_df.select(
             [
                 pl.col("ticker"),
                 pl.col("_ws").alias("timestamp"),
                 pl.col("price"),
-                pl.col("volume").cast(pl.Float64),
+                pl.col("volume"),
                 pl.col("prev_close"),
-                pl.lit(0.0).alias("prev_volume"),
+                pl.col("prev_volume").cast(pl.Float64).fill_null(0.0),
                 pl.col("vwap"),
                 pl.col("bid"),
                 pl.col("ask"),
@@ -423,22 +460,10 @@ def _stage2_join_and_rank(
         collector_chunk.write_parquet(collector_path)
         collector_chunks.append(collector_path)
 
-        logger.info(f"  Chunk {_ms_to_time(chunk_start)}: {len(chunk_df):,} rows")
+        logger.info(f"  Chunk {ms_to_hhmmss(chunk_start)}: {len(chunk_df):,} rows")
 
     # Merge chunks
-    ranked_output = f"{output_dir}/ranked_data.parquet"
     collector_output = f"{output_dir}/collector_format.parquet"
-
-    if ranked_chunks:
-        pl.scan_parquet(ranked_chunks).with_columns(
-            [
-                pl.lit(date).alias("date"),
-                pl.lit(mode).alias("mode"),
-                pl.lit(session_id).alias("session_id"),
-            ]
-        ).sink_parquet(ranked_output, compression="zstd", compression_level=3)
-        for f in ranked_chunks:
-            Path(f).unlink(missing_ok=True)
 
     if collector_chunks:
         pl.scan_parquet(collector_chunks).with_columns(
@@ -451,8 +476,8 @@ def _stage2_join_and_rank(
         for f in collector_chunks:
             Path(f).unlink(missing_ok=True)
 
-    logger.info(f"Stage 2 done: {ranked_output}, {collector_output}")
-    return ranked_output, collector_output
+    logger.info(f"Stage 2 done: {collector_output}")
+    return collector_output
 
 
 def build_to_parquet(
@@ -464,7 +489,7 @@ def build_to_parquet(
     mode: str = "live",
     session_id: str = "",
     include_quotes: bool = True,
-) -> tuple[str, str]:
+) -> str:
     """Build snapshots to Parquet files (internal helper).
 
     Args:
@@ -478,7 +503,7 @@ def build_to_parquet(
         include_quotes: Whether to process quotes.
 
     Returns:
-        (ranked_path, collector_path) - paths to output files
+        collector_path - path to output file
     """
     # Time filter
     if filter_start_et and filter_end_et:
@@ -493,20 +518,24 @@ def build_to_parquet(
     prev_date = (dt - timedelta(days=1)).strftime("%Y-%m-%d")
     prev_close_path = _day_aggs_path(prev_date)
 
-    prev_close_df = pl.DataFrame({"ticker": [], "prev_close": []})
+    prev_close_df = pl.DataFrame({"ticker": [], "prev_close": [], "prev_volume": []})
     if prev_close_path.exists():
         prev_close_df = (
             pl.scan_parquet(str(prev_close_path))
-            .select(["ticker", "close"])
-            .rename({"close": "prev_close"})
+            .select(["ticker", "close", "volume"])
+            .rename({"close": "prev_close", "volume": "prev_volume"})
             .collect()
         )
-        logger.info(f"Loaded {len(prev_close_df):,} prev_close prices from {prev_date}")
+        logger.info(
+            f"Loaded {len(prev_close_df):,} prev_close + prev_volume from {prev_date}"
+        )
 
         # Adjust prev_close for stocks with splits on the trading date
         prev_close_df = _adjust_prev_close_for_splits(prev_close_df, date)
     else:
-        logger.warning(f"No day_aggs for {prev_date} — prev_close will be null")
+        logger.warning(
+            f"No day_aggs for {prev_date} — prev_close and prev_volume will be null"
+        )
 
     # Stage 1a: Aggregate trades
     trades_path = _trades_path(date)
@@ -532,7 +561,7 @@ def build_to_parquet(
 
     # Stage 2: Join and output
     try:
-        ranked_path, collector_path = _stage2_join_and_rank(
+        collector_path = _stage2_join_and_rank(
             trades_agg_path,
             quotes_agg_path,
             output_dir,
@@ -546,7 +575,7 @@ def build_to_parquet(
         if quotes_agg_path:
             Path(quotes_agg_path).unlink(missing_ok=True)
 
-    return ranked_path, collector_path
+    return collector_path
 
 
 # =============================================================================
@@ -566,7 +595,7 @@ def build(
     filter_end_et: str | None = DEFAULT_FILTER_END_ET,
     include_quotes: bool = True,
     output_parquet: str | None = None,
-) -> tuple[int, int]:
+) -> int:
     """Build snapshots and insert into ClickHouse.
 
     Primary workflow: builds in temp directory, inserts to CH, cleans up.
@@ -585,7 +614,7 @@ def build(
         output_parquet: If provided, also save Parquet files to this directory.
 
     Returns:
-        (ranked_inserted, collector_inserted) - row counts
+        collector_inserted - row count inserted into ClickHouse
     """
     import tempfile
     import time
@@ -594,7 +623,7 @@ def build(
 
     # Build in temp directory
     with tempfile.TemporaryDirectory() as tmpdir:
-        ranked_path, collector_path = build_to_parquet(
+        collector_path = build_to_parquet(
             date,
             output_dir=tmpdir,
             window_ms=window_ms,
@@ -605,17 +634,9 @@ def build(
             include_quotes=include_quotes,
         )
 
-        ranked_df = pl.read_parquet(ranked_path)
         collector_df = pl.read_parquet(collector_path)
 
         # Fill nulls for numeric columns (ClickHouse can't handle None)
-        ranked_df = ranked_df.with_columns(
-            [
-                pl.col("changePercent").fill_null(0.0),
-                pl.col("rank").fill_null(0),
-            ]
-        )
-
         collector_df = collector_df.with_columns(
             [
                 pl.col("price").fill_null(0.0),
@@ -638,32 +659,11 @@ def build(
             import shutil
 
             Path(output_parquet).mkdir(parents=True, exist_ok=True)
-            shutil.copy(ranked_path, f"{output_parquet}/ranked_data.parquet")
             shutil.copy(collector_path, f"{output_parquet}/collector_format.parquet")
             logger.info(f"Parquet files saved to {output_parquet}")
 
     elapsed = time.time() - t0
-    logger.info(
-        f"Built {len(ranked_df):,} ranked + {len(collector_df):,} collector rows in {elapsed:.1f}s"
-    )
-
-    # Insert ranked_data
-    ranked_inserted = 0
-    if len(ranked_df) > 0:
-        rows = ranked_df.select(_RANKED_COLUMNS).rows()
-        for i in range(0, len(rows), batch_size):
-            batch = rows[i : i + batch_size]
-            try:
-                ch_client.insert(
-                    f"{database}.market_snapshot_ranked",
-                    batch,
-                    column_names=_RANKED_COLUMNS,
-                )
-                ranked_inserted += len(batch)
-            except Exception as e:
-                logger.error(f"ClickHouse insert failed at batch {i}: {e}")
-                break
-        logger.info(f"Inserted {ranked_inserted:,} rows into market_snapshot_ranked")
+    logger.info(f"Built {len(collector_df):,} collector rows in {elapsed:.1f}s")
 
     # Insert collector_format
     collector_inserted = 0
@@ -685,7 +685,7 @@ def build(
             f"Inserted {collector_inserted:,} rows into market_snapshot_collector"
         )
 
-    return ranked_inserted, collector_inserted
+    return collector_inserted
 
 
 # Backwards compatibility alias
@@ -736,7 +736,7 @@ if __name__ == "__main__":
     )
 
     # Build and insert
-    ranked, collector = build(
+    collector_inserted = build(
         date=args.date,
         ch_client=ch_client,
         window_ms=args.window_ms,
@@ -749,5 +749,4 @@ if __name__ == "__main__":
     )
 
     print(f"\nInserted to ClickHouse:")
-    print(f"  market_snapshot_ranked:    {ranked:,} rows")
-    print(f"  market_snapshot_collector: {collector:,} rows")
+    print(f"  market_snapshot_collector: {collector_inserted:,} rows")

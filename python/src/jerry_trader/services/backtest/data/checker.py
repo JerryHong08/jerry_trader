@@ -231,10 +231,7 @@ def check_clickhouse_snapshot(
     """Check ClickHouse market_snapshot_collector data for a date.
 
     snapshot_builder writes to:
-    - market_snapshot_ranked (minimal for Pre-filter)
     - market_snapshot_collector (full for Replay)
-
-    We check market_snapshot_collector as the primary indicator.
 
     Args:
         date: Date in YYYY-MM-DD format.

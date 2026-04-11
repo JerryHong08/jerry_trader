@@ -109,3 +109,81 @@ def is_closed_session_utc(bar_start_ms: int) -> bool:
     et_dt = datetime.fromtimestamp(bar_start_ms / 1000, tz=timezone.utc).astimezone(_ET)
     et_hour = et_dt.hour + et_dt.minute / 60.0
     return et_hour >= 20.0 or et_hour < 4.0
+
+
+# ── General timestamp parsing ──────────────────────────────────────────
+
+
+def parse_to_et_datetime(timestamp_value) -> datetime:
+    """Convert any timestamp format to a timezone-aware datetime in ET.
+
+    Accepts:
+    - int/float: epoch seconds or epoch ms (> 1e10 assumed ms)
+    - str: ISO format or numeric string
+    - datetime: naive → ET, aware → converted to ET
+
+    Returns:
+        datetime with America/New_York timezone.
+    """
+    if timestamp_value is None:
+        return datetime.now(_ET)
+
+    if isinstance(timestamp_value, (int, float)):
+        if timestamp_value > 1e10:
+            return datetime.fromtimestamp(timestamp_value / 1000, tz=_ET)
+        return datetime.fromtimestamp(timestamp_value, tz=_ET)
+
+    if isinstance(timestamp_value, str):
+        try:
+            dt = datetime.fromisoformat(timestamp_value.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=_ET)
+            return dt.astimezone(_ET)
+        except ValueError:
+            val = float(timestamp_value)
+            if val > 1e10:
+                return datetime.fromtimestamp(val / 1000, tz=_ET)
+            return datetime.fromtimestamp(val, tz=_ET)
+
+    if isinstance(timestamp_value, datetime):
+        if timestamp_value.tzinfo is None:
+            return timestamp_value.replace(tzinfo=_ET)
+        return timestamp_value.astimezone(_ET)
+
+    return datetime.now(_ET)
+
+
+def hhmm_to_epoch_ms(date_str: str, time_str: str) -> int:
+    """Convert a date + HH:MM/HHMMSS string to UTC epoch milliseconds.
+
+    Args:
+        date_str: Date in YYYYMMDD format.
+        time_str: Time as HH:MM, HHMM, or HHMMSS.
+
+    Returns:
+        Epoch milliseconds (UTC).
+
+    Example::
+
+        hhmm_to_epoch_ms("20260313", "04:00")   # 2026-03-13 04:00 ET → epoch ms
+        hhmm_to_epoch_ms("20260313", "093000")  # 2026-03-13 09:30:00 ET → epoch ms
+    """
+    clean = time_str.replace(":", "").strip()
+    if len(clean) == 4:
+        clean += "00"
+    hour, minute, second = int(clean[:2]), int(clean[2:4]), int(clean[4:6])
+    dt = datetime(
+        int(date_str[:4]),
+        int(date_str[4:6]),
+        int(date_str[6:8]),
+        hour,
+        minute,
+        second,
+        tzinfo=_ET,
+    )
+    return int(dt.timestamp() * 1000)
+
+
+def ms_to_hhmmss(ts_ms: int) -> str:
+    """Convert epoch ms to ``'HH:MM:SS'`` (ET) for compact logging."""
+    return datetime.fromtimestamp(ts_ms / 1000, tz=_ET).strftime("%H:%M:%S")

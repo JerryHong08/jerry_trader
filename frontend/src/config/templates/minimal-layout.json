@@ -3,119 +3,262 @@
   "name": "Minimal-Layout",
   "description": "minimal layout for my laptop.",
   "layout": [
-    {
-      "id": "rank-1",
-      "moduleType": "rank-list",
-      "position": { "x": 0, "y": 0 },
-      "size": { "width": 890, "height": 930 },
-      "syncGroup": "group-1",
-      "settings": {
-        "rankList": {
-          "sortColumn": "changePercent",
-          "sortDirection": "desc",
-          "visibleColumns": [
-            "news", "price", "changePercent", "volume", "float",
-            "relativeVolumeDaily", "relativeVolume5min", "marketCap", "vwap", "state", "symbol"
-          ],
-          "columnWidths": {
-            "#": 50, "symbol": 50, "state": 99, "news": 50, "price": 50,
-            "change": 50, "changePercent": 110, "volume": 50, "float": 50,
-            "relativeVolumeDaily": 108, "relativeVolume5min": 110, "vwap": 50, "marketCap": 110
-          },
-          "columnOrder": [
-            "symbol", "state", "news", "price", "vwap", "changePercent",
-            "float", "change", "volume", "relativeVolumeDaily", "relativeVolume5min", "marketCap"
-          ]
-        }
-      }
+  {
+    "id": "rank-1",
+    "moduleType": "rank-list",
+    "position": {
+      "x": 0,
+      "y": 0
     },
-    {
-      "id": "overview-chart-1",
-      "moduleType": "overview-chart",
-      "position": { "x": 900, "y": 0 },
-      "size": { "width": 760, "height": 440 },
-      "syncGroup": "group-1",
-      "settings": {
-        "overviewChart": {
-          "selectedStates": ["Best", "Good", "OnWatch", "NotGood", "Bad"],
-          "focusMode": false,
-          "timeRange": "1h"
-        }
-      }
+    "size": {
+      "width": 890,
+      "height": 930
     },
-    {
-      "id": "portfolio-1767537783678",
-      "moduleType": "portfolio",
-      "position": { "x": 1300, "y": 1620 },
-      "size": { "width": 360, "height": 260 },
-      "syncGroup": "group-5"
-    },
-    {
-      "id": "news-room-1773115113599",
-      "moduleType": "news-room",
-      "position": { "x": 900, "y": 450 },
-      "size": { "width": 390, "height": 480 },
-      "syncGroup": null
-    },
-    {
-      "id": "stock-detail-1773117146516",
-      "moduleType": "stock-detail",
-      "position": { "x": 1300, "y": 450 },
-      "size": { "width": 360, "height": 480 },
-      "syncGroup": "group-1",
-      "settings": {
-        "stockDetail": { "view": "news" }
-      }
-    },
-    {
-      "id": "order-management-1773117184168",
-      "moduleType": "order-management",
-      "position": { "x": 1300, "y": 940 },
-      "size": { "width": 360, "height": 670 },
-      "syncGroup": "group-1"
-    },
-    {
-      "id": "chart-1773117208665",
-      "moduleType": "chart",
-      "position": { "x": 0, "y": 940 },
-      "size": { "width": 680, "height": 670 },
-      "syncGroup": "group-2",
-      "settings": {
-        "chart": { "timeframe": "10s" }
-      }
-    },
-    {
-      "id": "overview-chart-1773117277779",
-      "moduleType": "overview-chart",
-      "position": { "x": 0, "y": 1620 },
-      "size": { "width": 680, "height": 260 },
-      "syncGroup": "group-1",
-      "settings": {
-        "overviewChart": {
-          "selectedStates": ["Best", "Good", "OnWatch", "NotGood", "Bad"],
-          "focusMode": true
-        }
-      }
-    },
-    {
-      "id": "order-management-1773117566809",
-      "moduleType": "order-management",
-      "position": { "x": 690, "y": 1620 },
-      "size": { "width": 600, "height": 260 },
-      "syncGroup": "group-1",
-      "settings": {
-        "orderManagement": { "view": "orders" }
-      }
-    },
-    {
-      "id": "chart-1773212923947",
-      "moduleType": "chart",
-      "position": { "x": 690, "y": 940 },
-      "size": { "width": 600, "height": 670 },
-      "syncGroup": "group-2",
-      "settings": {
-        "chart": { "timeframe": "1m" }
+    "syncGroup": "group-1",
+    "settings": {
+      "rankList": {
+        "sortColumn": "changePercent",
+        "sortDirection": "desc",
+        "visibleColumns": [
+          "news",
+          "price",
+          "changePercent",
+          "volume",
+          "float",
+          "relativeVolumeDaily",
+          "relativeVolume5min",
+          "marketCap",
+          "vwap",
+          "state",
+          "symbol"
+        ],
+        "columnWidths": {
+          "#": 50,
+          "symbol": 50,
+          "state": 99,
+          "news": 50,
+          "price": 50,
+          "change": 50,
+          "changePercent": 110,
+          "volume": 50,
+          "float": 50,
+          "relativeVolumeDaily": 108,
+          "relativeVolume5min": 110,
+          "vwap": 50,
+          "marketCap": 110
+        },
+        "columnOrder": [
+          "symbol",
+          "state",
+          "news",
+          "price",
+          "vwap",
+          "changePercent",
+          "float",
+          "change",
+          "volume",
+          "relativeVolumeDaily",
+          "relativeVolume5min",
+          "marketCap"
+        ]
       }
     }
-  ]
+  },
+  {
+    "id": "overview-chart-1",
+    "moduleType": "overview-chart",
+    "position": {
+      "x": 900,
+      "y": 0
+    },
+    "size": {
+      "width": 760,
+      "height": 440
+    },
+    "syncGroup": "group-1",
+    "settings": {
+      "overviewChart": {
+        "selectedStates": [
+          "Best",
+          "Good",
+          "OnWatch",
+          "NotGood",
+          "Bad"
+        ],
+        "focusMode": false,
+        "timeRange": "1h"
+      }
+    }
+  },
+  {
+    "id": "portfolio-1767537783678",
+    "moduleType": "portfolio",
+    "position": {
+      "x": 1300,
+      "y": 1620
+    },
+    "size": {
+      "width": 360,
+      "height": 260
+    },
+    "syncGroup": "group-5"
+  },
+  {
+    "id": "news-room-1773115113599",
+    "moduleType": "news-room",
+    "position": {
+      "x": 900,
+      "y": 450
+    },
+    "size": {
+      "width": 390,
+      "height": 480
+    },
+    "syncGroup": null
+  },
+  {
+    "id": "stock-detail-1773117146516",
+    "moduleType": "stock-detail",
+    "position": {
+      "x": 1300,
+      "y": 450
+    },
+    "size": {
+      "width": 360,
+      "height": 480
+    },
+    "syncGroup": "group-1",
+    "settings": {
+      "stockDetail": {
+        "view": "news"
+      }
+    }
+  },
+  {
+    "id": "order-management-1773117184168",
+    "moduleType": "order-management",
+    "position": {
+      "x": 1240,
+      "y": 940
+    },
+    "size": {
+      "width": 420,
+      "height": 670
+    },
+    "syncGroup": "group-1"
+  },
+  {
+    "id": "chart-1773117208665",
+    "moduleType": "chart",
+    "position": {
+      "x": 0,
+      "y": 940
+    },
+    "size": {
+      "width": 620,
+      "height": 670
+    },
+    "syncGroup": "group-2",
+    "settings": {
+      "chart": {
+        "timeframe": "10s",
+        "panels": [
+          {
+            "id": "price",
+            "type": "price",
+            "collapsed": false,
+            "visible": true,
+            "overlays": [
+              "ema_20"
+            ]
+          },
+          {
+            "id": "trade_rate",
+            "type": "panel",
+            "collapsed": false,
+            "visible": false
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "overview-chart-1773117277779",
+    "moduleType": "overview-chart",
+    "position": {
+      "x": 0,
+      "y": 1620
+    },
+    "size": {
+      "width": 680,
+      "height": 260
+    },
+    "syncGroup": "group-1",
+    "settings": {
+      "overviewChart": {
+        "selectedStates": [
+          "Best",
+          "Good",
+          "OnWatch",
+          "NotGood",
+          "Bad"
+        ],
+        "focusMode": true
+      }
+    }
+  },
+  {
+    "id": "order-management-1773117566809",
+    "moduleType": "order-management",
+    "position": {
+      "x": 690,
+      "y": 1620
+    },
+    "size": {
+      "width": 600,
+      "height": 260
+    },
+    "syncGroup": "group-1",
+    "settings": {
+      "orderManagement": {
+        "view": "orders"
+      }
+    }
+  },
+  {
+    "id": "chart-1773212923947",
+    "moduleType": "chart",
+    "position": {
+      "x": 630,
+      "y": 940
+    },
+    "size": {
+      "width": 600,
+      "height": 670
+    },
+    "syncGroup": "group-2",
+    "settings": {
+      "chart": {
+        "timeframe": "1m",
+        "panels": [
+          {
+            "id": "price",
+            "type": "price",
+            "collapsed": false,
+            "visible": true,
+            "overlays": [
+              "ema_20"
+            ]
+          },
+          {
+            "id": "trade_rate",
+            "type": "panel",
+            "collapsed": false,
+            "visible": true
+          }
+        ]
+      }
+    }
+  }
+]
 }

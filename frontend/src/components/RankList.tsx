@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback, memo } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { TrendingUp, TrendingDown, ArrowUpDown, ArrowUp, ArrowDown, Settings, X, Newspaper, Wifi, WifiOff, Eye, EyeOff, Loader2, RefreshCw } from 'lucide-react';
 import type { ModuleProps, RankItem, TickerState, RankListSortColumn, RankListSortDirection } from '../types';
 import { useBackendTimestamp, timestampStore, parseTimestamp } from '../hooks/useBackendTimestamps';
@@ -547,6 +548,17 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
     }
   };
 
+  // Virtual scrolling setup
+  const parentRef = useRef<HTMLDivElement>(null);
+  const ROW_HEIGHT = 36; // estimated row height
+  const virtualizer = useVirtualizer({
+    count: sortedData.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => ROW_HEIGHT,
+    overscan: 5,
+    getItemKey: (index) => sortedData[index]?.symbol ?? index,
+  });
+
   return (
     <div className="h-full flex flex-col">
       {/* Column Settings Button */}
@@ -628,69 +640,76 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
         </div>
       )}
 
-      {/* Table */}
-      <div className="flex-1 overflow-auto">
-        <table className="w-full text-sm">
-          <thead className="sticky top-0 bg-zinc-800 border-b border-zinc-700">
-            <tr>
-              {/* Chart subscription toggle column */}
-              <th
-                className="text-center p-2 text-gray-400 relative"
-                style={{ width: 40 }}
-                title="Toggle chart display"
+      {/* Virtualized Table */}
+      <div className="flex-1 overflow-auto" ref={parentRef}>
+        {/* Header — rendered outside scroll as a plain grid row */}
+        <div className="sticky top-0 bg-zinc-800 border-b border-zinc-700 z-10 flex text-sm">
+          <div className="p-2 text-center text-gray-400 shrink-0" style={{ width: 40 }}>
+            <Eye className="w-3 h-3 mx-auto" />
+          </div>
+          <div className="p-2 text-left text-gray-400 shrink-0" style={{ width: columnWidths['#'] || DEFAULT_COLUMN_WIDTHS['#'] }}>
+            #
+          </div>
+          {orderedVisibleColumns.map(column => (
+            <div
+              key={column}
+              data-column={column}
+              draggable={!resizingColumn}
+              onDragStart={(e) => handleDragStart(e, column)}
+              onDragOver={(e) => handleDragOver(e, column)}
+              onDrop={(e) => handleDrop(e, column)}
+              className={`p-2 text-gray-400 hover:text-white transition-colors select-none relative shrink-0 ${getColumnAlignment(column)} ${
+                dragOverColumn === column && draggedColumn !== column ? 'bg-blue-600/20' : ''
+              }`}
+              style={{ width: columnWidths[column] || DEFAULT_COLUMN_WIDTHS[column] }}
+            >
+              <div
+                className="flex items-center gap-1 justify-between cursor-pointer"
+                onClick={() => handleSort(column)}
               >
-                <Eye className="w-3 h-3 mx-auto" />
-              </th>
-              <th
-                className="text-left p-2 text-gray-400 relative"
-                style={{ width: columnWidths['#'] || DEFAULT_COLUMN_WIDTHS['#'] }}
-              >
-                #
-              </th>
-              {orderedVisibleColumns.map(column => (
-                <th
-                  key={column}
-                  data-column={column}
-                  draggable={!resizingColumn}
-                  onDragStart={(e) => handleDragStart(e, column)}
-                  onDragOver={(e) => handleDragOver(e, column)}
-                  onDrop={(e) => handleDrop(e, column)}
-                  className={`p-2 text-gray-400 hover:text-white transition-colors select-none relative ${getColumnAlignment(column)} ${
-                    dragOverColumn === column && draggedColumn !== column ? 'bg-blue-600/20' : ''
-                  }`}
-                  style={{ width: columnWidths[column] || DEFAULT_COLUMN_WIDTHS[column] }}
-                >
-                  <div
-                    className="flex items-center gap-1 justify-between cursor-pointer"
-                    onClick={() => handleSort(column)}
-                  >
-                    <span className="flex items-center gap-1">
-                      {COLUMN_LABELS[column]}
-                      {getSortIcon(column)}
-                    </span>
-                  </div>
-                  {/* Resize Handle */}
-                  <div
-                    className="absolute right-0 top-0 bottom-0 w-2 cursor-col-resize hover:bg-blue-500 transition-colors z-10"
-                    onMouseDown={(e) => handleResizeStart(e, column)}
-                    onClick={(e) => e.stopPropagation()}
-                  />
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {sortedData.map((item, index) => (
-              <tr
+                <span className="flex items-center gap-1">
+                  {COLUMN_LABELS[column]}
+                  {getSortIcon(column)}
+                </span>
+              </div>
+              {/* Resize Handle */}
+              <div
+                className="absolute right-0 top-0 bottom-0 w-2 cursor-col-resize hover:bg-blue-500 transition-colors z-10"
+                onMouseDown={(e) => handleResizeStart(e, column)}
+                onClick={(e) => e.stopPropagation()}
+              />
+            </div>
+          ))}
+        </div>
+
+        {/* Virtual rows */}
+        <div
+          style={{ height: `${virtualizer.getTotalSize()}px`, width: '100%', position: 'relative' }}
+        >
+          {virtualizer.getVirtualItems().map((virtualRow) => {
+            const item = sortedData[virtualRow.index];
+            if (!item) return null;
+            return (
+              <div
                 key={item.symbol}
+                data-index={virtualRow.index}
+                ref={virtualizer.measureElement}
                 onClick={() => handleRowClick(item.symbol)}
                 onDoubleClick={() => handleRowDoubleClick(item.symbol)}
-                className={`border-b border-zinc-800 hover:bg-zinc-800/50 transition-colors cursor-pointer ${
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100%',
+                  height: `${virtualRow.size}px`,
+                  transform: `translateY(${virtualRow.start}px)`,
+                }}
+                className={`flex text-sm border-b border-zinc-800 hover:bg-zinc-800/50 transition-colors cursor-pointer ${
                   selectedSymbol === item.symbol ? 'bg-zinc-700/50' : ''
                 }`}
               >
                 {/* Chart visibility toggle */}
-                <td className="p-2 text-center">
+                <div className="p-2 text-center shrink-0" style={{ width: 40 }}>
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
@@ -709,17 +728,19 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
                       <EyeOff className="w-4 h-4" />
                     )}
                   </button>
-                </td>
-                <td className="p-2 text-gray-500">{index + 1}</td>
+                </div>
+                <div className="p-2 text-gray-500 shrink-0" style={{ width: columnWidths['#'] || DEFAULT_COLUMN_WIDTHS['#'] }}>
+                  {virtualRow.index + 1}
+                </div>
                 {orderedVisibleColumns.map(column => (
-                  <td key={column} className={`p-2 ${getColumnAlignment(column)}`}>
-                    {renderCell(column, item, index)}
-                  </td>
+                  <div key={column} className={`p-2 shrink-0 ${getColumnAlignment(column)}`} style={{ width: columnWidths[column] || DEFAULT_COLUMN_WIDTHS[column] }}>
+                    {renderCell(column, item, virtualRow.index)}
+                  </div>
                 ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
   );

@@ -248,7 +248,8 @@ export function OverviewChartModule({
   const seriesMapRef = useRef<Map<string, SegmentedSeries>>(new Map());
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const hasInitialFitRef = useRef(false); // Track if we've done the initial fitContent
-  const lastDataTimestampRef = useRef<Map<string, number>>(new Map()); // Track last data point time per symbol
+  const lastDataTimestampRef = useRef<Map<string, number>>(new Map()); // Track last data point time per symbol (for change detection)
+  const lastAppliedTimeRef = useRef<Map<string, number>>(new Map()); // Track last time actually applied to chart series (for incremental updates)
   const previousSeriesDataRef = useRef<Record<string, { data: { time: number; value: number }[]; states: { time: number; state: TickerState }[] }>>({}); // Track previous series data for incremental updates
   const seriesInitializedRef = useRef<Set<string>>(new Set()); // Track which series have been initialized with setData
   const timeRangeAppliedRef = useRef<string | null>(null); // Track which time range + focus mode has been applied
@@ -624,6 +625,7 @@ export function OverviewChartModule({
         seriesMapRef.current.delete(symbol);
         seriesInitializedRef.current.delete(symbol); // Clear initialization tracking
         lastDataTimestampRef.current.delete(symbol); // Clear timestamp tracking
+        lastAppliedTimeRef.current.delete(symbol); // Clear applied time tracking
       }
     });
 
@@ -730,18 +732,19 @@ export function OverviewChartModule({
           if (validData.length > 0) {
             segSeries.mainSeries.setData(validData);
             seriesInitializedRef.current.add(item.symbol);
+            lastAppliedTimeRef.current.set(item.symbol, validData[validData.length - 1].time as number);
           }
         } else if (validData.length > 0) {
           // Series already initialized - use incremental update for new data points
           segSeries.mainSeries.applyOptions({ visible: true, color: baseColor });
 
-          // Check if we have newer data to append
-          const lastInitializedTime = lastDataTimestampRef.current.get(item.symbol) || 0;
+          // Use lastAppliedTimeRef (last time written to chart), NOT lastDataTimestampRef (last seen data)
+          const lastAppliedTime = lastAppliedTimeRef.current.get(item.symbol) || 0;
           const latestDataTime = validData[validData.length - 1].time as number;
 
-          if (latestDataTime > lastInitializedTime) {
+          if (latestDataTime > lastAppliedTime) {
             // Find new points and append them individually using update()
-            const newPoints = validData.filter(d => (d.time as number) > lastInitializedTime);
+            const newPoints = validData.filter(d => (d.time as number) > lastAppliedTime);
             newPoints.forEach(point => {
               try {
                 segSeries!.mainSeries.update(point);
@@ -750,6 +753,8 @@ export function OverviewChartModule({
                 segSeries!.mainSeries.setData(validData);
               }
             });
+            // Update the applied time tracker
+            lastAppliedTimeRef.current.set(item.symbol, latestDataTime);
           }
         }
 

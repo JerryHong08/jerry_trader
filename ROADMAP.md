@@ -23,35 +23,7 @@ Stateful workers and use-case implementations.
 - [ ] 3.6 Risk engine integration with order execution
 
 - [ ] [3.22](roadmap/live-trf-filtering-apply-delay-threshold-filter-across-real-time-pipeline-components-collector-unified-ticker-manager-bars-builder-factor-engine.md) Live TRF filtering — apply delay threshold filter across real-time pipeline components (collector, unified_ticker_manager, bars_builder, factor_engine)
-- [ ] 3.23 Fix meeting bar merge race condition
-
-  Fix meeting bar merge race condition in bars_builder
-
-## Problem
-When WS meeting bar completes before REST partial is stored by trades_backfill, the WS bar is written unmerged and REST partial becomes orphaned.
-
-## Root Cause
-- _try_merge_meeting_bar() returns the raw WS bar when REST partial is not ready
-- Comment says trades_backfill will handle merge when it finishes but thats incorrect
-- trades_backfill only stores REST partial, does not check for pending WS bars
-
-## Evidence
-From logs (2026-03-13 BIAF):
-- 08:05:40 10s bar: V=78484 n=436  (REST only, missing WS trades)
-- 08:05:50 10s bar: V=3993 n=22    (WS only, tiny!)
-
-## Proposed Fix
-1. Add _ws_meeting_bars dict to store WS bars when REST partial not ready
-2. _try_merge_meeting_bar() returns None and stores WS bar
-3. _flush_loop checks pending WS bars after advance() and merges when REST available
-4. Add _meeting_lock for thread-safe access
-
-## Files
-- python/src/jerry_trader/services/bar_builder/bars_builder_service.py
-
-## Related
-- Discovered during replay testing on 2026-04-11
-- Affects 10s, 1m timeframes most noticeably
+- [ ] [3.23](roadmap/fix-meeting-bar-merge-race-condition.md) Fix meeting bar merge race condition in bars_builder
 ## 4. ML Pipeline
 
 Machine learning for breakout-compute-analyze context model.

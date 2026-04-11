@@ -338,12 +338,12 @@ class ChartBFF:
             if ch_tf in self.BARS_BUILDER_TIMEFRAMES:
                 if self._coordinator is not None:
                     ready = self._coordinator.wait_for_ticker_ready(
-                        ticker_upper, timeout=30.0
+                        ticker_upper, timeout=60.0
                     )
                     if not ready:
                         logger.warning(
                             f"get_chart_bars - {ticker_upper}/{ch_tf}: "
-                            f"bootstrap not ready after 30s, serving available data"
+                            f"bootstrap not ready after 60s, serving available data"
                         )
 
             ch_result = self.ch_client._query_bars_clickhouse(

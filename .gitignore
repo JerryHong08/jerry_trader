@@ -129,3 +129,5 @@ skills-lock.json
 .topology/*
 
 validation_report.json
+
+.ipynb_checkpoints/

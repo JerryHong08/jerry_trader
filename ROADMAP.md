@@ -22,6 +22,7 @@ Stateful workers and use-case implementations.
 - [ ] 3.5 Risk management rules and drawdown checks
 - [ ] 3.6 Risk engine integration with order execution
 
+- [ ] [3.22](roadmap/live-trf-filtering-apply-delay-threshold-filter-across-real-time-pipeline-components-collector-unified-ticker-manager-bars-builder-factor-engine.md) Live TRF filtering — apply delay threshold filter across real-time pipeline components (collector, unified_ticker_manager, bars_builder, factor_engine)
 ## 4. ML Pipeline
 
 Machine learning for breakout-compute-analyze context model.
@@ -38,10 +39,10 @@ React/TradingView UI modules and UX improvements.
 - [ ] 5.6 Better UX improvements
 
 - [ ] 5.19 Signal visualization module - toast/notification bar for real-time signal alerts, click to jump to ticker chart
-- [ ] 5.21 Factor panel real-time value display - show last value label on factor chart panel header (like TradingView last price tag)
+- [x] 5.21 Factor panel real-time value display - last value shown in panel header with factor color
 - [ ] 5.22 News → Chart markers - show news event markers on bar chart at corresponding timestamps
 - [ ] 5.23 Replay timeline scrubber - draggable timeline/progress bar in replay mode, jump to any time point via replay clock pause/resume API
-- [ ] 5.24 RankList virtual scroll - use @tanstack/virtual for RankList rendering, avoid DOM bloat with 100+ tickers
+- [x] 5.24 RankList virtual scroll - use @tanstack/virtual for RankList rendering, avoid DOM bloat with 100+ tickers
 
   staticProfileCache, staticNewsCache, versionCache 从不清理，导致 localStorage 超限和性能下降。需要实现 LRU 淘汰策略或定期清理机制。
 
@@ -50,6 +51,8 @@ React/TradingView UI modules and UX improvements.
   每次 patch 都创建新 Map，高频更新时 GC 压力大。需要优化为增量更新，避免每次都创建新 Map 对象。
 
   ResizeObserver 和 DOM 事件监听器可能未正确清理，导致内存泄漏。需要在 useEffect cleanup 中确保所有监听器被移除。
+- [x] 5.30 Fix overview chart incremental update bug — existing ticker lines stop updating after first render
+- [x] 5.31 Notebooks — exploration & visualization for snapshot/backtest data, 01-snapshot-price-vwap as template
 ## 6. Orchestration
 
 System-wide coordination and backtest infrastructure.
@@ -64,7 +67,7 @@ System-wide coordination and backtest infrastructure.
 
 **Phase A: Signal System + Agent Factor Mining (Near-term)**
 - [ ] [7.3](roadmap/atcr-agent-system.md) Agent Factor Mining — orchestrator, skills (define_factor, run_backtest, evaluate, optimize), prompts
-- [-] [7.4](roadmap/atcr-agent-system.md) Backtest Infrastructure — pre-filter candidates from snapshots, factor history cursor, result store
+- [x] [7.4](roadmap/atcr-agent-system.md) Backtest Infrastructure — pre-filter candidates from snapshots, factor history cursor, result store
 
 **Phase B: ACT-R Real-Time Agent (Future)**
 - [ ] [7.5](roadmap/atcr-agent-system.md) News Pre-filter + Conflict Resolution
@@ -87,20 +90,20 @@ Enhancements and additional modules.
 - [x] 9.2 CSV.gz → Parquet converter (Polars streaming, skip-if-exists)
 - [x] 9.3 Snapshot builder — trades → CH market_snapshot_collector + market_snapshot (ranked)
 - [x] 9.4 HistoricalLoader batch bootstrap — bulk CH read/write, in-memory subscription accumulation, last_df filling, clock jump on completion
-- [ ] [9.5](roadmap/replayer-ch-migration.md) CHReplayer — 读 CH market_snapshot_collector，推送 INPUT Stream，本地 clock 支持
-  - [ ] 9.5.1 Clock pause during bootstrap — init 后 pause，bootstrap 完成后 jump_to + resume
-  - [ ] 9.5.2 CHReplayer 实现 — 读 CH、poll local clock、xadd INPUT Stream
-  - [ ] 9.5.3 Parquet → CH migration CLI — 历史数据一次性迁入
-  - [ ] 9.5.4 backend_starter 集成 — 替换旧 parquet replayer，auto-detect start_from
+- [x] [9.5](roadmap/replayer-ch-migration.md) CHReplayer — 读 CH market_snapshot_collector，推送 INPUT Stream，本地 clock 支持
+  - [x] 9.5.1 Clock pause during bootstrap — init 后 pause，bootstrap 完成后 jump_to + resume
+  - [x] 9.5.2 CHReplayer 实现 — 读 CH、poll local clock、xadd INPUT Stream
+  - [x] 9.5.3 Parquet → CH migration CLI — 历史数据一次性迁入
+  - [x] 9.5.4 backend_starter 集成 — 替换旧 parquet replayer，auto-detect start_from
 
 - [x] 9.6 Split adjustment — adjustment_factor = split_from / split_to，应用于 prev_close
 
-- [-] [9.7](roadmap/replayer-ch-migration.md) Clock-based Bootstrap Synchronization
+- [x] [9.7](roadmap/replayer-ch-migration.md) Clock-based Bootstrap Synchronization
 
   已实现: bootstrap 完成后 clock.jump_to(bootstrap_end_ts) 跳转到结束时间点
   剩余: bootstrap 期间暂停时钟、其他 clock-dependent 组件等待 bootstrap 完成后再启动
 
-- [ ] 9.9 Parquet snapshot data integrity checker
+- [x] 9.9 Parquet snapshot data integrity checker
 
   迁移前检查 Parquet snapshot 数据完整性，筛选有问题的日期：
 - 时间范围检查：首尾 timestamp 是否覆盖完整交易时段
@@ -109,7 +112,7 @@ Enhancements and additional modules.
 - 行数统计：每个 snapshot 的 ticker 数量是否合理（如 <100 或 >10000 异常）
 - 输出报告：列出有问题的日期及其异常类型
 
-- [ ] 9.10 Parquet → CH Migration Script
+- [x] 9.10 Parquet → CH Migration Script
 
   将历史 Parquet 数据迁移到 ClickHouse：
 - 扫描 cache/market_mover/*.parquet
@@ -118,8 +121,18 @@ Enhancements and additional modules.
 - 验证迁移完整性（行数、时间范围）
 - 保留 Parquet 作为备份
 
-- [ ] 9.11 Snapshot bootstrap Rust 加速
+- [~] 9.11 Snapshot bootstrap Rust 加速
 
+- [x] 9.12 Fix volume semantics in replay mode — snapshot_builder outputs per-window incremental volume but VolumeTracker expects cumulative
+- [x] 9.13 Implement relativeVolumeDaily calculation — currently never computed, just passed through as 0/1
+- [x] 9.15 snapshot_builder: compute prev_volume from day_aggs instead of hardcoding 0.0
+- [x] 9.16 Fix VWAP — use cumulative turnover/volume instead of per-window VWAP
+- [x] 9.17 Round volume to integer in snapshot_builder to avoid float precision display
+- [x] 9.18 SignalEvaluator cooldown/dedup — skip same-rule triggers within configurable window (default 60s)
+- [x] 9.19 Backtest grouped statistics — per-rule and per-ticker breakdown in console output
+- [x] 9.20 Backtest results visualization notebook — 02-backtest-results.ipynb with return distribution, MFE/MAE scatter, timeline
+- [x] 9.21 Backtest pre-market time filter — restrict pipeline to 4:00-9:30 AM ET, ignore out-of-hours trades/signals
+- [x] [9.24](roadmap/filter-trf-exch-4-trades-remove-stale-finra-delayed-reports-from-dataloader-design-doc.md) Filter TRF (exch=4) trades — remove stale FINRA delayed reports from DataLoader, design doc
 ## 10. Backtest Data Acquisition & Validation
 
 - [x] 10.1 Data CLI — download, convert, check, build-snapshot, prepare commands

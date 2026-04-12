@@ -291,8 +291,154 @@ class TimeframeManager:
 
 ---
 
+## 2026-04-12 讨论：因子验证流程优化
+
+### 背景
+
+策略挖掘过程中发现添加新因子的摩擦：
+- `INDICATOR_CLASSES` 手动注册容易遗漏
+- 验证流程不明确
+- 缺少因子单元测试
+
+### 核心原则
+
+**追求的不是"最简"，而是：**
+- **可用性** — 能表达任何策略想法
+- **准确性** — backtest/live 一致，结果可信
+- **不限制可能性** — 复杂逻辑、状态管理、性能优化都能支持
+
+### 拒绝的过度抽象
+
+| 抽象方式 | 问题 |
+|---------|------|
+| DSL 公式定义因子 | 无法表达 warmup、incremental update 等复杂状态 |
+| 表达式引擎组合 | 无法处理 edge cases（premarket zero-bars） |
+| 零代码配置 | 无法支持 Rust 性能优化 |
+
+### 正确方向：保持类的灵活性
+
+**"写类"作为核心方式**（不限制可能性），但：
+1. **自动化注册**（消除机械步骤）
+2. **明确验证 SOP**（写完代码 → 明确步骤 → 可信结果）
+3. **完善测试框架**（因子单元测试）
+
+### 实现：类内自注册
+
+```python
+# indicators/base.py
+class TickIndicator(ABC):
+    _registry: dict[str, type] = {}
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        TickIndicator._registry[cls.__name__] = cls
+
+    @classmethod
+    def get_registered(cls) -> dict[str, type]:
+        return cls._registry
+
+# factor_registry.py 直接使用
+INDICATOR_CLASSES = {
+    **BarIndicator._registry,
+    **TickIndicator._registry,
+    **QuoteIndicator._registry,
+}
+```
+
+### 新因子验证 SOP
+
+```
+1. 写 indicators/my_factor.py
+   - 继承正确基类
+   - 实现 update/on_tick + compute
+   - 处理 edge cases (warmup, empty data)
+
+2. 添加单元测试 (tests/core/test_factors/)
+   - 测试 warmup
+   - 测试 edge cases
+   - 测试典型场景
+
+3. 配置 config/factors.yaml
+   - 声明参数
+   - 声明数据源类型
+
+4. Quick Check (单日)
+   poetry run python -m jerry_trader.services.backtest.cli \
+       --date 2026-03-13 --detailed
+
+5. Thorough Validation (10日)
+   poetry run python -m jerry_trader.services.backtest.cli \
+       --date-range 2026-03-01 2026-03-10 --parallel
+
+6. 记录实验日志
+   poetry run python -m jerry_trader.services.backtest.cli \
+       --record-experiment --hypothesis "..."
+```
+
+### 相关任务
+
+- Task 6.17: 实现类内自注册
+- Task 6.18: 新因子验证 SOP 文档
+- Task 6.19: 因子单元测试框架
+
+### 2026-04-13 发现并修复：SignalEvaluator 接口缺陷
+
+**问题**：`SignalEvaluator` 只接受 `rules_dir` 目录路径，不支持直接传入 Rule 列表。
+
+**影响**：Mining 被迫创建临时 YAML 文件来测试单个规则，导致：
+1. 不必要的文件 I/O
+2. 目录清理逻辑复杂（必须清空旧文件）
+3. 容易出错（之前发现的"多规则同时加载"bug）
+
+**修复方案**（2026-04-13 已实现）：
+
+```python
+class SignalEvaluator:
+    def __init__(
+        self,
+        rules: list[Rule] | None = None,      # 直接传入规则列表
+        rules_dir: str | None = None,         # 或从目录加载
+    ):
+        if rules:
+            self._rules = rules
+        elif rules_dir:
+            self._rules = load_rules_from_dir(rules_dir)
+        else:
+            raise ValueError("Must provide rules or rules_dir")
+```
+
+**BacktestConfig 也支持 rules**：
+
+```python
+config = BacktestConfig(
+    date="2026-03-13",
+    rules=[rule],  # 直接传入 Rule 对象
+)
+```
+
+**Mining 使用方式**（不再需要临时文件）：
+
+```python
+rule = Rule(...)  # 内存创建
+config = BacktestConfig(date=date, rules=[rule])
+runner = BacktestRunner(config)
+result = runner.run()
+# 不需要 save_rule_to_yaml, 不需要 rules_mined/ 目录
+```
+
+**修复结果**：
+- 删除了 `config/rules_mined/` 目录
+- 删除了 `save_rule_to_yaml` 函数
+- Mining 直接使用内存中的 Rule 对象
+
+**相关任务**：Task 6.20 — 已完成
+
+---
+
 ## 相关文档
 
 - `roadmap/bootstrap-coordinator-v2.md` - Bootstrap 协调设计
+- `roadmap/agent-mining-phase.md` - 因子优先级分析
+- `roadmap/experiment-framework.md` - 验证标准
 - `python/tests/orchestration/test_bootstrap_coordinator.py` - 测试用例
 - `python/src/jerry_trader/services/factor/factor_engine.py` - 当前实现

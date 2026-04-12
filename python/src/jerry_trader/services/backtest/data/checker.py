@@ -447,3 +447,94 @@ def print_date_range_summary(results: dict[str, DataCheckResult]) -> None:
     # Summary
     print(f"\n  Ready: {ready_count}/{len(results)} days")
     print(f"{'=' * 80}\n")
+
+
+def verbose_check(
+    date: str,
+    ch_client: Any,
+    database: str = "jerry_trader",
+    top_n: int = 10,
+) -> None:
+    """Detailed inspection of ClickHouse snapshot data.
+
+    Shows:
+    - Top N tickers by row count
+    - Tickers with fewest rows (potential data gaps)
+    - Time range coverage per ticker
+    """
+    from jerry_trader.shared.time.timezone import ms_to_hhmmss
+
+    if ch_client is None:
+        print("ERROR: ClickHouse client required for verbose check")
+        return
+
+    print(f"\n{'=' * 80}")
+    print(f"  VERBOSE CHECK — {date}")
+    print(f"{'=' * 80}")
+
+    # Query per-ticker stats
+    query = f"""
+        SELECT
+            ticker,
+            count() as rows,
+            min(timestamp) as min_ts,
+            max(timestamp) as max_ts
+        FROM {database}.market_snapshot_collector
+        WHERE date = %(date)s
+        GROUP BY ticker
+        ORDER BY rows DESC
+    """
+    result = ch_client.query(query, parameters={"date": date})
+
+    if not result.result_rows:
+        print("  No data in market_snapshot_collector for this date")
+        print(f"{'=' * 80}\n")
+        return
+
+    all_tickers = [(row[0], row[1], row[2], row[3]) for row in result.result_rows]
+    total_rows = sum(r[1] for r in all_tickers)
+    total_tickers = len(all_tickers)
+
+    # Window count (5s windows from 04:00-09:30 ET = 1.5h = 1800 windows)
+    expected_windows = 1800
+
+    print(f"  Total: {total_rows:,} rows, {total_tickers} tickers")
+    print()
+
+    # Top N tickers by row count
+    print(f"  TOP {top_n} tickers (most data):")
+    print(f"  {'Ticker':<8} {'Rows':>8} {'Windows':>8} {'Range':>15}")
+    print(f"  {'-'*8} {'-'*8} {'-'*8} {'-'*15}")
+    for ticker, rows, min_ts, max_ts in all_tickers[:top_n]:
+        windows = rows // 1  # Each row is one window
+        pct = windows / expected_windows * 100
+        range_str = f"{ms_to_hhmmss(min_ts)} → {ms_to_hhmmss(max_ts)}"
+        print(f"  {ticker:<8} {rows:>8,} {windows:>8} ({pct:>5.1f}%) {range_str:>15}")
+
+    print()
+
+    # Bottom N tickers (fewest rows — potential gaps)
+    print(f"  BOTTOM {top_n} tickers (least data — potential gaps):")
+    print(f"  {'Ticker':<8} {'Rows':>8} {'Windows':>8} {'Range':>15}")
+    print(f"  {'-'*8} {'-'*8} {'-'*8} {'-'*15}")
+    for ticker, rows, min_ts, max_ts in all_tickers[-top_n:]:
+        windows = rows
+        pct = windows / expected_windows * 100
+        range_str = f"{ms_to_hhmmss(min_ts)} → {ms_to_hhmmss(max_ts)}"
+        print(f"  {ticker:<8} {rows:>8,} {windows:>8} ({pct:>5.1f}%) {range_str:>15}")
+
+    print()
+
+    # Tickers with incomplete coverage (< 50% windows)
+    incomplete = [r for r in all_tickers if r[1] < expected_windows * 0.5]
+    if incomplete:
+        print(f"  INCOMPLETE coverage (< 50% windows): {len(incomplete)} tickers")
+        print(f"  {'Ticker':<8} {'Rows':>8} {'Pct':>6}")
+        print(f"  {'-'*8} {'-'*8} {'-'*6}")
+        for ticker, rows, _, _ in incomplete[:20]:
+            pct = rows / expected_windows * 100
+            print(f"  {ticker:<8} {rows:>8,} {pct:>5.1f}%")
+        if len(incomplete) > 20:
+            print(f"  ... and {len(incomplete) - 20} more")
+
+    print(f"{'=' * 80}\n")

@@ -120,14 +120,18 @@ docs/_build/
 *.vrb
 *.xdv
 
-
+# agent
 .agents/*
 .claude/*
 skills-lock.json
 
+# topology cli
 .topology.json
 .topology/*
 
+# project cache
 validation_report.json
+experiments/*
 
+# Jupyter Notebook checkpoints
 .ipynb_checkpoints/

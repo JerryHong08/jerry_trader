@@ -1,14 +1,23 @@
 """Candidate pre-filter for batch backtest.
 
-Queries market_snapshot in ClickHouse to find stocks that newly entered
-the top N movers during a trading session.
+Uses the SAME subscription logic as live processor:
+1. Read from collector (all tickers, raw data)
+2. Filter to common stocks
+3. Per-window iteration with prev_df filling
+4. Compute ordinal rank based on common stocks pool
+5. Track subscription set (rank <= TOP_N with positive changePercent)
 
-Tries tables in order: market_snapshot → market_snapshot_collector.
+This ensures backtest candidates match what live processor would subscribe,
+not the "事后重算" snapshot rank from market_snapshot table.
+
+Optimized for memory: uses window partitioning instead of full DataFrame ops.
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+import polars as pl
 
 from jerry_trader.domain.backtest.types import Candidate
 from jerry_trader.services.backtest.config import PreFilterConfig
@@ -16,53 +25,55 @@ from jerry_trader.shared.logging.logger import setup_logger
 
 logger = setup_logger("backtest.pre_filter", log_to_file=True)
 
-# Table resolution order: enriched → collector
-_TABLE_ORDER = [
-    ("market_snapshot", False),  # Full enriched, canonical columns
-    ("market_snapshot_collector", True),  # Full data, different column names
-]
+TOP_N = 20  # Must match processor.TOP_N
 
 
 class PreFilter:
-    """Find candidate stocks for backtesting.
+    """Find candidate stocks for backtesting using subscription logic.
 
-    Queries ClickHouse to identify stocks that newly entered the top N
-    movers during a session, with configurable filters.
+    Simulates the live processor's subscription behavior:
+    - Reads from collector (raw data, all tickers)
+    - Filters to common stocks
+    - Computes per-window ordinal rank on common stocks pool
+    - Tracks subscription set (rank <= TOP_N with positive changePercent)
+
+    This matches live processor behavior, not the snapshot rank from market_snapshot.
     """
 
     def __init__(self, ch_client: Any, database: str = "jerry_trader"):
         self._ch = ch_client
         self._database = database
 
-    def _resolve_table(self, date: str) -> tuple[str, bool]:
-        """Find the best available table for this date.
+    def _check_collector_exists(self, date: str) -> int:
+        """Check if market_snapshot_collector has data for this date.
 
-        Returns (table_fqn, is_collector).
-        is_collector=True means column names differ (ticker, timestamp, etc.)
+        Returns row count. Raises RuntimeError if no data found.
         """
-        for table, is_collector in _TABLE_ORDER:
-            fqn = f"{self._database}.{table}"
-            try:
-                r = self._ch.query(
-                    f"SELECT count() FROM {fqn} FINAL WHERE date = %(date)s",
-                    parameters={"date": date},
-                )
-                count = r.result_rows[0][0] if r.result_rows else 0
-            except Exception:
-                count = 0
+        try:
+            r = self._ch.query(
+                f"SELECT count() FROM {self._database}.market_snapshot_collector "
+                "WHERE date = %(date)s",
+                parameters={"date": date},
+            )
+            count = r.result_rows[0][0] if r.result_rows else 0
+        except Exception:
+            count = 0
 
-            if count > 0:
-                logger.info(f"PreFilter: using {fqn} ({count:,} rows)")
-                return fqn, is_collector
+        if count == 0:
+            raise RuntimeError(
+                f"No data in market_snapshot_collector for {date}. "
+                f"Run 'build-snapshot --date {date}' first to populate it."
+            )
 
-        return f"{self._database}.{_TABLE_ORDER[-1][0]}", _TABLE_ORDER[-1][1]
+        logger.info(f"PreFilter: using collector ({count:,} rows)")
+        return count
 
     def find(
         self,
         date: str,
         config: PreFilterConfig | None = None,
     ) -> list[Candidate]:
-        """Find candidate stocks for a given date.
+        """Find candidate stocks for a given date using subscription logic.
 
         Args:
             date: Date in YYYY-MM-DD format (e.g. '2026-03-13').
@@ -70,138 +81,233 @@ class PreFilter:
 
         Returns:
             List of Candidate objects, sorted by first_entry_ms.
+
+        Raises:
+            RuntimeError: If collector has no data for this date.
         """
         config = config or PreFilterConfig()
 
-        table, is_collector = self._resolve_table(date)
+        self._check_collector_exists(date)
 
-        if config.new_entry_only:
-            candidates = self._find_new_entries(date, config, table, is_collector)
+        # Step 1: Read all collector data into Polars
+        logger.info("Reading collector data...")
+        query = f"""
+            SELECT ticker, timestamp, price, volume, prev_close, prev_volume,
+                   changePercent
+            FROM {self._database}.market_snapshot_collector
+            WHERE date = %(date)s
+            ORDER BY timestamp ASC, changePercent DESC
+        """
+        result = self._ch.query(query, parameters={"date": date})
+        columns = list(result.column_names)
+        df = pl.DataFrame(
+            {
+                col: [row[i] for row in result.result_rows]
+                for i, col in enumerate(columns)
+            }
+        )
+        logger.info(f"  Loaded {len(df):,} rows from collector")
+
+        # Step 2: Filter to common stocks (same as live processor)
+        if config.exclude_etf:
+            from jerry_trader.shared.utils.data_utils import get_common_stocks
+
+            common = get_common_stocks(date).select("ticker").collect()
+            common_set = set(common["ticker"].to_list())
+            before = len(df)
+            df = df.filter(pl.col("ticker").is_in(common_set))
+            logger.info(f"  Filtered to common stocks: {before:,} -> {len(df):,} rows")
+
+        # Step 3: Pre-partition by timestamp (single scan, avoids repeated filters)
+        logger.info("Partitioning by window...")
+        window_map: dict[int, pl.DataFrame] = {}
+        for part_df in df.partition_by("timestamp"):
+            ts = int(part_df["timestamp"][0])
+            # Only keep columns needed for subscription logic
+            window_map[ts] = part_df.select(
+                [
+                    "ticker",
+                    "changePercent",
+                    "price",
+                    "volume",
+                    "prev_volume",
+                    "prev_close",
+                ]
+            )
+        windows = sorted(window_map.keys())
+        logger.info(f"  {len(windows)} windows")
+
+        # Free memory from full df
+        del df
+
+        # Step 4: Per-window iteration with prev_df filling + compute subscription ranks
+        logger.info("Computing subscription ranks...")
+        subscribed: set[str] = set()
+        first_entry: dict[str, int] = {}
+        entry_gain: dict[str, float] = {}
+        entry_price: dict[str, float] = {}
+        entry_volume: dict[str, float] = {}
+        entry_rel_vol: dict[str, float] = {}
+
+        prev_df: pl.DataFrame | None = None
+        prev_tickers: set[str] = set()
+
+        # Progress bar
+        try:
+            from tqdm import tqdm
+
+            window_iter = tqdm(windows, desc="Processing windows", unit="win")
+        except ImportError:
+            window_iter = windows
+            logger.info(f"  Processing {len(windows)} windows")
+
+        for window_ms in window_iter:
+            window_df = window_map[window_ms]
+            if window_df.is_empty():
+                continue
+
+            current_tickers = set(window_df["ticker"].to_list())
+
+            # prev_df filling: carry forward tickers from previous window
+            if prev_df is not None and prev_tickers:
+                # Only fill if some tickers disappeared from current window
+                missing = prev_tickers - current_tickers
+                if missing:
+                    # Carry forward missing tickers with their last values
+                    carry_forward = prev_df.filter(pl.col("ticker").is_in(missing))
+                    window_df = pl.concat([window_df, carry_forward], how="vertical")
+
+            # Sort by changePercent for ranking
+            window_df = window_df.sort("changePercent", descending=True)
+
+            # Compute ordinal rank (subscription rank on common stocks pool)
+            window_df = window_df.with_columns(
+                pl.col("changePercent")
+                .rank(method="ordinal", descending=True)
+                .cast(pl.Int32)
+                .alias("subscription_rank"),
+            )
+
+            # Subscribe tickers in top N when max changePercent > 0
+            max_change = window_df["changePercent"].max()
+            if max_change is not None and max_change > 0:
+                top_n_df = window_df.filter(pl.col("subscription_rank") <= TOP_N)
+                for row in top_n_df.iter_rows(named=True):
+                    ticker = row["ticker"]
+                    if ticker not in subscribed:
+                        subscribed.add(ticker)
+                        first_entry[ticker] = window_ms
+                        entry_gain[ticker] = float(row["changePercent"])
+                        entry_price[ticker] = float(row["price"])
+                        entry_volume[ticker] = float(row["volume"])
+                        prev_vol = float(row.get("prev_volume", 0) or 0)
+                        entry_rel_vol[ticker] = (
+                            entry_volume[ticker] / prev_vol if prev_vol > 0 else 1.0
+                        )
+
+            # Update prev_df for next window (keep same columns for concat compatibility)
+            prev_df = window_df.select(
+                [
+                    "ticker",
+                    "changePercent",
+                    "price",
+                    "volume",
+                    "prev_volume",
+                    "prev_close",
+                ]
+            )
+            prev_tickers = set(window_df["ticker"].to_list())
+
+        logger.info(
+            f"  Subscription set: {len(subscribed)} tickers entered top {TOP_N}"
+        )
+
+        # Step 5: Compute max_gain and peak_volume for each subscribed ticker
+        # Reconstruct from window_map to avoid keeping full df in memory
+        logger.info("Computing max stats...")
+        subscribed_rows: list[dict] = []
+        for ts, w_df in window_map.items():
+            w_subscribed = w_df.filter(
+                pl.col("ticker").is_in(subscribed) & (pl.col("changePercent") > 0)
+            )
+            for row in w_subscribed.iter_rows(named=True):
+                subscribed_rows.append(
+                    {
+                        "ticker": row["ticker"],
+                        "changePercent": row["changePercent"],
+                        "volume": row["volume"],
+                        "prev_close": row.get("prev_close", 0),
+                    }
+                )
+
+        if subscribed_rows:
+            stats_df = pl.DataFrame(subscribed_rows)
+            max_stats = stats_df.group_by("ticker").agg(
+                [
+                    pl.col("changePercent").max().alias("max_gain"),
+                    pl.col("volume").max().alias("peak_volume"),
+                    pl.col("prev_close").first().alias("prev_close"),
+                ]
+            )
+            max_stats_map = {
+                row["ticker"]: row for row in max_stats.iter_rows(named=True)
+            }
         else:
-            candidates = self._find_all_top_n(date, config, table, is_collector)
+            max_stats_map = {}
 
-        # Apply post-query filters
+        # Step 6: Build Candidate objects
+        candidates = []
+        for ticker in subscribed:
+            if ticker not in first_entry:
+                continue
+            stats = max_stats_map.get(ticker, {})
+            candidates.append(
+                Candidate(
+                    symbol=ticker,
+                    first_entry_ms=first_entry[ticker],
+                    gain_at_entry=entry_gain[ticker],
+                    price_at_entry=entry_price[ticker],
+                    prev_close=float(stats.get("prev_close", 0) or 0),
+                    volume_at_entry=entry_volume[ticker],
+                    relative_volume=entry_rel_vol[ticker],
+                    max_gain=float(stats.get("max_gain", 0) or 0),
+                    peak_volume=float(stats.get("peak_volume", 0) or 0),
+                )
+            )
+
+        # Step 7: Apply new_entry_only filter
+        if config.new_entry_only and windows:
+            first_window = windows[0]
+            first_df = window_map.get(first_window)
+            if first_df is not None:
+                # Sort and compute rank at first window
+                first_df = first_df.sort("changePercent", descending=True).with_columns(
+                    pl.col("changePercent")
+                    .rank(method="ordinal", descending=True)
+                    .cast(pl.Int32)
+                    .alias("rank"),
+                )
+                initial_top_n = set(
+                    first_df.filter(pl.col("rank") <= TOP_N)["ticker"].to_list()
+                )
+                before = len(candidates)
+                candidates = [c for c in candidates if c.symbol not in initial_top_n]
+                logger.info(
+                    f"  new_entry_only: excluded {before - len(candidates)} initial top N"
+                )
+
+        # Step 8: Apply post-subscription filters
         candidates = self._apply_filters(candidates, config)
 
-        # Apply ETF/exclusion filter
-        if config.exclude_etf:
-            candidates = self._filter_common_stocks(candidates, date)
+        # Sort by first entry time
+        candidates.sort(key=lambda c: c.first_entry_ms)
 
         logger.info(
             f"PreFilter: found {len(candidates)} candidates for {date} "
-            f"(new_entry_only={config.new_entry_only}, "
+            f"(subscription_set={len(subscribed)}, "
+            f"new_entry_only={config.new_entry_only}, "
             f"min_gain={config.min_gain_pct}%)"
         )
-
-        return candidates
-
-    def _find_new_entries(
-        self,
-        date: str,
-        config: PreFilterConfig,
-        table: str,
-        is_collector: bool,
-    ) -> list[Candidate]:
-        """Find stocks that newly entered top N (excludes initial top N)."""
-        sym = "ticker" if is_collector else "symbol"
-        ts = "timestamp" if is_collector else "event_time_ms"
-        price_col = "price"  # Both collector and snapshot have price
-        vol_col = "volume"
-        pc_col = "prev_close"
-        rv_col = "relativeVolumeDaily"
-
-        query = f"""
-            WITH initial_top20 AS (
-                SELECT DISTINCT {sym}
-                FROM {table} FINAL
-                WHERE date = %(date)s
-                  AND {ts} = (
-                      SELECT min({ts})
-                      FROM {table} FINAL
-                      WHERE date = %(date)s
-                        AND rank <= %(top_n)s
-                  )
-                  AND rank <= %(top_n)s
-            )
-            SELECT
-                {sym},
-                min({ts}) as first_entry_ms,
-                argMin(changePercent, {ts}) as gain_at_entry,
-                argMin({price_col}, {ts}) as price_at_entry,
-                any({pc_col}) as prev_close,
-                argMin({vol_col}, {ts}) as volume_at_entry,
-                argMin({rv_col}, {ts}) as relative_volume,
-                max(changePercent) as max_gain
-            FROM {table} FINAL
-            WHERE date = %(date)s
-              AND rank <= %(top_n)s
-              AND {sym} NOT IN (SELECT {sym} FROM initial_top20)
-            GROUP BY {sym}
-            ORDER BY first_entry_ms
-        """
-        params = {"date": date, "top_n": config.top_n}
-        return self._execute_query(query, params)
-
-    def _find_all_top_n(
-        self,
-        date: str,
-        config: PreFilterConfig,
-        table: str,
-        is_collector: bool,
-    ) -> list[Candidate]:
-        """Find all stocks that were in top N at any point."""
-        sym = "ticker" if is_collector else "symbol"
-        ts = "timestamp" if is_collector else "event_time_ms"
-        price_col = "price"
-        vol_col = "volume"
-        pc_col = "prev_close"
-        rv_col = "relativeVolumeDaily"
-
-        query = f"""
-            SELECT
-                {sym},
-                min({ts}) as first_entry_ms,
-                argMin(changePercent, {ts}) as gain_at_entry,
-                argMin({price_col}, {ts}) as price_at_entry,
-                any({pc_col}) as prev_close,
-                argMin({vol_col}, {ts}) as volume_at_entry,
-                argMin({rv_col}, {ts}) as relative_volume,
-                max(changePercent) as max_gain
-            FROM {table} FINAL
-            WHERE date = %(date)s
-              AND rank <= %(top_n)s
-            GROUP BY {sym}
-            ORDER BY first_entry_ms
-        """
-        params = {"date": date, "top_n": config.top_n}
-        return self._execute_query(query, params)
-
-    def _execute_query(self, query: str, params: dict) -> list[Candidate]:
-        """Execute ClickHouse query and map results to Candidate objects."""
-        try:
-            result = self._ch.query(query, parameters=params)
-        except Exception as e:
-            logger.error(f"PreFilter: ClickHouse query failed - {e}")
-            return []
-
-        candidates = []
-        for row in result.result_rows:
-            try:
-                candidates.append(
-                    Candidate(
-                        symbol=row[0],
-                        first_entry_ms=int(row[1]),
-                        gain_at_entry=float(row[2]),
-                        price_at_entry=float(row[3]),
-                        prev_close=float(row[4]),
-                        volume_at_entry=float(row[5]),
-                        relative_volume=float(row[6]),
-                        max_gain=float(row[7]),
-                    )
-                )
-            except (IndexError, ValueError, TypeError) as e:
-                logger.warning(f"PreFilter: skipping malformed row - {e}")
-                continue
 
         return candidates
 
@@ -224,28 +330,3 @@ class PreFilter:
                 c for c in filtered if c.relative_volume >= config.min_relative_volume
             ]
         return filtered
-
-    @staticmethod
-    def _filter_common_stocks(
-        candidates: list[Candidate], date: str
-    ) -> list[Candidate]:
-        """Filter out ETFs and non-common stocks using date-aware lookup."""
-        try:
-            from jerry_trader.shared.utils.data_utils import get_common_stocks
-
-            filter_date = f"{date[:4]}-{date[5:7]}-{date[8:10]}"
-            common = get_common_stocks(filter_date).select("ticker").collect()
-            common_set = set(common["ticker"].to_list())
-
-            before = len(candidates)
-            candidates = [c for c in candidates if c.symbol in common_set]
-            excluded = before - len(candidates)
-            if excluded:
-                logger.info(
-                    f"PreFilter: excluded {excluded} non-common stocks "
-                    f"(ETFs, ADRs, etc.)"
-                )
-            return candidates
-        except Exception as e:
-            logger.warning(f"PreFilter: common stocks filter failed, skipping - {e}")
-            return candidates

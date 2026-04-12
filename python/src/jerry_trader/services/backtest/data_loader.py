@@ -49,20 +49,38 @@ class DataLoader:
         """
         date = config.date
         start_ms, end_ms = config.data_range_ms()
+        symbols = [c.symbol for c in candidates]
         result: dict[str, TickerData] = {}
 
-        # 1. Load trades + quotes (CH preferred, parquet fallback)
-        for candidate in candidates:
+        # 1. Bulk load trades + quotes from CH (single query each)
+        trades_map: dict[str, list] = {}
+        quotes_map: dict[str, list] = {}
+        missing_trades: list[str] = []
+        missing_quotes: list[str] = []
+
+        if self._ch:
+            trades_map = self._load_trades_batch_ch(symbols, date, start_ms, end_ms)
+            quotes_map = self._load_quotes_batch_ch(symbols, date, start_ms, end_ms)
+
+        # 2. Build TickerData, fall back to parquet for missing tickers
+        try:
+            from tqdm import tqdm
+
+            cand_iter = tqdm(candidates, desc="Loading tickers", unit="ticker")
+        except ImportError:
+            cand_iter = candidates
+
+        for candidate in cand_iter:
             symbol = candidate.symbol
 
-            trades = self._load_trades_ch(symbol, date, start_ms, end_ms)
-            if not trades:
+            trades = trades_map.get(symbol, [])
+            if not trades and config.trades_dir:
                 trades = self._load_trades_parquet(
                     symbol, date.replace("-", ""), config.trades_dir
                 )
 
-            quotes = self._load_quotes_ch(symbol, date, start_ms, end_ms)
-            if not quotes:
+            quotes = quotes_map.get(symbol, [])
+            if not quotes and config.quotes_dir:
                 quotes = self._load_quotes_parquet(
                     symbol, date.replace("-", ""), config.quotes_dir
                 )
@@ -74,9 +92,8 @@ class DataLoader:
                 candidate=candidate,
             )
 
-        # 2. Load 1m bars from ClickHouse (batch for all candidates)
+        # 3. Load 1m bars from ClickHouse (batch for all candidates)
         if self._ch:
-            symbols = [c.symbol for c in candidates]
             bars_map = self._load_bars_batch(symbols, date)
             for symbol, bars in bars_map.items():
                 if symbol in result:
@@ -95,6 +112,104 @@ class DataLoader:
     # =========================================================================
     # ClickHouse loaders (preferred)
     # =========================================================================
+
+    def _load_trades_batch_ch(
+        self,
+        symbols: list[str],
+        date: str,
+        start_ms: int = 0,
+        end_ms: int = 0,
+    ) -> dict[str, list[tuple[int, float, int]]]:
+        """Load trades for all symbols in a single CH query.
+
+        Returns dict mapping ticker → [(timestamp_ms, price, size), ...].
+        """
+        if not self._ch or not symbols:
+            return {}
+        try:
+            time_filter = ""
+            params: dict[str, Any] = {"date": date, "symbols": symbols}
+            if start_ms > 0 and end_ms > 0:
+                time_filter = (
+                    f"AND sip_timestamp >= %(start_ns)s "
+                    f"AND sip_timestamp < %(end_ns)s "
+                )
+                params["start_ns"] = start_ms * 1_000_000
+                params["end_ns"] = end_ms * 1_000_000
+
+            result = self._ch.query(
+                f"SELECT ticker, sip_timestamp, price, size "
+                f"FROM {self._database}.trades FINAL "
+                f"WHERE date = %(date)s AND ticker IN %(symbols)s "
+                f"{time_filter}"
+                f"AND (exchange != 4 "
+                f"     OR sip_timestamp - participant_timestamp <= 1000000000) "
+                f"ORDER BY ticker, sip_timestamp",
+                parameters=params,
+            )
+            trades_map: dict[str, list[tuple[int, float, int]]] = {}
+            for row in result.result_rows:
+                trades_map.setdefault(row[0], []).append(
+                    (int(row[1] // 1_000_000), float(row[2]), int(row[3]))
+                )
+            logger.debug(
+                f"CH trades batch: {len(trades_map)} tickers, {len(result.result_rows):,} rows"
+            )
+            return trades_map
+        except Exception as e:
+            logger.error(f"CH trades batch query failed: {e}")
+            return {}
+
+    def _load_quotes_batch_ch(
+        self,
+        symbols: list[str],
+        date: str,
+        start_ms: int = 0,
+        end_ms: int = 0,
+    ) -> dict[str, list[tuple[int, float, float, int, int]]]:
+        """Load quotes for all symbols in a single CH query.
+
+        Returns dict mapping ticker → [(timestamp_ms, bid, ask, bid_size, ask_size), ...].
+        """
+        if not self._ch or not symbols:
+            return {}
+        try:
+            time_filter = ""
+            params: dict[str, Any] = {"date": date, "symbols": symbols}
+            if start_ms > 0 and end_ms > 0:
+                time_filter = (
+                    f"AND sip_timestamp >= %(start_ns)s "
+                    f"AND sip_timestamp < %(end_ns)s "
+                )
+                params["start_ns"] = start_ms * 1_000_000
+                params["end_ns"] = end_ms * 1_000_000
+
+            result = self._ch.query(
+                f"SELECT ticker, sip_timestamp, bid_price, ask_price, bid_size, ask_size "
+                f"FROM {self._database}.quotes FINAL "
+                f"WHERE date = %(date)s AND ticker IN %(symbols)s "
+                f"{time_filter}"
+                f"ORDER BY ticker, sip_timestamp",
+                parameters=params,
+            )
+            quotes_map: dict[str, list[tuple[int, float, float, int, int]]] = {}
+            for row in result.result_rows:
+                quotes_map.setdefault(row[0], []).append(
+                    (
+                        int(row[1] // 1_000_000),
+                        float(row[2]),
+                        float(row[3]),
+                        int(row[4]),
+                        int(row[5]),
+                    )
+                )
+            logger.debug(
+                f"CH quotes batch: {len(quotes_map)} tickers, {len(result.result_rows):,} rows"
+            )
+            return quotes_map
+        except Exception as e:
+            logger.error(f"CH quotes batch query failed: {e}")
+            return {}
 
     def _load_trades_ch(
         self, symbol: str, date: str, start_ms: int = 0, end_ms: int = 0

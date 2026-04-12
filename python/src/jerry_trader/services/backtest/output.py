@@ -3,6 +3,8 @@
 Two output modes:
   1. Console — formatted summary table with per-rule stats
   2. ClickHouse — persist results to backtest_results table
+
+Detailed mode (--detailed) shows factor values at trigger time.
 """
 
 from __future__ import annotations
@@ -22,10 +24,11 @@ logger = setup_logger("backtest.output", log_to_file=True)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def print_summary(result: BacktestResult) -> None:
+def print_summary(result: BacktestResult, detailed: bool = False) -> None:
     """Print formatted backtest summary to console.
 
     Shows per-rule breakdown, overall stats, and individual signal details.
+    When detailed=True, shows factor values for each signal.
     """
     print("\n" + "=" * 80)
     print(f"  BACKTEST RESULT — {result.date}")
@@ -43,7 +46,7 @@ def print_summary(result: BacktestResult) -> None:
 
     # Per-rule summary
     for rule_id, signals in by_rule.items():
-        _print_rule_summary(rule_id, signals)
+        _print_rule_summary(rule_id, signals, detailed=detailed)
 
     # Overall stats
     print(f"\n{'─' * 80}")
@@ -151,27 +154,59 @@ def _print_grouped_stats(
         )
 
 
-def _print_rule_summary(rule_id: str, signals: list[SignalResult]) -> None:
+def _print_rule_summary(
+    rule_id: str, signals: list[SignalResult], detailed: bool = False
+) -> None:
     """Print per-rule signal details."""
     print(f"\n  Rule: {rule_id} ({len(signals)} signals)")
     print(f"  {'─' * 76}")
-    print(
-        f"  {'Ticker':<8} {'Time':>10} {'Price':>8} {'Entry':>8} "
-        f"{'Slip%':>6} {'Returns':>30} {'MFE':>7} {'MAE':>7}"
-    )
-    print(f"  {'─' * 76}")
 
-    for sig in signals:
-        time_str = _format_time(sig.trigger_time_ns // 1_000_000)
-        ret_str = _format_returns(sig.returns)
-        mfe_str = f"{sig.mfe:+.2%}" if sig.mfe is not None else "    -"
-        mae_str = f"{sig.mae:+.2%}" if sig.mae is not None else "    -"
+    if detailed:
+        # Detailed mode: show factor values for each signal
+        for i, sig in enumerate(signals, 1):
+            time_str = _format_time(sig.trigger_time_ns // 1_000_000)
+            print(f"\n  Signal #{i}: {sig.symbol} @ {time_str}")
+            print(f"    Entry:    ${sig.entry_price:.2f} (slip {sig.slippage_pct:.2%})")
+            print(f"    Trigger:  ${sig.trigger_price:.2f}")
 
+            # Factor values at trigger time
+            if sig.factors:
+                print(f"    Factors:")
+                for factor_name, factor_value in sig.factors.items():
+                    if isinstance(factor_value, float):
+                        print(f"      {factor_name:<24} {factor_value:>8.2f}")
+                    else:
+                        print(f"      {factor_name:<24} {factor_value:>8}")
+
+            # Returns
+            if sig.returns:
+                ret_str = " ".join(f"{h}:{r:+.1%}" for h, r in sig.returns.items())
+                print(f"    Returns:  {ret_str}")
+
+            # MFE/MAE
+            if sig.mfe is not None:
+                print(f"    MFE:      {sig.mfe:+.2%}")
+            if sig.mae is not None:
+                print(f"    MAE:      {sig.mae:+.2%}")
+    else:
+        # Compact table format
         print(
-            f"  {sig.symbol:<8} {time_str:>10} {sig.trigger_price:>8.2f} "
-            f"{sig.entry_price:>8.2f} {sig.slippage_pct:>5.2%} "
-            f"{ret_str:>30} {mfe_str:>7} {mae_str:>7}"
+            f"  {'Ticker':<8} {'Time':>10} {'Price':>8} {'Entry':>8} "
+            f"{'Slip%':>6} {'Returns':>30} {'MFE':>7} {'MAE':>7}"
         )
+        print(f"  {'─' * 76}")
+
+        for sig in signals:
+            time_str = _format_time(sig.trigger_time_ns // 1_000_000)
+            ret_str = _format_returns(sig.returns)
+            mfe_str = f"{sig.mfe:+.2%}" if sig.mfe is not None else "    -"
+            mae_str = f"{sig.mae:+.2%}" if sig.mae is not None else "    -"
+
+            print(
+                f"  {sig.symbol:<8} {time_str:>10} {sig.trigger_price:>8.2f} "
+                f"{sig.entry_price:>8.2f} {sig.slippage_pct:>5.2%} "
+                f"{ret_str:>30} {mfe_str:>7} {mae_str:>7}"
+            )
 
 
 def _format_time(ts_ms: int) -> str:

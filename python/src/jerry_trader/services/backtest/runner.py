@@ -15,7 +15,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from jerry_trader.domain.backtest.types import BacktestResult, SignalResult
+from jerry_trader.domain.backtest.types import BacktestResult, Candidate, SignalResult
 from jerry_trader.services.backtest.batch_engine import FactorEngineBatchAdapter
 from jerry_trader.services.backtest.config import BacktestConfig
 from jerry_trader.services.backtest.data_loader import DataLoader
@@ -32,6 +32,7 @@ def _aggregate_result(
     date: str,
     rules_tested: list[str],
     signals: list[SignalResult],
+    run_id: str | None = None,
 ) -> BacktestResult:
     """Aggregate individual signal results into a BacktestResult.
 
@@ -43,6 +44,7 @@ def _aggregate_result(
             rules_tested=rules_tested,
             total_signals=0,
             signals=[],
+            run_id=run_id,
         )
 
     # Collect all return horizons present
@@ -86,6 +88,7 @@ def _aggregate_result(
         rules_tested=rules_tested,
         total_signals=len(signals),
         signals=signals,
+        run_id=run_id,
         win_rate=win_rate,
         avg_return=avg_return,
         profit_factor=profit_factor,
@@ -137,6 +140,16 @@ class BacktestRunner:
                 signals=[],
             )
 
+        # Dry-run: stop after pre-filter
+        if config.candidates_only:
+            self._print_candidates(candidates, config)
+            return BacktestResult(
+                date=config.date,
+                rules_tested=[],
+                total_signals=0,
+                signals=[],
+            )
+
         # Step 2: Load data
         ticker_data_map = self._step_load(candidates, config)
 
@@ -148,14 +161,18 @@ class BacktestRunner:
 
         # Step 5: Aggregate
         rules_tested = [r.id for r in evaluator.rules]
-        result = _aggregate_result(config.date, rules_tested, all_signals)
+
+        # Generate run_id before aggregating (links experiment to ClickHouse)
+        run_id = f"{config.date}_{uuid.uuid4().hex[:8]}"
+        result = _aggregate_result(
+            config.date, rules_tested, all_signals, run_id=run_id
+        )
 
         # Step 6: Output
         if config.output_console:
-            print_summary(result)
+            print_summary(result, detailed=config.detailed)
 
         if config.output_clickhouse and self._ch:
-            run_id = f"{config.date}_{uuid.uuid4().hex[:8]}"
             persist_results(result, self._ch, run_id)
 
         logger.info(
@@ -170,21 +187,40 @@ class BacktestRunner:
     # ─────────────────────────────────────────────────────────────────────────
 
     def _step_prefilter(self, config: BacktestConfig):
-        """Step 1: Pre-filter candidates from market_snapshot."""
+        """Step 1: Pre-filter candidates from market_snapshot.
+
+        If market_snapshot has no data for this date, auto-runs
+        process_from_collector to populate it.
+        """
         if not self._ch:
             logger.warning("No ClickHouse client — cannot pre-filter")
             return []
 
-        logger.info("Step 1: Pre-filtering candidates...")
-        prefilter = PreFilter(
-            ch_client=self._ch,
-            database=(
-                config.clickhouse_config.get("database", "jerry_trader")
-                if config.clickhouse_config
-                else "jerry_trader"
-            ),
+        database = (
+            config.clickhouse_config.get("database", "jerry_trader")
+            if config.clickhouse_config
+            else "jerry_trader"
         )
-        candidates = prefilter.find(config.date, config.pre_filter)
+
+        logger.info("Step 1: Pre-filtering candidates...")
+        prefilter = PreFilter(ch_client=self._ch, database=database)
+
+        try:
+            candidates = prefilter.find(config.date, config.pre_filter)
+        except RuntimeError:
+            # market_snapshot empty — auto-process from collector
+            logger.info("  market_snapshot empty, auto-processing from collector...")
+            from jerry_trader.services.backtest.data.snapshot_builder import (
+                process_from_collector,
+            )
+
+            process_from_collector(
+                date=config.date,
+                ch_client=self._ch,
+                database=database,
+            )
+            candidates = prefilter.find(config.date, config.pre_filter)
+
         logger.info(f"  → {len(candidates)} candidates")
         return candidates
 
@@ -207,10 +243,20 @@ class BacktestRunner:
         return with_data
 
     def _step_load_rules(self, config: BacktestConfig) -> SignalEvaluator:
-        """Step 3: Load DSL rules."""
-        logger.info(f"Step 3: Loading rules from {config.rules_dir}...")
-        evaluator = SignalEvaluator(rules_dir=config.rules_dir)
-        evaluator.load_rules()
+        """Step 3: Load DSL rules.
+
+        If config.rules is provided, use them directly (no file I/O).
+        Otherwise, load from config.rules_dir.
+        """
+        if config.rules:
+            logger.info(
+                f"Step 3: Using {len(config.rules)} rules from config (no file I/O)"
+            )
+            evaluator = SignalEvaluator(rules=config.rules)
+        else:
+            logger.info(f"Step 3: Loading rules from {config.rules_dir}...")
+            evaluator = SignalEvaluator(rules_dir=config.rules_dir)
+            evaluator.load_rules()
         return evaluator
 
     def _step_compute(
@@ -228,7 +274,17 @@ class BacktestRunner:
         batch_engine = FactorEngineBatchAdapter()
         all_signals: list[SignalResult] = []
 
-        for i, (symbol, td) in enumerate(ticker_data_map.items()):
+        # Progress bar
+        try:
+            from tqdm import tqdm
+
+            items = tqdm(
+                ticker_data_map.items(), desc="Computing factors", unit="ticker"
+            )
+        except ImportError:
+            items = ticker_data_map.items()
+
+        for symbol, td in items:
             # 4a. Compute factors
             try:
                 factor_ts = batch_engine.compute(td)
@@ -271,12 +327,72 @@ class BacktestRunner:
             )
             all_signals.extend(signals)
 
-            if signals:
-                logger.info(
-                    f"  [{i+1}/{len(ticker_data_map)}] {symbol}: "
-                    f"{len(eval_result.triggers)} triggers "
-                    f"({len(session_triggers)} in session) → {len(signals)} signals"
-                )
-
         logger.info(f"  → {len(all_signals)} total signals across all tickers")
         return all_signals
+
+    @staticmethod
+    def _print_candidates(
+        candidates: list[Candidate],
+        config: BacktestConfig,
+    ) -> None:
+        """Print pre-filter candidates for dry-run mode."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        ET = ZoneInfo("America/New_York")
+
+        def fmt_vol(v: float) -> str:
+            if v >= 1_000_000:
+                return f"{v/1_000_000:.1f}M"
+            if v >= 1_000:
+                return f"{v/1_000:.0f}K"
+            return f"{v:.0f}"
+
+        print(f"\n{'='*82}")
+        print(f"  PRE-FILTER CANDIDATES — {config.date}")
+        print(f"{'='*82}")
+        print(
+            f"  {len(candidates)} tickers (new_entry_only={config.pre_filter.new_entry_only}, "
+            f"min_gain={config.pre_filter.min_gain_pct}%)"
+        )
+        print()
+        print(
+            f"  {'Ticker':8s} {'Entry':>10s} {'Entry%':>7s} {'Max%':>7s} "
+            f"{'Price':>7s} {'Vol':>8s} {'PeakVol':>8s}"
+        )
+        print(f"  {'-'*8} {'-'*10} {'-'*7} {'-'*7} {'-'*7} {'-'*8} {'-'*8}")
+
+        for c in candidates[:50]:
+            entry_time = datetime.fromtimestamp(
+                c.first_entry_ms / 1000, tz=ET
+            ).strftime("%H:%M:%S")
+            print(
+                f"  {c.symbol:8s} {entry_time:>10s} {c.gain_at_entry:>6.1f}% {c.max_gain:>6.1f}% "
+                f"{c.price_at_entry:>7.2f} {fmt_vol(c.volume_at_entry):>8s} {fmt_vol(c.peak_volume):>8s}"
+            )
+
+        if len(candidates) > 50:
+            print(f"  ... and {len(candidates) - 50} more")
+
+        if candidates:
+            avg_gain = sum(c.gain_at_entry for c in candidates) / len(candidates)
+            avg_max = sum(c.max_gain for c in candidates) / len(candidates)
+            avg_relvol = sum(c.relative_volume for c in candidates) / len(candidates)
+            avg_vol = sum(c.volume_at_entry for c in candidates) / len(candidates)
+            min_time = min(c.first_entry_ms for c in candidates)
+            max_time = max(c.first_entry_ms for c in candidates)
+            min_str = datetime.fromtimestamp(min_time / 1000, tz=ET).strftime(
+                "%H:%M:%S"
+            )
+            max_str = datetime.fromtimestamp(max_time / 1000, tz=ET).strftime(
+                "%H:%M:%S"
+            )
+            print()
+            print(f"  Summary:")
+            print(f"    Avg entry gain:  {avg_gain:.1f}%")
+            print(f"    Avg max gain:    {avg_max:.1f}%")
+            print(
+                f"    Avg peak vol:    {fmt_vol(sum(c.peak_volume for c in candidates) / len(candidates))}"
+            )
+            print(f"    Entry range:     {min_str} - {max_str} ET")
+        print(f"{'='*82}\n")

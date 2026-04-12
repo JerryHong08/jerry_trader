@@ -52,9 +52,18 @@ def cmd_check(args):
         check_date_range,
         print_check_result,
         print_date_range_summary,
+        verbose_check,
     )
 
     ch_client = _get_ch_client() if not args.no_ch else None
+
+    # Verbose mode (single date only)
+    if args.verbose and not args.end_date:
+        result = check_date(args.date, ch_client=ch_client)
+        print_check_result(result)
+        if result.snapshot.status.name == "READY":
+            verbose_check(args.date, ch_client, database=args.database)
+        sys.exit(0)
 
     if args.end_date:
         # Date range check
@@ -95,9 +104,20 @@ def cmd_convert(args):
 
 
 def cmd_build_snapshot(args):
-    """Build market_snapshot from trades Parquet."""
+    """Build market_snapshot_collector + market_snapshot from trades Parquet.
+
+    By default, runs the full 3-stage pipeline:
+      Stage 1: Aggregate trades/quotes into windows
+      Stage 2: Join, rank, write to collector
+      Stage 3: Process collector → market_snapshot (subscribed tickers)
+
+    With --reprocess, skips Stage 1-2 and only re-runs Stage 3.
+    """
     from jerry_trader.platform.config.session import make_session_id
-    from jerry_trader.services.backtest.data.snapshot_builder import build_and_insert
+    from jerry_trader.services.backtest.data.snapshot_builder import (
+        build,
+        process_from_collector,
+    )
 
     ch_client = _get_ch_client()
     if ch_client is None:
@@ -106,6 +126,22 @@ def cmd_build_snapshot(args):
         )
         sys.exit(1)
 
+    # --reprocess: skip Stage 1-2, only run process_from_collector
+    if args.reprocess:
+        try:
+            total = process_from_collector(
+                date=args.date,
+                ch_client=ch_client,
+                database=args.database,
+                force=args.force,
+            )
+            print(f"\nReprocessed {total:,} rows in market_snapshot for {args.date}")
+        except RuntimeError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+        return
+
+    # Full build (Stage 1-3)
     mode = args.mode
     session_id = args.session_id
     if not session_id:
@@ -114,7 +150,7 @@ def cmd_build_snapshot(args):
             replay_date=date_compact if mode == "replay" else None,
         )
 
-    ranked_count, collector_count = build_and_insert(
+    collector_count, processed_count = build(
         date=args.date,
         ch_client=ch_client,
         database=args.database,
@@ -123,279 +159,12 @@ def cmd_build_snapshot(args):
         session_id=session_id,
         filter_start_et=args.start_et,
         filter_end_et=args.end_et,
+        force=args.force,
     )
     print(
-        f"\nInserted {ranked_count:,} ranked + {collector_count:,} collector rows "
+        f"\nInserted {collector_count:,} collector + {processed_count:,} market_snapshot rows "
         f"(mode={mode}, session={session_id}, {args.start_et}-{args.end_et} ET)"
     )
-
-
-def cmd_enrich_snapshot(args):
-    """Enrich market_snapshot from collector data.
-
-    Reads from market_snapshot_collector, filters to common stocks,
-    recomputes rank per window, tracks subscription set (tickers that
-    entered top N with positive changePercent), and writes ONLY subscribed
-    tickers to market_snapshot — matching live processor behavior.
-    """
-    import polars as pl
-
-    from jerry_trader.shared.utils.data_utils import get_common_stocks
-
-    TOP_N = 20  # Must match processor.TOP_N
-
-    ch_client = _get_ch_client()
-    if ch_client is None:
-        print("ERROR: ClickHouse client not available.")
-        sys.exit(1)
-
-    date = args.date  # YYYY-MM-DD
-    database = args.database
-
-    # Check if collector has data
-    r = ch_client.query(
-        "SELECT count(), any(mode), any(session_id) FROM market_snapshot_collector FINAL "
-        "WHERE date = {date:String}",
-        parameters={"date": date},
-    )
-    collector_count, mode, session_id = r.result_rows[0]
-    if collector_count == 0:
-        print(f"No collector data found for {date}. Run build-snapshot first.")
-        sys.exit(1)
-
-    # Check existing data in market_snapshot
-    r = ch_client.query(
-        f"SELECT count() FROM {database}.market_snapshot FINAL "
-        "WHERE date = {date:String}",
-        parameters={"date": date},
-    )
-    existing = r.result_rows[0][0]
-    if existing > 0 and not args.force:
-        print(
-            f"market_snapshot already has {existing:,} rows for {date}. "
-            "Use --force to overwrite."
-        )
-        sys.exit(0)
-
-    # Delete existing data if force
-    if existing > 0:
-        ch_client.command(
-            f"ALTER TABLE {database}.market_snapshot DELETE WHERE date = '{date}'"
-        )
-        # Force mutation completion before INSERT to prevent async DELETE
-        # from removing newly inserted rows
-        ch_client.command(f"OPTIMIZE TABLE {database}.market_snapshot FINAL")
-        print(f"Deleted {existing:,} existing rows for {date}")
-
-    # Step 1: Read all collector data into Polars
-    print(f"Reading {collector_count:,} rows from collector...")
-    query = """
-        SELECT ticker, timestamp, price, volume, prev_close, prev_volume,
-               vwap, bid, ask, bid_size, ask_size,
-               changePercent, change, rank
-        FROM market_snapshot_collector FINAL
-        WHERE date = {date:String}
-        ORDER BY timestamp ASC, changePercent DESC
-    """
-    result = ch_client.query(query, parameters={"date": date})
-    columns = list(result.column_names)
-    df = pl.DataFrame(
-        {col: [row[i] for row in result.result_rows] for i, col in enumerate(columns)}
-    )
-
-    # Step 2: Filter to common stocks (same as live processor)
-    common_stocks = get_common_stocks(date).select("ticker").collect()
-    common_set = set(common_stocks["ticker"].to_list())
-    before = len(df)
-    df = df.filter(pl.col("ticker").is_in(common_set))
-    print(f"Filtered to common stocks: {before:,} → {len(df):,} rows")
-
-    # Step 3: Drop original rank — will recompute per window (same as historical_loader
-    # whose _query_all() doesn't include rank in output dict, so compute_ranks() recomputes)
-    df = df.drop("rank")
-
-    # Step 4: Per-window iteration with prev_df filling + compute_ranks
-    # Matches historical_loader bootstrap logic: carry forward previous window's
-    # tickers to stabilize ranks and reduce top-N churn.
-    print("Building subscription set (per-window with prev_df filling)...")
-    windows = sorted(df["timestamp"].unique().to_list())
-    subscribed: set[str] = set()
-    all_enriched_dfs: list[pl.DataFrame] = []
-    prev_df: pl.DataFrame | None = None
-
-    for i, window_ms in enumerate(windows):
-        window_df = df.filter(pl.col("timestamp") == window_ms)
-        if window_df.is_empty():
-            continue
-
-        # Fill missing tickers from previous window (same as historical_loader)
-        if prev_df is not None and len(prev_df) != len(window_df):
-            agg_cols = [c for c in window_df.columns if c != "ticker"]
-            window_df = (
-                pl.concat([prev_df.lazy(), window_df.lazy()], how="vertical")
-                .sort("timestamp")
-                .group_by("ticker")
-                .agg([pl.col(c).last() for c in agg_cols])
-                .sort("changePercent", descending=True)
-                .collect()
-            )
-        prev_df = window_df
-
-        # Recompute ordinal ranks (descending by changePercent)
-        ranked_df = window_df.with_columns(
-            pl.col("changePercent")
-            .rank(method="ordinal", descending=True)
-            .cast(pl.Int32)
-            .alias("rank"),
-        )
-
-        # Subscribe tickers in top N when max changePercent > 0
-        max_change = ranked_df["changePercent"].max()
-        if max_change is not None and max_change > 0:
-            top_n = ranked_df.filter(pl.col("rank") <= TOP_N)
-            for ticker in top_n["ticker"].to_list():
-                subscribed.add(ticker)
-
-        all_enriched_dfs.append(ranked_df)
-
-        if (i + 1) % 500 == 0:
-            print(f"  Processed {i + 1}/{len(windows)} windows")
-
-    print(f"Subscription set: {len(subscribed)} tickers entered top {TOP_N}")
-
-    # Step 5: Filter to subscribed tickers and add derived columns
-    combined = pl.concat(all_enriched_dfs)
-    combined = combined.filter(pl.col("ticker").is_in(subscribed))
-    combined = combined.with_columns(
-        [
-            (
-                pl.when(pl.col("prev_volume") > 0)
-                .then(pl.col("volume") / pl.col("prev_volume"))
-                .otherwise(pl.lit(1.0))
-                .alias("relativeVolumeDaily")
-            ),
-            pl.lit(0.0).alias("relativeVolume5min"),
-            pl.lit(0).cast(pl.Int32).alias("competition_rank"),
-        ]
-    )
-    print(f"Subscribed data: {len(combined):,} rows")
-
-    # Step 6: Write to market_snapshot in batches
-    print(f"Writing {len(combined):,} rows to market_snapshot...")
-    _CH_COLUMNS = [
-        "symbol",
-        "date",
-        "mode",
-        "session_id",
-        "event_time_ms",
-        "event_time",
-        "price",
-        "changePercent",
-        "volume",
-        "prev_close",
-        "prev_volume",
-        "vwap",
-        "bid",
-        "ask",
-        "bid_size",
-        "ask_size",
-        "rank",
-        "competition_rank",
-        "change",
-        "relativeVolumeDaily",
-        "relativeVolume5min",
-    ]
-
-    BATCH_SIZE = 50_000
-    total = 0
-    rows = combined.sort(["timestamp", "rank"]).rows()
-
-    for i in range(0, len(rows), BATCH_SIZE):
-        batch = rows[i : i + BATCH_SIZE]
-        ch_rows = []
-        for row in batch:
-            (
-                ticker,
-                timestamp,
-                price,
-                volume,
-                prev_close,
-                prev_volume,
-                vwap,
-                bid,
-                ask,
-                bid_size,
-                ask_size,
-                changePercent,
-                change,
-                rank,
-                relativeVolumeDaily,
-                relativeVolume5min,
-                competition_rank,
-            ) = (
-                row[0],
-                row[1],
-                row[2],
-                row[3],
-                row[4],
-                row[5],
-                row[6],
-                row[7],
-                row[8],
-                row[9],
-                row[10],
-                row[11],
-                row[12],
-                row[13],
-                row[14],
-                row[15],
-                row[16],
-            )
-
-            ch_rows.append(
-                [
-                    ticker,  # symbol
-                    date,  # date
-                    mode,  # mode
-                    session_id,  # session_id
-                    int(timestamp),  # event_time_ms
-                    datetime.utcfromtimestamp(int(timestamp) / 1000),  # event_time
-                    float(price or 0),
-                    float(changePercent or 0),
-                    float(volume or 0),
-                    float(prev_close or 0),
-                    float(prev_volume or 0),
-                    float(vwap or 0),
-                    float(bid or 0),
-                    float(ask or 0),
-                    float(bid_size or 0),
-                    float(ask_size or 0),
-                    int(rank or 0),
-                    int(competition_rank or 0),
-                    float(change or 0),
-                    float(relativeVolumeDaily or 1.0),
-                    float(relativeVolume5min or 0),
-                ]
-            )
-
-        ch_client.insert(
-            table=f"{database}.market_snapshot",
-            data=ch_rows,
-            column_names=_CH_COLUMNS,
-        )
-        total += len(ch_rows)
-        if total % 100_000 < BATCH_SIZE:
-            print(f"  {total:,}/{len(combined):,} rows...")
-
-    print(f"Done: {total:,} rows inserted into market_snapshot for {date}")
-
-    # Verify
-    r = ch_client.query(
-        f"SELECT count(DISTINCT symbol) FROM {database}.market_snapshot FINAL "
-        "WHERE date = {date:String}",
-        parameters={"date": date},
-    )
-    print(f"Distinct subscribed tickers: {r.result_rows[0][0]}")
 
 
 def cmd_extract_trades(args):
@@ -506,7 +275,7 @@ def cmd_import_ticks(args):
         tickers = [row[0] for row in r.result_rows]
         if not tickers:
             print(
-                f"No tickers found in market_snapshot for {date}. Run enrich-snapshot first."
+                f"No tickers found in market_snapshot for {date}. Run process-snapshot first."
             )
             sys.exit(1)
 
@@ -740,6 +509,16 @@ def main():
     p_check.add_argument(
         "--end-date", help="End date for range check (default: single date)"
     )
+    p_check.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show detailed ticker-level stats (single date only)",
+    )
+    p_check.add_argument(
+        "--database",
+        default="jerry_trader",
+        help="ClickHouse database for verbose check",
+    )
     p_check.set_defaults(func=cmd_check)
 
     # download
@@ -788,19 +567,17 @@ def main():
     p_bs.add_argument(
         "--end-et", default="09:30", help="End time filter ET (HH:MM, default: 09:30)"
     )
+    p_bs.add_argument(
+        "--force",
+        action="store_true",
+        help="Delete existing data for this date before building",
+    )
+    p_bs.add_argument(
+        "--reprocess",
+        action="store_true",
+        help="Skip collector build, only re-process collector → market_snapshot",
+    )
     p_bs.set_defaults(func=cmd_build_snapshot)
-
-    # enrich-snapshot
-    p_es = subparsers.add_parser(
-        "enrich-snapshot",
-        parents=[common],
-        help="Enrich market_snapshot from collector (no replay services needed)",
-    )
-    p_es.add_argument("--database", default="jerry_trader", help="ClickHouse database")
-    p_es.add_argument(
-        "--force", action="store_true", help="Overwrite existing data for this date"
-    )
-    p_es.set_defaults(func=cmd_enrich_snapshot)
 
     # extract-trades
     p_xt = subparsers.add_parser(
@@ -966,8 +743,6 @@ def cmd_parquet_to_ch(args):
         "ask",
         "bid_size",
         "ask_size",
-        "change",
-        "rank",
     ]
 
     for i, f in enumerate(files):
@@ -1029,8 +804,6 @@ def cmd_parquet_to_ch(args):
                         float(row.get("ask", 0) or 0),
                         float(row.get("bid_size", 0) or 0),
                         float(row.get("ask_size", 0) or 0),
-                        float(row.get("change", 0) or 0),
-                        int(row.get("rank", 0) or 0),
                         date_str,
                         mode,
                     ]

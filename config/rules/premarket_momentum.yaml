@@ -16,7 +16,7 @@ trigger:
     - factor: trade_rate
       timeframe: trade
       op: gt
-      value: 200.0
+      value: 200.0  # >200 trades/second indicates momentum
 
 actions:
   - type: record

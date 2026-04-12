@@ -1,56 +1,36 @@
 -- =============================================================================
--- Table 1: market_snapshot_ranked
--- Purpose: Minimal format for Pre-filter true entry detection
+-- market_snapshot_collector
+-- Purpose: Raw snapshot data matching live MarketsnapshotCollector output
+-- Used by: Replayer for visualization replay, process_from_collector for backtest
+--
+-- Schema aligned with live collector (collector.py Redis payload).
+-- rank and change are NOT stored here — computed by processor (live) or
+-- process_from_collector (backtest) and written to market_snapshot.
 -- =============================================================================
 
-CREATE TABLE IF NOT EXISTS market_snapshot_ranked
-(
-    symbol String,
-    event_time_ms Int64,
-    changePercent Float64,
-    rank Int32,
+CREATE DATABASE IF NOT EXISTS jerry_trader;
 
-    -- Metadata
-    date String,
-    mode String,          -- 'live' or 'replay'
-    session_id String,
-
-    inserted_at DateTime DEFAULT now()
-)
-ENGINE = ReplacingMergeTree(inserted_at)
-PARTITION BY (date, mode)
-ORDER BY (event_time_ms, symbol, session_id);
-
-
--- =============================================================================
--- Table 2: market_snapshot_collector
--- Purpose: Full format matching Polygon Collector API output
--- Used by: Replayer for visualization replay
--- =============================================================================
-
-CREATE TABLE IF NOT EXISTS market_snapshot_collector
+CREATE TABLE IF NOT EXISTS jerry_trader.market_snapshot_collector
 (
     -- Identity
     ticker String,
-    timestamp Int64,        -- epoch milliseconds (named like Collector API)
+    timestamp Int64,        -- epoch milliseconds (from Polygon `updated`)
 
-    -- Price data
-    price Float64,
-    volume Float64,
-    prev_close Float64,
-    prev_volume Float64,
-    vwap Float64,
+    -- Price data (from live collector payload)
+    price Float64,           -- lastTrade.p
+    volume Float64,           -- min.av (cumulative)
+    prev_close Float64,       -- prevDay.c
+    prev_volume Float64,      -- prevDay.v
+    vwap Float64,             -- min.vw
 
-    -- Quote data (from quotes parquet)
-    bid Float64,
-    ask Float64,
-    bid_size Float64,
-    ask_size Float64,
+    -- Quote data (from live collector payload)
+    bid Float64,              -- lastQuote.p
+    ask Float64,              -- lastQuote.P
+    bid_size Float64,         -- lastQuote.s
+    ask_size Float64,         -- lastQuote.S
 
-    -- Computed
-    changePercent Float64,
-    change Float64,
-    rank Int32,
+    -- Computed by live collector
+    changePercent Float64,    -- todaysChangePerc
 
     -- Metadata
     date String,

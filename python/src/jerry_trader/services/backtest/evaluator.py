@@ -49,9 +49,9 @@ class EvalResult:
 class SignalEvaluator:
     """Evaluates DSL rules against a FactorTimeseries for backtest.
 
-    Loads rules from YAML (same format as live SignalEngine), walks the
-    factor timeseries chronologically, and fires triggers using the exact
-    same evaluate_trigger logic.
+    Accepts rules directly (list[Rule]) or from a directory (rules_dir).
+    Walks the factor timeseries chronologically and fires triggers using
+    the same evaluate_trigger logic as live SignalEngine.
 
     Unlike live SignalEngine, this:
     - Does not need Redis or WebSocket
@@ -59,16 +59,51 @@ class SignalEvaluator:
     - Collects all trigger points in memory
     """
 
-    def __init__(self, rules_dir: str = "config/rules/"):
-        self._rules_dir = rules_dir
-        self._rules: list[Rule] = []
+    def __init__(
+        self,
+        rules: list[Rule] | None = None,
+        rules_dir: str | None = None,
+    ):
+        """Initialize evaluator with rules.
+
+        Args:
+            rules: Direct list of Rule objects (preferred for mining/testing).
+            rules_dir: Directory containing YAML rule files (for production use).
+
+        Note: If both are provided, rules takes precedence.
+              If neither is provided, must call load_rules() later.
+        """
+        if rules is not None:
+            self._rules = [r for r in rules if r.enabled]
+            self._rules_dir = None
+            logger.info(f"SignalEvaluator: loaded {len(self._rules)} rules from memory")
+            for rule in self._rules:
+                logger.info(f"  Rule: {rule.id} v{rule.version} — {rule.name}")
+        elif rules_dir is not None:
+            self._rules_dir = rules_dir
+            self._rules = []
+        else:
+            # Default: use standard rules directory
+            self._rules_dir = "config/rules/"
+            self._rules = []
 
     def load_rules(self) -> list[Rule]:
-        """Load DSL rules from directory.
+        """Load DSL rules from directory (if rules_dir was provided).
 
         Returns:
             List of enabled Rule objects.
+
+        Note: If rules were provided directly in __init__, this returns them
+              immediately without file I/O.
         """
+        if self._rules:
+            # Already loaded from memory
+            return self._rules
+
+        if self._rules_dir is None:
+            logger.warning("SignalEvaluator: no rules_dir configured")
+            return []
+
         all_rules = load_rules_from_dir(self._rules_dir)
         self._rules = [r for r in all_rules if r.enabled]
 

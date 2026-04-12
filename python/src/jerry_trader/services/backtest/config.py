@@ -12,6 +12,7 @@ from typing import Any
 
 from jerry_trader.domain.backtest.types import Candidate
 from jerry_trader.domain.market.bar import Bar
+from jerry_trader.domain.strategy.rule import Rule
 
 
 @dataclass
@@ -35,7 +36,8 @@ class PreFilterConfig:
     top_n: int = 20
     min_gain_pct: float = 2.0
     new_entry_only: bool = True
-    min_price: float = 0.5
+    # min_price: float = 0.5
+    min_price: float = 0.01
     max_price: float = 500.0
     min_volume: float = 0.0
     min_relative_volume: float = 0.0
@@ -78,7 +80,8 @@ class BacktestConfig:
 
     Attributes:
         date: Backtest date in YYYY-MM-DD format.
-        rules_dir: Directory containing DSL rule YAML files.
+        rules: Direct list of Rule objects (for mining/testing, no file I/O).
+        rules_dir: Directory containing DSL rule YAML files (for production).
         gain_threshold: Minimum gain % for pre-filter (convenience shortcut
             for pre_filter.min_gain_pct).
         slippage_buffer: Buffer on ask price for slippage model (e.g. 0.001 = 0.1%).
@@ -90,10 +93,15 @@ class BacktestConfig:
         clickhouse_config: ClickHouse connection config dict (or None for no CH).
         trades_dir: Directory containing trades Parquet files.
         quotes_dir: Directory containing quotes Parquet files.
+        candidates_only: Dry-run: stop after pre-filter.
+        detailed: Show factor values at trigger time in console output.
+
+    Note: If rules is provided, rules_dir is ignored (no file I/O needed).
     """
 
     date: str
-    rules_dir: str = "config/rules/"
+    rules: list[Rule] | None = None  # Direct rules (preferred for mining)
+    rules_dir: str = "config/rules/"  # Fallback: load from directory
     gain_threshold: float = 2.0
     slippage_buffer: float = 0.001
     default_slippage: float = 0.002
@@ -110,6 +118,8 @@ class BacktestConfig:
     clickhouse_config: dict[str, Any] | None = None
     trades_dir: str = ""
     quotes_dir: str = ""
+    candidates_only: bool = False  # Dry-run: stop after pre-filter
+    detailed: bool = False  # Show factor values in console output
 
     def __post_init__(self):
         # Sync gain_threshold into pre_filter if pre_filter still has default

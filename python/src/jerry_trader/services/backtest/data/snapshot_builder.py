@@ -1,20 +1,26 @@
-"""Snapshot builder — batch generate market_snapshot from trades + quotes Parquet.
+"""Snapshot builder — batch generate market snapshots from trades + quotes Parquet.
 
-TWO-STAGE STREAMING PIPELINE (memory-safe for 150M+ trades):
+THREE-STAGE PIPELINE:
 
   Stage 1 — sink_parquet (streaming, bounded memory):
-    scan trades → join prev_close → bucket into windows → aggregate OHLCV
-    scan quotes → bucket into windows → aggregate bid/ask (last value)
-    → sink to intermediate parquets
+    scan trades -> join prev_close -> bucket into windows -> aggregate OHLCV
+    scan quotes -> bucket into windows -> aggregate bid/ask (last value)
+    -> sink to intermediate parquets
 
   Stage 2 — chunked join + rank (bounded memory per chunk):
     Join trades_agg + quotes_agg
     Split by time ranges (30-min chunks)
-    → rank + sort each chunk separately
-    → merge chunks via scan → sink_parquet
-    → output collector_format matching Polygon Collector API for Replay
+    -> rank + sort each chunk separately
+    -> merge chunks -> insert into market_snapshot_collector (raw, all tickers)
 
-This avoids loading the full 150M-row trades into memory at any point.
+  Stage 3 — process to market_snapshot:
+    Read collector -> filter common stocks -> recompute ranks per window
+    -> track subscription set (same logic as live processor)
+    -> write only subscribed tickers to market_snapshot
+
+Output tables:
+  market_snapshot_collector -- raw, all tickers (for replay)
+  market_snapshot -- processed, subscribed tickers only (for backtest + chart)
 """
 
 from __future__ import annotations
@@ -63,7 +69,8 @@ _SNAPSHOT_COLUMNS = [
     "relativeVolume5min",
 ]
 
-# Collector format columns (matching Polygon API output)
+# Collector format columns (matching live collector.py payload)
+# No rank/change — those are computed by processor and stored in market_snapshot.
 _COLLECTOR_COLUMNS = [
     "ticker",
     "timestamp",
@@ -77,8 +84,6 @@ _COLLECTOR_COLUMNS = [
     "bid_size",
     "ask_size",
     "changePercent",
-    "change",
-    "rank",
     "date",
     "mode",
     "session_id",
@@ -240,7 +245,6 @@ def _stage1_aggregate_trades(
                         / pl.col("prev_close")
                         * 100
                     ).alias("changePercent"),
-                    (pl.col("price") - pl.col("prev_close")).alias("change"),
                 ]
             )
         )
@@ -452,8 +456,6 @@ def _stage2_join_and_rank(
                 pl.col("bid_size"),
                 pl.col("ask_size"),
                 pl.col("changePercent"),
-                pl.col("change"),
-                pl.col("rank"),
             ]
         )
         collector_path = f"{output_dir}/.collector_chunk_{chunk_start}.parquet"
@@ -595,31 +597,36 @@ def build(
     filter_end_et: str | None = DEFAULT_FILTER_END_ET,
     include_quotes: bool = True,
     output_parquet: str | None = None,
-) -> int:
+    force: bool = False,
+) -> tuple[int, int]:
     """Build snapshots and insert into ClickHouse.
 
-    Primary workflow: builds in temp directory, inserts to CH, cleans up.
+    Produces two tables:
+      1. market_snapshot_collector -- raw, all tickers (for replay)
+      2. market_snapshot -- processed, subscribed tickers only (for backtest + chart)
 
     Args:
-        date: Trading date (YYYY-MM-DD).
-        ch_client: ClickHouse client.
-        database: ClickHouse database name.
-        window_ms: Aggregation window in milliseconds (default 5000 = 5s).
-        mode: Run mode ("live" or "replay").
-        session_id: Session identifier.
-        batch_size: Batch size for CH inserts.
-        filter_start_et: Start time filter in ET (HH:MM). Default "04:00".
-        filter_end_et: End time filter in ET (HH:MM). Default "09:30".
-        include_quotes: Whether to process quotes for bid/ask data.
-        output_parquet: If provided, also save Parquet files to this directory.
+        force: Delete existing data for this date before inserting.
 
     Returns:
-        collector_inserted - row count inserted into ClickHouse
+        (collector_count, processed_count) tuple.
     """
     import tempfile
     import time
 
     t0 = time.time()
+
+    # Delete existing data if --force
+    if force:
+        for table in ["market_snapshot", "market_snapshot_collector"]:
+            try:
+                ch_client.command(
+                    f"ALTER TABLE {database}.{table} DELETE WHERE date = '{date}'"
+                )
+                ch_client.command(f"OPTIMIZE TABLE {database}.{table} FINAL")
+                logger.info(f"Force: cleared {table} for {date}")
+            except Exception as e:
+                logger.debug(f"Force: could not clear {table}: {e}")
 
     # Build in temp directory
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -649,8 +656,6 @@ def build(
                 pl.col("bid_size").fill_null(0.0),
                 pl.col("ask_size").fill_null(0.0),
                 pl.col("changePercent").fill_null(0.0),
-                pl.col("change").fill_null(0.0),
-                pl.col("rank").fill_null(0),
             ]
         )
 
@@ -685,11 +690,292 @@ def build(
             f"Inserted {collector_inserted:,} rows into market_snapshot_collector"
         )
 
-    return collector_inserted
+    # Stage 3: Process -> market_snapshot (subscribed tickers only)
+    processed_count = 0
+    if collector_inserted > 0:
+        try:
+            processed_count = process_from_collector(
+                date=date,
+                ch_client=ch_client,
+                database=database,
+                batch_size=batch_size,
+            )
+        except Exception as e:
+            logger.error(f"Processing failed (collector data is still valid): {e}")
+
+    return collector_inserted, processed_count
 
 
 # Backwards compatibility alias
 build_and_insert = build
+
+
+# =============================================================================
+# Stage 3: Process collector -> market_snapshot
+# =============================================================================
+
+TOP_N = 20  # Must match processor.TOP_N
+
+
+def process_from_collector(
+    date: str,
+    ch_client: Any,
+    database: str = "jerry_trader",
+    batch_size: int = 50_000,
+    force: bool = False,
+) -> int:
+    """Process market_snapshot from collector data.
+
+    Reads from market_snapshot_collector, filters to common stocks,
+    recomputes ranks per window, tracks subscription set (tickers that
+    entered top N with positive changePercent), and writes ONLY subscribed
+    tickers to market_snapshot — matching live processor behavior.
+
+    Args:
+        date: Trading date (YYYY-MM-DD).
+        ch_client: ClickHouse client.
+        database: ClickHouse database name.
+        batch_size: Batch size for CH inserts.
+        force: Overwrite existing data for this date.
+
+    Returns:
+        Number of rows inserted into market_snapshot.
+    """
+    import polars as pl
+
+    from jerry_trader.shared.utils.data_utils import get_common_stocks
+
+    # Check if collector has data
+    r = ch_client.query(
+        "SELECT count(), any(mode), any(session_id) "
+        "FROM market_snapshot_collector FINAL "
+        "WHERE date = {date:String}",
+        parameters={"date": date},
+    )
+    collector_count, mode, session_id = r.result_rows[0]
+    if collector_count == 0:
+        raise RuntimeError(
+            f"No collector data found for {date}. Run build-snapshot first."
+        )
+
+    # Check existing data in market_snapshot
+    r = ch_client.query(
+        f"SELECT count() FROM {database}.market_snapshot FINAL "
+        "WHERE date = {date:String}",
+        parameters={"date": date},
+    )
+    existing = r.result_rows[0][0]
+    if existing > 0 and not force:
+        logger.info(
+            f"market_snapshot already has {existing:,} rows for {date} — skipping process"
+        )
+        return existing
+
+    # Delete existing data if force
+    if existing > 0:
+        ch_client.command(
+            f"ALTER TABLE {database}.market_snapshot DELETE WHERE date = '{date}'"
+        )
+        ch_client.command(f"OPTIMIZE TABLE {database}.market_snapshot FINAL")
+        logger.info(f"Deleted {existing:,} existing rows for {date}")
+
+    # Step 1: Read all collector data into Polars
+    logger.info(f"Reading {collector_count:,} rows from collector...")
+    query = """
+        SELECT ticker, timestamp, price, volume, prev_close, prev_volume,
+               vwap, bid, ask, bid_size, ask_size,
+               changePercent
+        FROM market_snapshot_collector FINAL
+        WHERE date = {date:String}
+        ORDER BY timestamp ASC, changePercent DESC
+    """
+    result = ch_client.query(query, parameters={"date": date})
+    columns = list(result.column_names)
+    df = pl.DataFrame(
+        {col: [row[i] for row in result.result_rows] for i, col in enumerate(columns)}
+    )
+
+    # Step 2: Filter to common stocks (same as live processor)
+    common_stocks = get_common_stocks(date).select("ticker").collect()
+    common_set = set(common_stocks["ticker"].to_list())
+    before = len(df)
+    df = df.filter(pl.col("ticker").is_in(common_set))
+    logger.info(f"Filtered to common stocks: {before:,} -> {len(df):,} rows")
+
+    # Step 3: Compute change (price - prev_close) for market_snapshot output
+    df = df.with_columns((pl.col("price") - pl.col("prev_close")).alias("change"))
+
+    # Step 4: Per-window iteration with prev_df filling + compute_ranks
+    # prev_df filling is required BEFORE ranking — it carries forward previously-seen
+    # tickers into subsequent windows, which affects rank distribution and subscription set.
+    logger.info("Building subscription set (per-window with prev_df filling)...")
+    windows = sorted(df["timestamp"].unique().to_list())
+    subscribed: set[str] = set()
+    all_processed_dfs: list[pl.DataFrame] = []
+    prev_df: pl.DataFrame | None = None
+
+    # Pre-partition by timestamp (single scan, avoids 3960 repeated filters)
+    window_map: dict[int, pl.DataFrame] = {}
+    for part_df in df.partition_by("timestamp"):
+        ts = part_df["timestamp"][0]
+        window_map[ts] = part_df
+
+    # Progress bar
+    try:
+        from tqdm import tqdm
+
+        window_iter = tqdm(windows, desc="Processing windows", unit="win")
+    except ImportError:
+        window_iter = windows
+        logger.info(
+            f"Processing {len(windows)} windows (install tqdm for progress bar)"
+        )
+
+    for i, window_ms in enumerate(window_iter):
+        window_df = window_map.get(window_ms)
+        if window_df is None or window_df.is_empty():
+            continue
+
+        # Fill missing tickers from previous window (same as historical_loader)
+        if prev_df is not None and len(prev_df) != len(window_df):
+            agg_cols = [c for c in window_df.columns if c != "ticker"]
+            window_df = (
+                pl.concat([prev_df, window_df], how="vertical")
+                .sort("timestamp")
+                .group_by("ticker")
+                .agg([pl.col(c).last() for c in agg_cols])
+                .sort("changePercent", descending=True)
+            )
+        prev_df = window_df
+
+        # Recompute ordinal ranks (descending by changePercent)
+        ranked_df = window_df.with_columns(
+            pl.col("changePercent")
+            .rank(method="ordinal", descending=True)
+            .cast(pl.Int32)
+            .alias("rank"),
+        )
+
+        # Subscribe tickers in top N when max changePercent > 0
+        max_change = ranked_df["changePercent"].max()
+        if max_change is not None and max_change > 0:
+            top_n = ranked_df.filter(pl.col("rank") <= TOP_N)
+            for ticker in top_n["ticker"].to_list():
+                subscribed.add(ticker)
+
+        all_processed_dfs.append(ranked_df)
+
+    logger.info(f"Subscription set: {len(subscribed)} tickers entered top {TOP_N}")
+
+    # Step 5: Filter to subscribed tickers and add derived columns
+    combined = pl.concat(all_processed_dfs)
+    combined = combined.filter(pl.col("ticker").is_in(subscribed))
+    combined = combined.with_columns(
+        [
+            (
+                pl.when(pl.col("prev_volume") > 0)
+                .then(pl.col("volume") / pl.col("prev_volume"))
+                .otherwise(pl.lit(1.0))
+                .alias("relativeVolumeDaily")
+            ),
+            pl.lit(0.0).alias("relativeVolume5min"),
+            pl.lit(0).cast(pl.Int32).alias("competition_rank"),
+        ]
+    )
+    logger.info(f"Subscribed data: {len(combined):,} rows")
+
+    # Step 6: Write to market_snapshot in batches
+    logger.info(f"Writing {len(combined):,} rows to market_snapshot...")
+    rows = combined.sort(["timestamp", "rank"]).rows()
+
+    total = 0
+    for i in range(0, len(rows), batch_size):
+        batch_rows = rows[i : i + batch_size]
+        ch_rows = []
+        for row in batch_rows:
+            (
+                ticker,
+                timestamp,
+                price,
+                volume,
+                prev_close,
+                prev_volume,
+                vwap,
+                bid,
+                ask,
+                bid_size,
+                ask_size,
+                changePercent,
+                change,
+                rank,
+                relativeVolumeDaily,
+                relativeVolume5min,
+                competition_rank,
+            ) = (
+                row[0],
+                row[1],
+                row[2],
+                row[3],
+                row[4],
+                row[5],
+                row[6],
+                row[7],
+                row[8],
+                row[9],
+                row[10],
+                row[11],
+                row[12],
+                row[13],
+                row[14],
+                row[15],
+                row[16],
+            )
+            ch_rows.append(
+                [
+                    ticker,
+                    date,
+                    mode,
+                    session_id,
+                    int(timestamp),
+                    datetime.utcfromtimestamp(int(timestamp) / 1000),
+                    float(price or 0),
+                    float(changePercent or 0),
+                    float(volume or 0),
+                    float(prev_close or 0),
+                    float(prev_volume or 0),
+                    float(vwap or 0),
+                    float(bid or 0),
+                    float(ask or 0),
+                    float(bid_size or 0),
+                    float(ask_size or 0),
+                    int(rank or 0),
+                    int(competition_rank or 0),
+                    float(change or 0),
+                    float(relativeVolumeDaily or 1.0),
+                    float(relativeVolume5min or 0),
+                ]
+            )
+
+        ch_client.insert(
+            table=f"{database}.market_snapshot",
+            data=ch_rows,
+            column_names=_SNAPSHOT_COLUMNS,
+        )
+        total += len(ch_rows)
+        if total % 100_000 < batch_size:
+            logger.info(f"  {total:,}/{len(combined):,} rows...")
+
+    logger.info(f"Processed {total:,} rows into market_snapshot for {date}")
+
+    # Verify
+    r = ch_client.query(
+        f"SELECT count(DISTINCT symbol) FROM {database}.market_snapshot FINAL "
+        "WHERE date = {date:String}",
+        parameters={"date": date},
+    )
+    logger.info(f"Distinct subscribed tickers: {r.result_rows[0][0]}")
+
+    return total
 
 
 # =============================================================================
@@ -736,7 +1022,7 @@ if __name__ == "__main__":
     )
 
     # Build and insert
-    collector_inserted = build(
+    collector_count, processed_count = build(
         date=args.date,
         ch_client=ch_client,
         window_ms=args.window_ms,
@@ -749,4 +1035,5 @@ if __name__ == "__main__":
     )
 
     print(f"\nInserted to ClickHouse:")
-    print(f"  market_snapshot_collector: {collector_inserted:,} rows")
+    print(f"  market_snapshot_collector: {collector_count:,} rows")
+    print(f"  market_snapshot: {processed_count:,} rows")

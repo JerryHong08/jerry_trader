@@ -36,6 +36,7 @@ class Candidate:
     volume_at_entry: float
     relative_volume: float
     max_gain: float
+    peak_volume: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +102,7 @@ class BacktestResult:
 
     Attributes:
         date: Backtest date (YYYY-MM-DD).
+        run_id: Unique run identifier (links to ClickHouse backtest_results).
         rules_tested: Rule IDs that were evaluated.
         total_signals: Total number of signals triggered.
         signals: Individual signal results.
@@ -117,6 +119,7 @@ class BacktestResult:
     rules_tested: list[str]
     total_signals: int
     signals: list[SignalResult]
+    run_id: str | None = None  # Links to ClickHouse backtest_results
     win_rate: dict[str, float] = field(default_factory=dict)
     avg_return: dict[str, float] = field(default_factory=dict)
     profit_factor: float = 0.0

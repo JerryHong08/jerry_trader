@@ -17,6 +17,22 @@ Foundation pure business logic value objects.
 - [x] 10.4 Snapshot builder — data/snapshot_builder.py: two-stage streaming pipeline (sink_parquet + chunked rank) for 150M+ trades
 - [x] 10.5 Data CLI — data/cli.py: unified CLI (download, convert, check, build-snapshot, prepare)
 
+- [x] 10.1.0 Data CLI — download, convert, check, build-snapshot, prepare commands
+- [x] 10.2.0 CSV.gz → Parquet converter with skip-if-exists
+- [x] 10.3.0 Data checker — verify parquet files + CH snapshot readiness
+
+
+## 11. Backtest Mining & Experiment Framework
+
+[Agent Mining Phase](roadmap/agent-mining-phase.md) — Factor implementation, threshold optimization, multi-condition rules.
+[Experiment Framework](roadmap/experiment-framework.md) — Mathematical validation, reproducibility, knowledge transfer.
+
+**Infrastructure:**
+
+- [x] [11.1](roadmap/experiment-framework.md) Design structured experiment log schema — hypothesis, design, results, statistical validation, reproducibility checklist
+- [x] [11.21](roadmap/experiment-framework.md) Experiment CLI query tool — Python query functions built into experiment_logger.py: find_experiments_by_hypothesis(), get_all_lessons(), get_ticker_insights()
+- [x] [11.22](roadmap/experiment-framework.md) Document experiment log usage in SKILL.md — how to read logs, query knowledge_base, learn from past experiments, use validation gates. Agent guide.
+
 ## 2. Rust Core
 Performance-critical components rewritten in Rust.
 
@@ -25,6 +41,8 @@ Performance-critical components rewritten in Rust.
 - [x] 2.3 VolumeTracker for snapshot processing
 - [x] 2.4 Factor helpers (z_score, price_accel)
 - [x] 2.6 TickDataReplayer with Parquet lake reader
+
+- [x] 2.3.0 Add ClickHouse data source to Rust replayer — use `clickhouse` crate to query trades/quotes from CH as primary source (Parquet fallback), unify backtest data path, config-driven (date + ticker list)
 
 
 ## 3. Services Layer
@@ -56,6 +74,12 @@ Stateful workers and use-case implementations.
 
 - [~] 3.20 智能默认 - Factor-Timeframe 映射配置
 - [x] 3.21 Move config_builder.py from platform/config/ to runtime/ (only consumer is backend_starter)
+
+- [x] [3.23](roadmap/fix-meeting-bar-merge-race-condition.md) Fix meeting bar merge race condition in bars_builder
+- [x] [3.24](roadmap/forward-fill-null-bars-from-first-trade-in-barbuilder.md) Forward-fill null bars from first trade in BarBuilder
+
+- [x] [3.22](roadmap/live-trf-filtering-apply-delay-threshold-filter-across-real-time-pipeline-components-collector-unified-ticker-manager-bars-builder-factor-engine.md) Live TRF filtering — apply delay threshold filter across real-time pipeline components (collector, unified_ticker_manager, bars_builder, factor_engine)
+
 
 ## 5. Frontend
 React/TradingView UI modules and UX improvements.
@@ -92,6 +116,12 @@ React/TradingView UI modules and UX improvements.
 - [x] 5.28 Fix Zustand Map recreation - only create new Map on actual changes in marketDataStore.ts
 - [x] 5.29 Fix event listener leaks - cleanup in useEffect return in OverviewChartModule.tsx
 
+- [x] 5.21 Factor panel real-time value display - last value shown in panel header with factor color
+- [x] 5.24 RankList virtual scroll - use @tanstack/virtual for RankList rendering, avoid DOM bloat with 100+ tickers
+- [x] 5.30 Fix overview chart incremental update bug — existing ticker lines stop updating after first render
+- [x] 5.31 Notebooks — exploration & visualization for snapshot/backtest data, 01-snapshot-price-vwap as template
+
+
 ## 6. Orchestration
 
 System-wide coordination and backtest infrastructure.
@@ -114,6 +144,10 @@ System-wide coordination and backtest infrastructure.
 - [x] 6.10 Fix clock synchronization - ReplayClock and TickDataReplayer shared time
 - [x] 6.11 Fix factor query - add session filter and remove FINAL
 
+- [x] 6.13 Add mining CLI entry point in backtest/cli.py
+- [x] [6.16](roadmap/mining-framework-clear-rules-dir-before-each-test.md) Mining framework: clear rules dir before each test
+
+- [x] 6.20 Fix SignalEvaluator to accept Rule list directly
 
 ## 7. AI Agent Layer
 
@@ -129,10 +163,14 @@ ATC-R Agent System - ACT-R inspired architecture with production rules (Strategy
 - [x] [7.2](roadmap/atcr-agent-system.md) Strategy DSL — YAML rule schema, factor conditions, parser/validator
 - [x] 7.10 Signal event persistence — store trigger events to ClickHouse (rule_id, symbol, trigger_time, factors). Returns computed offline via SQL JOIN with ohlcv bars. Includes SQL schema + Python storage writer.
 
+- [x] [7.4](roadmap/atcr-agent-system.md) Backtest Infrastructure — pre-filter candidates from snapshots, factor history cursor, result store
+
+
 ## 8. Optional Features
 Enhancements and additional modules.
 - [x] 8.1 Multi-machine SSH deployment configured in config.yaml
 - [x] 8.2 News engine output from log to JSON log
+
 
 ## 9. Backtest Pipeline
 
@@ -148,3 +186,42 @@ Enhancements and additional modules.
 - [x] 9.10 split 预处理
 - [x] 9.11 HistoricalLoader — CH bootstrap for replay mode
 - [x] 9.14 Parquet Snapshot Validator
+- [x] 9.1.0 Data CLI — download, convert, check, build-snapshot, prepare pipeline
+- [x] 9.2.0 CSV.gz → Parquet converter (Polars streaming, skip-if-exists)
+- [x] 9.3.0 Snapshot builder — trades → CH market_snapshot_collector + market_snapshot (ranked)
+- [x] 9.4.0 HistoricalLoader batch bootstrap — bulk CH read/write, in-memory subscription accumulation, last_df filling, clock jump on completion
+- [x] [9.5](roadmap/replayer-ch-migration.md) CHReplayer — 读 CH market_snapshot_collector，推送 INPUT Stream，本地 clock 支持
+  - [x] 9.5.1 Clock pause during bootstrap — init 后 pause，bootstrap 完成后 jump_to + resume
+  - [x] 9.5.2 CHReplayer 实现 — 读 CH、poll local clock、xadd INPUT Stream
+  - [x] 9.5.3 Parquet → CH migration CLI — 历史数据一次性迁入
+  - [x] 9.5.4 backend_starter 集成 — 替换旧 parquet replayer，auto-detect start_from
+- [x] 9.6.0 Split adjustment — adjustment_factor = split_from / split_to，应用于 prev_close
+- [x] [9.7](roadmap/replayer-ch-migration.md) Clock-based Bootstrap Synchronization
+- [x] 9.9.0 Parquet snapshot data integrity checker
+- [x] 9.10.0 Parquet → CH Migration Script
+- [~] 9.11.0 Snapshot bootstrap Rust 加速
+- [x] 9.12 Fix volume semantics in replay mode — snapshot_builder outputs per-window incremental volume but VolumeTracker expects cumulative
+- [x] 9.13 Implement relativeVolumeDaily calculation — currently never computed, just passed through as 0/1
+- [x] 9.15 snapshot_builder: compute prev_volume from day_aggs instead of hardcoding 0.0
+- [x] 9.16 Fix VWAP — use cumulative turnover/volume instead of per-window VWAP
+- [x] 9.17 Round volume to integer in snapshot_builder to avoid float precision display
+- [x] 9.18 SignalEvaluator cooldown/dedup — skip same-rule triggers within configurable window (default 60s)
+- [x] 9.19 Backtest grouped statistics — per-rule and per-ticker breakdown in console output
+- [x] 9.20 Backtest results visualization notebook — 02-backtest-results.ipynb with return distribution, MFE/MAE scatter, timeline
+- [x] 9.21 Backtest pre-market time filter — restrict pipeline to 4:00-9:30 AM ET, ignore out-of-hours trades/signals
+- [x] [9.24](roadmap/filter-trf-exch-4-trades-remove-stale-finra-delayed-reports-from-dataloader-design-doc.md) Filter TRF (exch=4) trades — remove stale FINRA delayed reports from DataLoader, design doc
+- [x] 9.25 Fix backtest pre-filter: remove silent fallback to market_snapshot_collector, require market_snapshot data
+- [x] 9.26 Build-snapshot unified pipeline: produce both market_snapshot_collector (raw) and market_snapshot (processed, subscribed tickers only) in one step, auto-process-from-collector
+- [x] 9.27 Align market_snapshot_collector schema with live collector: remove rank/change columns, add CREATE DATABASE, use jerry_trader namespace
+- [x] 9.28 Delete duplicate schemas copy.py, rename enrich→process terminology (CLI + code)
+- [x] 9.22 DataLoader bulk query — single CH query for all tickers instead of 82 roundtrips (10s→<1s)
+- [x] 9.23 Backtest date range batch run — support --date-range START END, reuse CH connection and rule loading across dates
+- [x] 9.29 build-snapshot --force flag — unified rerun switch to overwrite collector + snapshot data
+- [x] 9.30 process-snapshot vectorized rank — replace 3960-window Python loop with Polars over() rank, 16s→<1s
+- [x] 9.31 Pipeline progress bars — add tqdm to process-snapshot window loop, DataLoader ticker loading, backtest runner factor computation
+- [x] [9.32](roadmap/merge-build-process-snapshot.md) Merge build-snapshot + process-snapshot — remove process-snapshot subcommand, build-snapshot --force handles both tables
+- [x] [9.33](roadmap/check-verbose.md) check --verbose — show ticker-level gaps, time range issues, not just READY/MISSING
+- [x] [9.34](roadmap/date-range-parallel.md) Date range parallel execution — run multiple dates in parallel with ProcessPoolExecutor
+- [x] [9.35](roadmap/richer-signal-output.md) Richer signal output — show rule details, factor values at trigger time, not just aggregate stats
+- [x] [9.36](roadmap/dry-run-candidates-only.md) dry-run mode: preview pre-filter candidates without running factor/signal pipeline
+- [x] [9.37](roadmap/prefilter-subscription-logic.md) PreFilter use subscription logic — match live processor behavior (subscription rank vs snapshot rank)

@@ -41,12 +41,19 @@ class ExperimentLogger:
     _next_id: int
 
     def __init__(self, experiments_dir: Path | None = None):
-        self.experiments_dir = experiments_dir or EXPERIMENTS_DIR
-        self.experiments_dir.mkdir(parents=True, exist_ok=True)
+        """Initialize experiment logger.
 
-        # Today's directory
+        NOTE: Directory behavior is append-only:
+        - `mkdir(exist_ok=True)` preserves existing experiments
+        - `_get_next_id()` finds max ID + 1, never overwrites
+        - Knowledge accumulation across runs (not clearing)
+        """
+        self.experiments_dir = experiments_dir or EXPERIMENTS_DIR
+        self.experiments_dir.mkdir(parents=True, exist_ok=True)  # ← Append, not replace
+
+        # Today's directory (append-only)
         self.daily_dir = self.experiments_dir / datetime.now().strftime("%Y-%m-%d")
-        self.daily_dir.mkdir(parents=True, exist_ok=True)
+        self.daily_dir.mkdir(parents=True, exist_ok=True)  # ← Append, not replace
 
         # Knowledge base (single file)
         self.knowledge_file = self.experiments_dir / "knowledge.yaml"
@@ -195,8 +202,14 @@ class ExperimentLogger:
         return blockers
 
     def _extract_to_knowledge(self, exp_id: str, experiment: dict[str, Any]) -> None:
-        """Extract lessons to knowledge.yaml."""
-        # Load existing knowledge
+        """Extract lessons to knowledge.yaml.
+
+        NOTE: Knowledge file uses append-only semantics:
+        - Reads existing content first (never starts fresh)
+        - Appends new experiment reference + lessons
+        - Writes merged content back (preserves all history)
+        """
+        # Load existing knowledge (append-only: never start fresh)
         if self.knowledge_file.exists():
             with open(self.knowledge_file) as f:
                 knowledge = yaml.safe_load(f) or {"experiments": [], "lessons": []}

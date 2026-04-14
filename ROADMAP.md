@@ -66,7 +66,7 @@ System-wide coordination and backtest infrastructure.
 - [x] [6.19](roadmap/factor-plugin-architecture.md) Add factor unit test framework
 
 
-- [-] 6.21 Prepare 10+ trading days data for backtest validation
+- [x] 6.21 Prepare 10+ trading days data for backtest validation
 
   Prepare data from 2026-03-02 to 2026-03-12 (10 trading days). 03-13 already exists. Run: prepare --date 2026-03-01 --end-date 2026-03-15
 

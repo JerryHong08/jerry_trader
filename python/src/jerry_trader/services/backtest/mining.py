@@ -300,13 +300,23 @@ class StrategyMiner:
         Creates a mining experiment file in experiments/YYYY-MM-DD/
         with all candidate results.
 
+        NOTE: Directory is NOT cleared between runs — append-only design:
+        - `mkdir(parents=True, exist_ok=True)` preserves existing experiments
+        - `_get_next_id()` finds max existing ID + 1, never overwrites
+        - Knowledge accumulation: each run builds on prior findings
+        - Overwriting would lose historical mining results and accumulated lessons
+
+        This behavior is intentional for reproducibility and learning:
+        users can compare mining runs across time, track threshold evolution,
+        and see which strategies were discovered on which dates.
+
         Returns:
             experiment_id
         """
-        # Create daily directory
+        # Create daily directory (append-only, not clearing)
         today = datetime.now().strftime("%Y-%m-%d")
         daily_dir = EXPERIMENTS_DIR / today
-        daily_dir.mkdir(parents=True, exist_ok=True)
+        daily_dir.mkdir(parents=True, exist_ok=True)  # ← Append, not replace
 
         # Get next experiment ID
         existing = list(daily_dir.glob("mining_*.yaml"))
@@ -402,9 +412,17 @@ class StrategyMiner:
     def _update_knowledge(
         self, exp_id: str, date: str, results: list[MiningResult]
     ) -> None:
-        """Update knowledge.yaml with mining insights."""
+        """Update knowledge.yaml with mining insights.
+
+        NOTE: Knowledge file uses append-only semantics:
+        - Reads existing content (never starts fresh)
+        - Appends new experiment reference + lessons
+        - Writes back merged content (preserves all history)
+        This ensures accumulated insights persist across mining runs.
+        """
         knowledge_file = EXPERIMENTS_DIR / "knowledge.yaml"
 
+        # Load existing knowledge (append-only: never start fresh)
         if knowledge_file.exists():
             with open(knowledge_file) as f:
                 knowledge = yaml.safe_load(f) or {"experiments": [], "lessons": []}

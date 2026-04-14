@@ -515,13 +515,27 @@ def build_to_parquet(
         start_ns = None
         end_ns = None
 
-    # Load prev_close
+    # Load prev_close from the most recent trading day (not just date - 1)
     dt = datetime.strptime(date, "%Y-%m-%d")
-    prev_date = (dt - timedelta(days=1)).strftime("%Y-%m-%d")
-    prev_close_path = _day_aggs_path(prev_date)
+    prev_close_df = pl.DataFrame(
+        {
+            "ticker": pl.Series([], dtype=pl.String),
+            "prev_close": pl.Series([], dtype=pl.Float64),
+            "prev_volume": pl.Series([], dtype=pl.Float64),
+        }
+    )
 
-    prev_close_df = pl.DataFrame({"ticker": [], "prev_close": [], "prev_volume": []})
-    if prev_close_path.exists():
+    # Look back up to 7 days to find the previous trading day's day_aggs
+    prev_date = None
+    for i in range(1, 8):
+        candidate_date = (dt - timedelta(days=i)).strftime("%Y-%m-%d")
+        candidate_path = _day_aggs_path(candidate_date)
+        if candidate_path.exists():
+            prev_date = candidate_date
+            break
+
+    if prev_date:
+        prev_close_path = _day_aggs_path(prev_date)
         prev_close_df = (
             pl.scan_parquet(str(prev_close_path))
             .select(["ticker", "close", "volume"])
@@ -536,7 +550,7 @@ def build_to_parquet(
         prev_close_df = _adjust_prev_close_for_splits(prev_close_df, date)
     else:
         logger.warning(
-            f"No day_aggs for {prev_date} — prev_close and prev_volume will be null"
+            f"No day_aggs found for previous 7 days — prev_close and prev_volume will be null"
         )
 
     # Stage 1a: Aggregate trades

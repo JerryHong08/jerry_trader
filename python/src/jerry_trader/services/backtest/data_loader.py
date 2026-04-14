@@ -1,7 +1,10 @@
 """Data loader for batch backtest.
 
-Loads trades and quotes from ClickHouse (preferred) or Parquet (fallback),
-and 1m bars from ClickHouse for a list of candidate tickers on a given date.
+Loads trades and quotes from ClickHouse (required), and 1m bars from ClickHouse
+for a list of candidate tickers on a given date.
+
+No Parquet fallback - monolithic files require full scan per ticker (233s/ticker).
+Users must run import-ticks before backtest.
 """
 
 from __future__ import annotations
@@ -62,34 +65,38 @@ class DataLoader:
             trades_map = self._load_trades_batch_ch(symbols, date, start_ms, end_ms)
             quotes_map = self._load_quotes_batch_ch(symbols, date, start_ms, end_ms)
 
-        # 2. Build TickerData, fall back to parquet for missing tickers
-        try:
-            from tqdm import tqdm
+        # 2. Build TickerData, check CH coverage
+        # NOTE: We no longer fallback to Parquet because monolithic files (~3GB)
+        # require full scan per ticker (233s/ticker). Instead, raise error if
+        # CH doesn't have tickdata, prompting user to run import-ticks first.
+        missing_trades: list[str] = []
+        missing_quotes: list[str] = []
 
-            cand_iter = tqdm(candidates, desc="Loading tickers", unit="ticker")
-        except ImportError:
-            cand_iter = candidates
-
-        for candidate in cand_iter:
+        for candidate in candidates:
             symbol = candidate.symbol
-
             trades = trades_map.get(symbol, [])
-            if not trades and config.trades_dir:
-                trades = self._load_trades_parquet(
-                    symbol, date.replace("-", ""), config.trades_dir
-                )
-
             quotes = quotes_map.get(symbol, [])
-            if not quotes and config.quotes_dir:
-                quotes = self._load_quotes_parquet(
-                    symbol, date.replace("-", ""), config.quotes_dir
-                )
+
+            if not trades:
+                missing_trades.append(symbol)
+            if not quotes:
+                missing_quotes.append(symbol)
 
             result[symbol] = TickerData(
                 symbol=symbol,
                 trades=trades,
                 quotes=quotes,
                 candidate=candidate,
+            )
+
+        # Check coverage - fail fast if missing data
+        if missing_trades or missing_quotes:
+            # Deduplicate missing tickers
+            missing = sorted(set(missing_trades + missing_quotes))
+            raise RuntimeError(
+                f"ClickHouse has no tickdata for {len(missing)} tickers: {missing[:10]}{'...' if len(missing) > 10 else ''}\n"
+                f"  → Run: poetry run python -m jerry_trader.services.backtest.data.cli import-ticks --date {date}\n"
+                f"  Or pass specific tickers: --tickers {','.join(missing[:5])}"
             )
 
         # 3. Load 1m bars from ClickHouse (batch for all candidates)
@@ -291,40 +298,6 @@ class DataLoader:
             ]
         except Exception as e:
             logger.debug(f"CH quotes load failed for {symbol}: {e}")
-            return []
-
-    # =========================================================================
-    # Parquet loaders (fallback)
-    # =========================================================================
-
-    @staticmethod
-    def _load_trades_parquet(
-        symbol: str, date_yyyymmdd: str, trades_dir: str
-    ) -> list[tuple[int, float, int]]:
-        """Load trades from Parquet via Rust."""
-        if not trades_dir:
-            return []
-        try:
-            from jerry_trader._rust import load_trades_from_parquet
-
-            return load_trades_from_parquet(trades_dir, symbol, date_yyyymmdd)
-        except Exception as e:
-            logger.warning(f"Trades load failed for {symbol}: {e}")
-            return []
-
-    @staticmethod
-    def _load_quotes_parquet(
-        symbol: str, date_yyyymmdd: str, quotes_dir: str
-    ) -> list[tuple[int, float, float, int, int]]:
-        """Load quotes from Parquet via Rust."""
-        if not quotes_dir:
-            return []
-        try:
-            from jerry_trader._rust import load_quotes_from_parquet
-
-            return load_quotes_from_parquet(quotes_dir, symbol, date_yyyymmdd)
-        except Exception as e:
-            logger.warning(f"Quotes load failed for {symbol}: {e}")
             return []
 
     # =========================================================================

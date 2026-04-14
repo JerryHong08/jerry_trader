@@ -187,10 +187,10 @@ class BacktestRunner:
     # ─────────────────────────────────────────────────────────────────────────
 
     def _step_prefilter(self, config: BacktestConfig):
-        """Step 1: Pre-filter candidates from market_snapshot.
+        """Step 1: Pre-filter candidates from market_snapshot_collector.
 
-        If market_snapshot has no data for this date, auto-runs
-        process_from_collector to populate it.
+        If collector has no data for this date, auto-runs build()
+        to populate collector + process to market_snapshot.
         """
         if not self._ch:
             logger.warning("No ClickHouse client — cannot pre-filter")
@@ -208,16 +208,19 @@ class BacktestRunner:
         try:
             candidates = prefilter.find(config.date, config.pre_filter)
         except RuntimeError:
-            # market_snapshot empty — auto-process from collector
-            logger.info("  market_snapshot empty, auto-processing from collector...")
-            from jerry_trader.services.backtest.data.snapshot_builder import (
-                process_from_collector,
-            )
+            # Collector empty — auto-build collector + process to market_snapshot
+            logger.info("  collector empty, auto-building snapshot...")
+            from jerry_trader.platform.config.session import make_session_id
+            from jerry_trader.services.backtest.data.snapshot_builder import build
 
-            process_from_collector(
+            date_compact = config.date.replace("-", "")
+            session_id = make_session_id(replay_date=date_compact)
+            build(
                 date=config.date,
                 ch_client=self._ch,
                 database=database,
+                mode="replay",
+                session_id=session_id,
             )
             candidates = prefilter.find(config.date, config.pre_filter)
 

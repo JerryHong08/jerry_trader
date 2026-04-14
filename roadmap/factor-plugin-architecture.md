@@ -278,6 +278,92 @@ class TimeframeManager:
 
 ---
 
+---
+
+## 2026-04-14 新增：Factor Definition Catalog
+
+### 设计动机
+
+Agent 需要"理解"因子，但不应该预设阈值（阈值是实验结论）。
+
+### 职责分离
+
+| 来源 | 内容 | 示例 |
+|------|------|------|
+| `factors.yaml` | 定义、公式、定性解读 | `formula`, `interpretation` |
+| `knowledge.yaml` | 实验得出的阈值结论 | `"rel_vol > 2.0 → 60% win"` |
+| 代码 docstring | 实现细节、edge cases | `"warmup returns NaN if < 5 bars"` |
+
+### factors.yaml 结构（扩展后）
+
+```yaml
+trade_rate:
+  class: TradeRate
+  type: trade
+  params:
+    window_ms: 20000
+    min_trades: 5
+  display:
+    name: TradeRate
+    description: Trade rate (trades per second)
+    color: "#f97316"
+    priceScale: right
+    mode: panel
+  definition:                      # Agent-facing definition
+    formula: "count(trades_in_window) / window_seconds"
+    unit: "trades/second"
+    interpretation:
+      - "Higher values = more active trading"
+      - "Spikes indicate momentum events"
+      - "Sustained high rate = continuous participation"
+    data_source: trade ticks
+    warmup: requires min_trades in window
+  timeframes:
+    - trade
+```
+
+### 不包含的内容
+
+**阈值数值不在 definition 中**，因为：
+- 阈值是实验结论，不是定义的一部分
+- 不同 ticker 可能需要不同阈值（BIAF vs KIDZ）
+- 不同市场环境阈值可能变化（volatile vs calm）
+
+阈值通过 backtest 实验积累在 `knowledge.yaml`：
+```yaml
+lessons:
+  - exp_id: exp_001
+    lesson: "trade_rate > 100 + rel_vol > 2.0 → 60% win rate on momentum stocks"
+  - exp_id: exp_003
+    lesson: "BIAF: optimal rel_vol threshold is 1.5, not 2.0"
+```
+
+### Agent 查询流程
+
+```
+1. get_factor_definition("relative_volume") → 理解因子含义
+2. get_all_lessons() → 查找相关阈值实验结论
+3. 设计 rule（基于实验结论的阈值）
+4. backtest 验证 → 新结论写入 knowledge.yaml
+```
+
+### 查询函数实现
+
+```python
+# experiment_logger.py 扩展
+def get_factor_definition(factor_name: str) -> dict | None:
+    """从 factors.yaml 读取因子定义"""
+    import yaml
+    with open("config/factors.yaml") as f:
+        config = yaml.safe_load(f)
+    factor = config.get("factors", {}).get(factor_name)
+    if factor:
+        return factor.get("definition")
+    return None
+```
+
+---
+
 ## 设计取舍
 
 | 决策 | 选择 | 原因 |
@@ -432,6 +518,78 @@ result = runner.run()
 - Mining 直接使用内存中的 Rule 对象
 
 **相关任务**：Task 6.20 — 已完成
+
+### 2026-04-14 讨论：统一 Factor 接口（Batch + Incremental）
+
+#### 背景
+
+Factor Engine 需要支持两种场景：
+- **Backtest CLI**: Batch 计算（一次性传入历史数据）
+- **实时计算**: Incremental 更新（逐 bar/tick 增量）
+
+当前问题：两套代码（Rust 函数 + Python Indicator），维护两份。
+
+#### 设计方向：Rust 统一 Factor Trait
+
+```rust
+// 统一接口（支持 batch + incremental）
+pub trait Factor: Send + Sync {
+    fn name(&self) -> &str;
+
+    // Batch mode: 传入历史，一次性计算（backtest 用）
+    fn compute_batch(&self, history: &[Bar]) -> Vec<f64>;
+
+    // Incremental mode: 增量更新（实时用）
+    fn update(&mut self, bar: &Bar) -> Option<f64>;
+
+    // Reset for new ticker/session
+    fn reset(&mut self);
+}
+
+// 实现一次，两种场景都能用
+pub struct RelativeVolume {
+    window: usize,
+    volumes: VecDeque<f64>,  // 内部状态
+}
+
+impl Factor for RelativeVolume {
+    fn compute_batch(&self, history: &[Bar]) -> Vec<f64> {
+        // 遍历 history，返回每个 bar 的 rel_vol
+    }
+
+    fn update(&mut self, bar: &Bar) -> Option<f64> {
+        // 增量：push bar.volume，计算当前 rel_vol
+    }
+}
+```
+
+#### 热插拔流程（简化）
+
+```
+添加新因子:
+
+1. Rust: 写 Factor struct + impl Factor trait
+2. 类内自注册: inventory::submit! 或 lazy_static
+3. factors.yaml: 配置 definition + params
+
+完成 → Batch + 实时都支持，无需 Python Indicator 类。
+```
+
+#### 与设计原则一致
+
+| 原则 | 符合情况 |
+|------|---------|
+| "写类"核心方式 | ✅ Rust struct |
+| 不限制可能性 | ✅ 可有复杂状态、warmup、edge cases |
+| 自动化注册 | ✅ 类内自注册 |
+| 不预设阈值 | ✅ 阈值在 knowledge.yaml |
+
+#### 相关任务
+
+- Task 12.1: 设计 Rust 统一 Factor trait 接口
+- Task 12.2: 实现 RelativeVolume 统一接口（验证设计）
+- Task 12.3: 迁移现有 factors（EMA, TradeRate）到统一 trait
+- Task 12.4: 消除 Python Indicator 类（状态迁移到 Rust）
 
 ---
 

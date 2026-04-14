@@ -7,6 +7,16 @@
 #   - bar:   Updated on bar close (requires historical bars for warmup)
 #   - trade: Updated on each trade execution (requires trade stream)
 #   - quote: Updated on quote updates (requires bid/ask stream)
+#
+# Definition fields (agent-facing):
+#   - formula: Mathematical/logical definition (not implementation)
+#   - unit: Output unit or scale
+#   - interpretation: Qualitative meaning of values
+#   - data_source: What data it consumes
+#   - warmup: Minimum data required before valid output
+#
+# NOTE: Threshold values are NOT defined here. They are experimental conclusions
+# accumulated in knowledge.yaml through backtest validation.
 
 factors:
   # ────────────────────────────────────────────────────────────────────────
@@ -70,6 +80,15 @@ factors:
       color: "#f97316"  # orange
       priceScale: right
       mode: panel      # Separate panel below price
+    definition:
+      formula: "count(trades_in_window) / window_seconds"
+      unit: "trades/second"
+      interpretation:
+        - "Higher values = more active trading"
+        - "Spikes indicate momentum events"
+        - "Sustained high rate = continuous participation"
+      data_source: trade ticks
+      warmup: requires min_trades in window
     # trade-based factors apply to all timeframes (computed independently)
     timeframes:
       - trade
@@ -101,6 +120,15 @@ factors:
   #     description: Volume relative to 20-period average
   #     color: "#f59e0b"
   #     priceScale: right
+  #   definition:
+  #     formula: "current_bar_volume / mean(last_N_bars_volume)"
+  #     unit: "ratio (1.0 = average)"
+  #     interpretation:
+  #       - "> 1.0 = above average activity"
+  #       - "< 1.0 = below average activity"
+  #       - "Higher values indicate stronger market participation"
+  #     data_source: bar volume
+  #     warmup: requires N bars history
   #   timeframes:
   #     - 1m
   #     - 5m

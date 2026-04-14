@@ -766,6 +766,21 @@ class RawDataLoader:
         paths = path_fetcher.data_dir_calculate()
         print(f"Loading data from {len(paths)} paths")
 
+        if len(paths) == 0:
+            # Return empty LazyFrame with correct schema instead of failing
+            return pl.DataFrame(
+                schema={
+                    "ticker": pl.String,
+                    "volume": pl.UInt64,
+                    "open": pl.Float32,
+                    "close": pl.Float32,
+                    "high": pl.Float32,
+                    "low": pl.Float32,
+                    "window_start": pl.Int64,
+                    "transactions": pl.UInt32,
+                }
+            ).lazy()
+
         if use_duck_db:
             return self._load_with_duckdb(paths, use_s3)
         else:
@@ -992,6 +1007,11 @@ class StockDataLoader:
         self, lf: pl.LazyFrame, config: LoaderConfig, start_date: str, end_date: str
     ) -> pl.LazyFrame:
         """Fill missing timestamps and resample if needed"""
+        # Check if LazyFrame is empty first (use fetch for efficiency)
+        if lf.fetch(1).height == 0:
+            print("No data to fill - returning empty frame")
+            return lf
+
         # Determine if daily or intraday
         match = re.match(r"(\d+)(mo|[mhdwqy])", config.timeframe.lower())
         if not match:
@@ -1077,7 +1097,7 @@ class StockDataLoader:
     ) -> pl.LazyFrame:
         """Generate complete timestamp range for each ticker"""
         ticker_ranges = (
-            lf.group_by("ticker")
+            lf.group_by("ticker", maintain_order=True)
             .agg(
                 [
                     pl.col("timestamps").min().alias("first_trade_time"),

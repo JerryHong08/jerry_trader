@@ -63,8 +63,12 @@ System-wide coordination and backtest infrastructure.
 
 - [ ] [6.18](roadmap/factor-plugin-architecture.md) Document new factor validation SOP
 
-- [ ] [6.19](roadmap/factor-plugin-architecture.md) Add factor unit test framework
+- [x] [6.19](roadmap/factor-plugin-architecture.md) Add factor unit test framework
 
+
+- [-] 6.21 Prepare 10+ trading days data for backtest validation
+
+  Prepare data from 2026-03-02 to 2026-03-12 (10 trading days). 03-13 already exists. Run: prepare --date 2026-03-01 --end-date 2026-03-15
 
 ## 7. AI Agent Layer
 
@@ -127,11 +131,19 @@ Enhancements and additional modules.
 
 
 
+## 12. Factor Engine Unified Architecture
+
+- [ ] [12.1](roadmap/factor-plugin-architecture.md) Design Rust unified Factor trait interface — compute_batch + update methods
+
+- [ ] [12.2](roadmap/factor-plugin-architecture.md) Implement RelativeVolume unified interface — validate design works for batch + incremental
+
+- [ ] [12.3](roadmap/factor-plugin-architecture.md) Migrate existing factors to unified trait — EMA, TradeRate, VWAPDeviation
+
+- [ ] [12.4](roadmap/factor-plugin-architecture.md) Eliminate Python Indicator classes — state moves to Rust, Python only configures
+
 ## Design Concerns
 
 Architectural decisions needing discussion.
-
-(none currently)
 
 ## Open Issues
 

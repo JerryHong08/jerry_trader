@@ -31,6 +31,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
@@ -309,6 +310,7 @@ def run_single_date(
     ch_config: dict | None = None,
 ) -> "BacktestResult":
     """Run backtest for a single date."""
+    from jerry_trader.platform.config.config import lake_data_dir
     from jerry_trader.services.backtest.config import PreFilterConfig
     from jerry_trader.services.backtest.runner import BacktestRunner
 
@@ -326,6 +328,14 @@ def run_single_date(
         new_entry_only=not args.all_top_n,  # --all-top-n disables new_entry_only
     )
 
+    # Auto-set trades_dir/quotes_dir to lake_data_dir if not specified
+    trades_dir = args.trades_dir or os.path.join(
+        lake_data_dir, "us_stocks_sip", "trades_v1"
+    )
+    quotes_dir = args.quotes_dir or os.path.join(
+        lake_data_dir, "us_stocks_sip", "quotes_v1"
+    )
+
     config = BacktestConfig(
         date=date,
         rules_dir=args.rules,
@@ -334,8 +344,8 @@ def run_single_date(
         output_clickhouse=ch_client is not None,
         output_console=not args.no_console,
         clickhouse_config=ch_config,
-        trades_dir=args.trades_dir,
-        quotes_dir=args.quotes_dir,
+        trades_dir=trades_dir,
+        quotes_dir=quotes_dir,
         candidates_only=args.candidates_only,
         detailed=args.detailed,
         pre_filter=pre_filter,

@@ -104,7 +104,7 @@ def download_file(
     s3_key = _s3_key_for_date(data_type, date)
     local_path = _local_raw_path(data_type, date)
 
-    # Skip if already exists
+    # Skip if already exists (final decompressed or complete .gz)
     final_path = (
         local_path[:-3] if decompress and local_path.endswith(".gz") else local_path
     )
@@ -112,7 +112,40 @@ def download_file(
         logger.info(f"Already exists: {final_path}")
         return final_path
 
+    # Check for complete .gz file (if not decompressing)
+    if not decompress and os.path.exists(local_path):
+        # Verify it's complete by comparing with remote size
+        s3 = _get_s3_client()
+        try:
+            obj = s3.head_object(Bucket=BUCKET_NAME, Key=s3_key)
+            total_size = obj["ContentLength"]
+            if os.path.getsize(local_path) >= total_size:
+                logger.info(f"Already exists: {local_path}")
+                return local_path
+        except Exception:
+            pass
+
     os.makedirs(os.path.dirname(local_path), exist_ok=True)
+
+    # Clean up any stale temporary files from interrupted downloads
+    # boto3 creates temp files like: file.gz.XXXXXX or file.gz.XXXXXX.XXXXXX
+    temp_patterns = [
+        local_path + ".tmp",
+        local_path + ".partial",
+    ]
+    # Also clean up any files starting with local_path but with extra suffixes
+    parent_dir = os.path.dirname(local_path)
+    base_name = os.path.basename(local_path)
+    if os.path.exists(parent_dir):
+        for f in os.listdir(parent_dir):
+            if f.startswith(base_name) and f != base_name:
+                # This is a temp/partial file
+                temp_file = os.path.join(parent_dir, f)
+                logger.info(f"Cleaning up stale temp file: {temp_file}")
+                try:
+                    os.remove(temp_file)
+                except Exception as e:
+                    logger.warning(f"Failed to remove temp file {temp_file}: {e}")
 
     s3 = _get_s3_client()
 
@@ -169,17 +202,17 @@ def download_file(
                     f"Downloading {date} {data_type} ({total_size / 1e9:.1f} GB)"
                 )
 
-                # Use callback for progress
-                def callback(bytes_transferred):
-                    if pbar:
-                        pbar.update(bytes_transferred)
-
-                s3.download_file(
-                    BUCKET_NAME,
-                    s3_key,
-                    local_path,
-                    Callback=callback if show_progress else None,
+                # Use get_object instead of download_file for better resume support
+                # download_file creates temp files that can't be resumed
+                response = s3.get_object(
+                    Bucket=BUCKET_NAME,
+                    Key=s3_key,
                 )
+                with open(local_path, "wb") as f:
+                    for chunk in response["Body"].iter_chunks(chunk_size=1024 * 1024):
+                        f.write(chunk)
+                        if pbar:
+                            pbar.update(len(chunk))
 
             if pbar:
                 pbar.close()

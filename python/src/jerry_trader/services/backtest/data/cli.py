@@ -428,53 +428,144 @@ def cmd_import_ticks(args):
 
 
 def cmd_prepare(args):
-    """Full pipeline: download → convert → check → build-snapshot."""
+    """Full pipeline: download → convert → check → build-snapshot.
+
+    Supports single date or date range (--end-date).
+    """
+    from datetime import timedelta
+
+    from jerry_trader.platform.config.session import make_session_id
     from jerry_trader.services.backtest.data.checker import (
         DataStatus,
         check_date,
+        check_date_range,
         print_check_result,
+        print_date_range_summary,
     )
     from jerry_trader.services.backtest.data.converter import convert_date_range
     from jerry_trader.services.backtest.data.downloader import download_date_range
+    from jerry_trader.services.backtest.data.snapshot_builder import build
 
-    date = args.date
-    data_types = ["trades_v1", "quotes_v1", "day_aggs_v1"]
-    ch_client = _get_ch_client() if not args.no_ch else None
+    # Determine dates to process
+    start_date = args.date
+    end_date = args.end_date or args.date
 
-    print(f"\n{'=' * 60}")
-    print(f"  PREPARE — {date}")
-    print(f"{'=' * 60}")
+    if end_date != start_date:
+        # Date range mode
+        print(f"\n{'=' * 60}")
+        print(f"  PREPARE — {start_date} to {end_date}")
+        print(f"{'=' * 60}")
 
-    # Step 1: Download
-    print(f"\n[1/4] Downloading...")
-    try:
-        download_date_range(date, date, data_types=data_types, max_workers=2)
-    except Exception as e:
-        print(f"  Download failed (non-fatal): {e}")
+        dates = _generate_dates(start_date, end_date)
+        print(f"  {len(dates)} trading days to prepare")
 
-    # Step 2: Convert
-    print(f"\n[2/4] Converting...")
-    convert_date_range(date, date, data_types=["trades_v1", "quotes_v1"])
+        # Step 1: Download (date range)
+        print(f"\n[1/4] Downloading {len(dates)} dates...")
+        try:
+            download_date_range(
+                start_date,
+                end_date,
+                data_types=["trades_v1", "quotes_v1", "day_aggs_v1"],
+                max_workers=2,
+            )
+        except Exception as e:
+            print(f"  Download failed (non-fatal): {e}")
 
-    # Step 3: Check
-    print(f"\n[3/4] Checking...")
-    result = check_date(date, ch_client=ch_client)
-    print_check_result(result)
+        # Step 2: Convert (date range)
+        print(f"\n[2/4] Converting {len(dates)} dates...")
+        convert_date_range(start_date, end_date, data_types=["trades_v1", "quotes_v1"])
 
-    # Step 4: Build snapshot if missing
-    if result.snapshot.status != DataStatus.READY and ch_client:
-        print(f"\n[4/4] Building snapshot...")
-        from jerry_trader.services.backtest.data.snapshot_builder import (
-            build_and_insert,
-        )
+        # Step 3: Check (date range)
+        print(f"\n[3/4] Checking {len(dates)} dates...")
+        ch_client = _get_ch_client() if not args.no_ch else None
+        results = check_date_range(start_date, end_date, ch_client=ch_client)
+        print_date_range_summary(results)
 
-        build_and_insert(date, ch_client, database=args.database)
+        # Step 4: Build snapshot for each date that needs it
+        print(f"\n[4/4] Building snapshots...")
+        if ch_client:
+            for date in dates:
+                result = check_date(date, ch_client=ch_client)
+                if result.snapshot.status != DataStatus.READY:
+                    print(f"  Building {date}...")
+                    date_compact = date.replace("-", "")
+                    session_id = make_session_id(replay_date=date_compact)
+                    build(
+                        date,
+                        ch_client,
+                        database=args.database,
+                        mode="replay",
+                        session_id=session_id,
+                    )
+                else:
+                    print(f"  {date}: already exists — skipping")
+
+        print(f"\n{'=' * 60}")
+        print(f"  PREPARE COMPLETE — {len(dates)} dates")
+        print(f"{'=' * 60}\n")
+
     else:
-        print(f"\n[4/4] Snapshot already exists — skipping")
+        # Single date mode (original logic)
+        date = start_date
+        data_types = ["trades_v1", "quotes_v1", "day_aggs_v1"]
+        ch_client = _get_ch_client() if not args.no_ch else None
 
-    print(f"\n{'=' * 60}")
-    print(f"  PREPARE COMPLETE — {result.summary}")
-    print(f"{'=' * 60}\n")
+        print(f"\n{'=' * 60}")
+        print(f"  PREPARE — {date}")
+        print(f"{'=' * 60}")
+
+        # Step 1: Download
+        print(f"\n[1/4] Downloading...")
+        try:
+            download_date_range(date, date, data_types=data_types, max_workers=2)
+        except Exception as e:
+            print(f"  Download failed (non-fatal): {e}")
+
+        # Step 2: Convert
+        print(f"\n[2/4] Converting...")
+        convert_date_range(date, date, data_types=["trades_v1", "quotes_v1"])
+
+        # Step 3: Check
+        print(f"\n[3/4] Checking...")
+        result = check_date(date, ch_client=ch_client)
+        print_check_result(result)
+
+        # Step 4: Build snapshot if missing
+        if result.snapshot.status != DataStatus.READY and ch_client:
+            print(f"\n[4/4] Building snapshot...")
+            date_compact = date.replace("-", "")
+            session_id = make_session_id(replay_date=date_compact)
+            build(
+                date,
+                ch_client,
+                database=args.database,
+                mode="replay",
+                session_id=session_id,
+            )
+        else:
+            print(f"\n[4/4] Snapshot already exists — skipping")
+
+        print(f"\n{'=' * 60}")
+        print(f"  PREPARE COMPLETE — {result.summary}")
+        print(f"{'=' * 60}\n")
+
+
+def _generate_dates(start_date: str, end_date: str) -> list[str]:
+    """Generate list of trading dates (skip weekends)."""
+    from datetime import datetime, timedelta
+
+    start = datetime.strptime(start_date, "%Y-%m-%d").date()
+    end = datetime.strptime(end_date, "%Y-%m-%d").date()
+
+    dates = []
+    current = start
+    while current <= end:
+        # Skip weekends (Saturday=5, Sunday=6)
+        if current.weekday() < 5:
+            dates.append(current.strftime("%Y-%m-%d"))
+        current += timedelta(days=1)
+
+    return dates
 
 
 def cmd_estimate(args):
@@ -630,6 +721,9 @@ def main():
     # prepare (full pipeline)
     p_prep = subparsers.add_parser(
         "prepare", parents=[common], help="Full prepare pipeline"
+    )
+    p_prep.add_argument(
+        "--end-date", help="End date for range (default: same as --date)"
     )
     p_prep.add_argument(
         "--database", default="jerry_trader", help="ClickHouse database"

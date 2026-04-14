@@ -37,6 +37,25 @@ def load_trades_from_parquet(
     """
     ...
 
+def load_quotes_from_parquet(
+    lake_data_dir: str,
+    symbol: str,
+    date_yyyymmdd: str,
+    end_ts_ms: int = 0,
+    start_ts_ms: int = 0,
+) -> list[tuple[int, float, float, int, int]]:
+    """Load quotes from parquet for a single symbol/date.
+
+    Tries partitioned file first, falls back to monolithic.
+    Returns List[(ts_ms, bid, ask, bid_size, ask_size)] sorted ascending.
+
+    If start_ts_ms > 0, only quotes with timestamp >= start_ts_ms are returned.
+    If end_ts_ms > 0, only quotes with timestamp < end_ts_ms are returned.
+    Both filters use predicate pushdown at scan time.
+    Raises RuntimeError if no parquet file is found.
+    """
+    ...
+
 class BarBuilder:
     """High-performance tick-to-OHLCV bar builder.
 

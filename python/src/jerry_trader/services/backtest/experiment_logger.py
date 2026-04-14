@@ -310,3 +310,33 @@ def get_ticker_insights(ticker: str) -> list[dict[str, Any]]:
             )
 
     return insights
+
+
+def get_factor_definition(factor_name: str) -> dict[str, Any] | None:
+    """Get factor definition from factors.yaml (Agent-facing).
+
+    Returns definition fields: formula, unit, interpretation, data_source, warmup.
+    Threshold values are NOT included — they are experimental conclusions in knowledge.yaml.
+
+    Example:
+        >>> get_factor_definition("trade_rate")
+        {
+            "formula": "count(trades_in_window) / window_seconds",
+            "unit": "trades/second",
+            "interpretation": [...],
+            "data_source": "trade ticks",
+            "warmup": "requires min_trades in window"
+        }
+    """
+    factors_path = Path("config/factors.yaml")
+    if not factors_path.exists():
+        logger.warning(f"factors.yaml not found at {factors_path}")
+        return None
+
+    with open(factors_path) as f:
+        config = yaml.safe_load(f)
+
+    factor = config.get("factors", {}).get(factor_name)
+    if factor:
+        return factor.get("definition")
+    return None

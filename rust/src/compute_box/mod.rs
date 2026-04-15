@@ -7,8 +7,10 @@
 //
 // All data stays in Rust memory, eliminating Python↔Rust FFI overhead.
 
+mod bar_builder_engine;
 mod data_layer;
 mod ws_publisher;
 
+pub use bar_builder_engine::BarBuilderEngine;
 pub use data_layer::{DataLayer, Trade, BootstrapStatus};
 pub use ws_publisher::{WSPublisher, WsCommand, WsMessage};

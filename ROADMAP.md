@@ -167,8 +167,8 @@ Enhancements and additional modules.
 - [x] [13.3](roadmap/rust-compute-box-architecture.md) WS Server - tokio async, Port 8000
 - [x] [13.4](roadmap/rust-compute-box-architecture.md) Subscribe/Unsubscribe handlers
 - [x] [13.5](roadmap/rust-compute-box-architecture.md) Bar + Factor 消息推送，SubscribeAck/BootstrapReady 协议
-- [ ] [13.6](roadmap/rust-compute-box-architecture.md) BarBuilderEngine - bars 直接写入 buffer + CH
-- [ ] [13.7](roadmap/rust-compute-box-architecture.md) Bar broadcast channel → FactorEngineCore
+- [-] [13.6](roadmap/rust-compute-box-architecture.md) BarBuilderEngine - bars 直接写入 buffer + CH
+- [x] [13.7](roadmap/rust-compute-box-architecture.md) Bar broadcast channel → FactorEngineCore
 - [ ] [13.8](roadmap/rust-compute-box-architecture.md) FactorEngineCore - subscribe bar stream, compute factors
 - [ ] [13.9](roadmap/rust-compute-box-architecture.md) Factors 直接写入 CH + 推送 WS
 - [ ] [13.10](roadmap/rust-compute-box-architecture.md) ChartBFF - 只保留 HTTP API（历史查询）

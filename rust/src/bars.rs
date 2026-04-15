@@ -1265,6 +1265,117 @@ impl BarBuilder {
 // ── BarBuilder (internal methods, not exposed to Python) ────────────
 
 impl BarBuilder {
+    /// Drain completed_queue without Python dict conversion.
+    ///
+    /// Returns CompletedBar structs directly, handling meeting bar merge.
+    /// Used internally by BarBuilderEngine (no FFI overhead).
+    pub fn drain_completed_raw(&mut self) -> Vec<CompletedBar> {
+        let mut out = Vec::with_capacity(self.completed_queue.len());
+
+        while let Some(cb) = self.completed_queue.pop_front() {
+            let key = match Timeframe::from_label(cb.timeframe) {
+                Some(tf) => (cb.ticker.clone(), tf),
+                None => {
+                    out.push(cb);
+                    continue;
+                }
+            };
+
+            let needs_merge_check = self.meeting_bar_starts.contains_key(&key);
+
+            if !needs_merge_check {
+                out.push(cb);
+                continue;
+            }
+
+            // Reconstruct BarState for merge logic
+            let ws_bar_state = BarState {
+                open: cb.open,
+                high: cb.high,
+                low: cb.low,
+                close: cb.close,
+                volume: cb.volume,
+                trade_count: cb.trade_count,
+                vwap_numer: cb.vwap * cb.volume,
+                vwap_denom: cb.volume,
+                bar_start: cb.bar_start,
+                bar_end: cb.bar_end,
+                session: match cb.session {
+                    "premarket" => Session::Premarket,
+                    "regular" => Session::Regular,
+                    "afterhours" => Session::Afterhours,
+                    _ => Session::Closed,
+                },
+                seq: 0,
+            };
+
+            let tf = key.1;
+            match self.try_merge_meeting_bar(&cb.ticker, tf, &ws_bar_state) {
+                MergeResult::NotAMeetingBar => {
+                    out.push(cb);
+                }
+                MergeResult::Merged(merged) => {
+                    out.push(merged.to_completed(&cb.ticker, tf));
+                }
+                MergeResult::Deferred => {
+                    // WS bar deferred — don't return it
+                }
+            }
+        }
+
+        out
+    }
+
+    /// Public constructor for internal use (BarBuilderEngine).
+    pub fn new_pub(timeframes: Option<Vec<String>>) -> Self {
+        Self::new(timeframes).unwrap()
+    }
+
+    /// Public wrapper for ingest_trade (for internal use by BarBuilderEngine).
+    ///
+    /// Uses pyo3::Python::attach to acquire the GIL.
+    pub fn ingest_trade_pub(
+        &mut self,
+        ticker: &str,
+        price: f64,
+        size: f64,
+        timestamp_ms: i64,
+    ) {
+        pyo3::Python::attach(|py| {
+            let _ = self.ingest_trade(py, ticker, price, size, timestamp_ms);
+        });
+    }
+
+    /// Public wrapper for ingest_trades_batch (for internal use by BarBuilderEngine).
+    pub fn ingest_trades_batch_pub(
+        &mut self,
+        ticker: &str,
+        trades: Vec<(i64, f64, f64)>,
+    ) {
+        pyo3::Python::attach(|py| {
+            let _ = self.ingest_trades_batch(py, ticker, trades);
+        });
+    }
+
+    /// Public wrapper for advance (for internal use by BarBuilderEngine).
+    pub fn advance_pub(&mut self, now_ms: i64) {
+        pyo3::Python::attach(|py| {
+            let _ = self.advance(py, now_ms);
+        });
+    }
+
+    /// Public wrapper for flush (for internal use by BarBuilderEngine).
+    pub fn flush_pub(&mut self) {
+        pyo3::Python::attach(|py| {
+            let _ = self.flush(py);
+        });
+    }
+
+    /// Public wrapper for active_tickers (for internal use by BarBuilderEngine).
+    pub fn active_tickers_pub(&self) -> Vec<String> {
+        self.active_tickers()
+    }
+
     /// Generate forward-fill continuation bars for a gap between the last
     /// closed bar and a new trade's bar_start.
     ///
@@ -1277,7 +1388,7 @@ impl BarBuilder {
         tf: Timeframe,
         ticker: &str,
     ) -> Vec<CompletedBar> {
-        let dur = tf.duration_ms();
+        let _dur = tf.duration_ms();  // unused but kept for reference
         let mut filled = Vec::new();
 
         let mut fill_start = last_closed_end;

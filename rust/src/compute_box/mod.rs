@@ -10,9 +10,11 @@
 mod bar_builder_engine;
 mod ch_writer;
 mod data_layer;
+mod factor_engine_core;
 mod ws_publisher;
 
 pub use bar_builder_engine::BarBuilderEngine;
 pub use ch_writer::{CHWriter, CHBar, CHFactor};
 pub use data_layer::{DataLayer, Trade, BootstrapStatus};
+pub use factor_engine_core::{FactorEngineCore, FactorInstance};
 pub use ws_publisher::{WSPublisher, WsCommand, WsMessage};

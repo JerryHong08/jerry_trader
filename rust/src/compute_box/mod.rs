@@ -8,5 +8,7 @@
 // All data stays in Rust memory, eliminating Python↔Rust FFI overhead.
 
 mod data_layer;
+mod ws_publisher;
 
 pub use data_layer::{DataLayer, Trade, BootstrapStatus};
+pub use ws_publisher::{WSPublisher, WsCommand, WsMessage};

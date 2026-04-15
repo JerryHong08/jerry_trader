@@ -163,10 +163,10 @@ Enhancements and additional modules.
 ## 13. Rust Compute Box Architecture
 
 - [x] [13.1](roadmap/rust-compute-box-architecture.md) DataLayer - trades/bars_buffer 内部存储，get_recent_bars() 接口
-- [ ] [13.2](roadmap/rust-compute-box-architecture.md) BootstrapStatus - 状态管理（NotStarted/InProgress/Ready/Failed）
-- [ ] [13.3](roadmap/rust-compute-box-architecture.md) WS Server - tokio async, Port 8000
-- [ ] [13.4](roadmap/rust-compute-box-architecture.md) Subscribe/Unsubscribe handlers
-- [ ] [13.5](roadmap/rust-compute-box-architecture.md) Bar + Factor 消息推送，SubscribeAck/BootstrapReady 协议
+- [x] [13.2](roadmap/rust-compute-box-architecture.md) BootstrapStatus - 状态管理（NotStarted/InProgress/Ready/Failed）
+- [x] [13.3](roadmap/rust-compute-box-architecture.md) WS Server - tokio async, Port 8000
+- [x] [13.4](roadmap/rust-compute-box-architecture.md) Subscribe/Unsubscribe handlers
+- [x] [13.5](roadmap/rust-compute-box-architecture.md) Bar + Factor 消息推送，SubscribeAck/BootstrapReady 协议
 - [ ] [13.6](roadmap/rust-compute-box-architecture.md) BarBuilderEngine - bars 直接写入 buffer + CH
 - [ ] [13.7](roadmap/rust-compute-box-architecture.md) Bar broadcast channel → FactorEngineCore
 - [ ] [13.8](roadmap/rust-compute-box-architecture.md) FactorEngineCore - subscribe bar stream, compute factors

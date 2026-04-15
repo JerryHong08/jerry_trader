@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 
 mod bars;
 mod clock;
+mod compute_box;
 mod factor;
 mod factors;
 mod replayer;

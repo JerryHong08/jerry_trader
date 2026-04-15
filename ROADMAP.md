@@ -162,44 +162,24 @@ Enhancements and additional modules.
 
 ## 13. Rust Compute Box Architecture
 
-[详细设计](roadmap/rust-compute-box-architecture.md) — 将核心计算封装到 Rust 计算盒子，Python 只做配置层和 HTTP API。
-
-**Phase 1: DataLayer + Bootstrap Status**
-
-- [ ] [13.1](roadmap/rust-compute-box-architecture.md) DataLayer - trades/bars_buffer 内部存储，get_recent_bars() 接口
+- [x] [13.1](roadmap/rust-compute-box-architecture.md) DataLayer - trades/bars_buffer 内部存储，get_recent_bars() 接口
 - [ ] [13.2](roadmap/rust-compute-box-architecture.md) BootstrapStatus - 状态管理（NotStarted/InProgress/Ready/Failed）
-
-**Phase 2: WebSocket Publisher**
-
 - [ ] [13.3](roadmap/rust-compute-box-architecture.md) WS Server - tokio async, Port 8000
 - [ ] [13.4](roadmap/rust-compute-box-architecture.md) Subscribe/Unsubscribe handlers
 - [ ] [13.5](roadmap/rust-compute-box-architecture.md) Bar + Factor 消息推送，SubscribeAck/BootstrapReady 协议
-
-**Phase 3: BarBuilderEngine 内部化**
-
 - [ ] [13.6](roadmap/rust-compute-box-architecture.md) BarBuilderEngine - bars 直接写入 buffer + CH
 - [ ] [13.7](roadmap/rust-compute-box-architecture.md) Bar broadcast channel → FactorEngineCore
-
-**Phase 4: FactorEngineCore**
-
 - [ ] [13.8](roadmap/rust-compute-box-architecture.md) FactorEngineCore - subscribe bar stream, compute factors
 - [ ] [13.9](roadmap/rust-compute-box-architecture.md) Factors 直接写入 CH + 推送 WS
-
-**Phase 5: Python 层简化**
-
 - [ ] [13.10](roadmap/rust-compute-box-architecture.md) ChartBFF - 只保留 HTTP API（历史查询）
 - [ ] [13.11](roadmap/rust-compute-box-architecture.md) BarsBuilderService/FactorEngine Python 版删除
-
-**Phase 6: Live Mode**
-
 - [ ] [13.12](roadmap/rust-compute-box-architecture.md) Rust HTTP client - fetch Polygon trades 或 CH 统一数据源
 
 ## Design Concerns
 
-Architectural decisions needing discussion.
+- [ ] Architectural decisions needing discussion.
 
 ## Open Issues
 
-Known issues and bugs requiring attention.
-
+- [ ] Known issues and bugs requiring attention.
 - [ ] StateEngine (state_engine.py) still writes signal_events to InfluxDB — needs migration to ClickHouse

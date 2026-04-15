@@ -352,6 +352,10 @@ export function clearAllCaches() {
   localStorage.removeItem(NEWS_CACHE_KEY);
   localStorage.removeItem(DATA_STATUS_KEY);
   localStorage.removeItem(VERSION_CACHE_KEY);
+  // Also clear tickdata store caches (symbols, events, subscriptions)
+  // localStorage.removeItem('tickdata-symbols');
+  // localStorage.removeItem('tickdata-perSymbolEvents');
+  // localStorage.removeItem('tickdata-factorSubscriptions');
   // Reset the reload flag so cache can be reloaded on next page load
   cacheReloadedToStore = false;
   console.log('[WebSocket] All caches cleared');

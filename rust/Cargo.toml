@@ -22,7 +22,7 @@ chrono-tz = "0.10"
 
 # Logging
 log = "0.4"
-env_logger = "0.11"
+pyo3-log = "0.13"  # Bridge Rust log → Python logging (compatible with pyo3 0.27+)
 
 # Error handling
 anyhow = "1.0"

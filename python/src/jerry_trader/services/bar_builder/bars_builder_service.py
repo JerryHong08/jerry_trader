@@ -41,7 +41,8 @@ import clickhouse_connect
 import redis
 
 from jerry_trader import clock as clock_mod
-from jerry_trader._rust import BarBuilder, load_trades_from_parquet
+from jerry_trader._rust import BarBuilder
+from jerry_trader._rust import load_trades as load_trades_from_rust
 from jerry_trader.domain.market import Bar
 from jerry_trader.platform.config.config import lake_data_dir
 from jerry_trader.platform.config.session import make_session_id, parse_session_id
@@ -648,27 +649,80 @@ class BarsBuilderService:
             )
         return result
 
-    def _load_trades_from_parquet(
-        self, symbol: str, start_ts_ms: int = 0
-    ) -> List[tuple]:
-        """Load trades from local parquet via Rust.
+    def _load_trades(self, symbol: str, start_ts_ms: int = 0) -> List[tuple]:
+        """Load trades for bootstrap via Rust (ClickHouse first, Parquet fallback).
 
-        Delegates to jerry_trader._rust.load_trades_from_parquet which
-        handles partitioned/monolithic fallback, ticker filtering, ns→ms
-        conversion, and sorting — all in Rust/Polars.
+        Delegates to jerry_trader._rust.load_trades which matches
+        TickDataReplayer's data source priority — CH first, Parquet fallback.
+        All timestamp handling, TRF filtering, and sorting happen in Rust.
 
-        Both start_ts_ms and end_ts_ms are applied as predicate-pushdown
-        filters at scan time so only the needed trade window is loaded.
-
-        Returns List[(ts_ms, price, size)] sorted ascending by timestamp.
+        Returns List[(ts_ms, price, size)] sorted ascending by sip_timestamp.
         """
+        # Wait for clock to be ready (not paused) before querying trades.
+        # In replay mode, backend bootstrap may still be running and clock
+        # hasn't jumped to bootstrap end yet. Wait up to 30 seconds.
+        clock_obj = clock_mod.get_clock()
+        if clock_obj and clock_obj.is_paused:
+            logger.info(
+                f"_load_trades - {symbol}: clock is paused, waiting for resume..."
+            )
+            wait_start = time.time()
+            while clock_obj.is_paused and (time.time() - wait_start) < 30:
+                time.sleep(0.1)
+            if clock_obj.is_paused:
+                logger.warning(
+                    f"_load_trades - {symbol}: clock still paused after 30s, proceeding anyway"
+                )
+            else:
+                logger.info(
+                    f"_load_trades - {symbol}: clock resumed after {time.time() - wait_start:.1f}s"
+                )
+
         end_ts_ms = clock_mod.now_ms()
-        trades = load_trades_from_parquet(
-            lake_data_dir, symbol, self.db_date, end_ts_ms, start_ts_ms
+
+        # Debug: log clock state
+        clock_obj = clock_mod.get_clock()
+        if clock_obj:
+            logger.info(
+                f"_load_trades - {symbol}: clock state - "
+                f"is_paused={clock_obj.is_paused}, "
+                f"now_ms={end_ts_ms} ({self._ms_to_et(end_ts_ms)} ET)"
+            )
+        else:
+            logger.warning(
+                f"_load_trades - {symbol}: NO CLOCK INITIALIZED! "
+                f"Using wall clock time: {end_ts_ms} ({self._ms_to_et(end_ts_ms)} ET)"
+            )
+
+        # Resolve CH config from BarsBuilder role config
+        ch_cfg = self._ch_config
+        ch_url = None
+        ch_user = None
+        ch_password = None
+        ch_database = None
+        if isinstance(ch_cfg, dict):
+            ch_url = (
+                f"http://{ch_cfg.get('host', 'localhost')}:{ch_cfg.get('port', 8123)}"
+            )
+            ch_user = ch_cfg.get("user", "default")
+            ch_database = ch_cfg.get("database", "jerry_trader")
+            _pw_env = ch_cfg.get("password_env", "CLICKHOUSE_PASSWORD")
+            ch_password = os.getenv(_pw_env, "")
+
+        trades = load_trades_from_rust(
+            lake_data_dir,
+            symbol,
+            self.db_date,
+            end_ts_ms,
+            start_ts_ms,
+            clickhouse_url=ch_url,
+            clickhouse_user=ch_user,
+            clickhouse_password=ch_password,
+            clickhouse_database=ch_database,
         )
         logger.info(
-            f"_load_trades_from_parquet - {symbol}: "
-            f"loaded {len(trades)} trades from parquet (via Rust), "
+            f"_load_trades - {symbol}: "
+            f"loaded {len(trades)} trades, "
             f"range=[{self._ms_to_et(start_ts_ms) if start_ts_ms else 'start'} → "
             f"{self._ms_to_et(end_ts_ms)}]"
         )
@@ -720,9 +774,7 @@ class BarsBuilderService:
             if self.run_mode == "live":
                 raw_trades = fetch_polygon_trades(symbol, from_ms=from_ms)
             else:
-                raw_trades = self._load_trades_from_parquet(
-                    symbol, start_ts_ms=from_ms or 0
-                )
+                raw_trades = self._load_trades(symbol, start_ts_ms=from_ms or 0)
 
             if not raw_trades:
                 logger.info(f"trades_backfill - {symbol}: no historical trades found")

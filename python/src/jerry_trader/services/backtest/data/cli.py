@@ -142,12 +142,13 @@ def cmd_build_snapshot(args):
         return
 
     # Full build (Stage 1-3)
+    # Backtest uses "_replay" suffix (same as runtime) — unified session_id
     mode = args.mode
     session_id = args.session_id
     if not session_id:
         date_compact = args.date.replace("-", "")
         session_id = make_session_id(
-            replay_date=date_compact if mode == "replay" else None,
+            replay_date=date_compact if mode == "replay" else None
         )
 
     collector_count, processed_count = build(

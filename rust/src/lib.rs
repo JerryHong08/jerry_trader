@@ -1,8 +1,9 @@
 use pyo3::prelude::*;
 
-mod factors;
 mod bars;
 mod clock;
+mod factor;
+mod factors;
 mod replayer;
 mod snapshot;
 
@@ -10,6 +11,17 @@ mod snapshot;
 #[pymodule]
 mod _rust {
     use super::*;
+
+    /// Initialize pyo3-log bridge on module load.
+    /// This routes all Rust `log::info!` / `log::warn!` to Python's logging module.
+    #[pymodule_init]
+    fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
+        pyo3_log::init();
+        // Optional: set Rust log level filter (defaults to follow Python's level)
+        // pyo3_log::reset_level(log::LevelFilter::Debug);
+        log::info!("Rust logging bridge initialized - Rust logs will appear in Python logs");
+        Ok(())
+    }
 
     // ── Factor compute functions ────────────────────────────────────
     #[pyfunction]
@@ -113,6 +125,14 @@ mod _rust {
     #[pymodule_export]
     use super::snapshot::VolumeTracker;
 
+    // ── Unified Factor Engine ──────────────────────────────────────
+    #[pymodule_export]
+    use super::factor::PyFactorEngine;
+    #[pymodule_export]
+    use super::factor::PyBar;
+    #[pymodule_export]
+    use super::factor::PyTrade;
+
     // ── Parquet trade loader (for 10s bootstrap) ────────────────────
     #[pyfunction]
     #[pyo3(name = "load_trades_from_parquet")]
@@ -130,6 +150,35 @@ mod _rust {
             date_yyyymmdd,
             end_ts_ms,
             start_ts_ms,
+        )
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    // ── Unified trade loader (CH first, Parquet fallback) ───────────────
+    #[pyfunction]
+    #[pyo3(name = "load_trades")]
+    #[pyo3(signature = (lake_data_dir, symbol, date_yyyymmdd, end_ts_ms=0, start_ts_ms=0, clickhouse_url=None, clickhouse_user=None, clickhouse_password=None, clickhouse_database=None))]
+    fn py_load_trades(
+        lake_data_dir: &str,
+        symbol: &str,
+        date_yyyymmdd: &str,
+        end_ts_ms: i64,
+        start_ts_ms: i64,
+        clickhouse_url: Option<&str>,
+        clickhouse_user: Option<&str>,
+        clickhouse_password: Option<&str>,
+        clickhouse_database: Option<&str>,
+    ) -> PyResult<Vec<(i64, f64, i64)>> {
+        replayer::loader::load_trades_sync(
+            lake_data_dir,
+            symbol,
+            date_yyyymmdd,
+            end_ts_ms,
+            start_ts_ms,
+            clickhouse_url,
+            clickhouse_user,
+            clickhouse_password,
+            clickhouse_database,
         )
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }

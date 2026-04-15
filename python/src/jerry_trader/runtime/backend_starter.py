@@ -84,9 +84,10 @@ class JerryTraderBackendStarter:
         self.preload_tickers = config.get("preload_tickers", [])
 
         # Unified session ID for all Redis keys and InfluxDB tags
+        # make_session_id(replay_date=X) already adds "_replay" suffix automatically
         self.session_id = make_session_id(
             replay_date=self.replay_date,
-            suffix_id=self.suffix_id,
+            suffix_id=self.suffix_id,  # None = "{date}_replay", "v1" = "{date}_replay_v1"
         )
         logger.info(f"Session ID: {self.session_id}")
 
@@ -825,6 +826,22 @@ class JerryTraderBackendStarter:
         elapsed = _time.monotonic() - t0
         logger.info("Pre-load complete: %d ticker(s) in %.1fs", len(tickers), elapsed)
 
+    def _query_existing_snapshot_end(self, ch_client) -> int | None:
+        """Query max event_time_ms from market_snapshot for current session_id.
+
+        Returns:
+            epoch_ms of the latest snapshot row, or None if no data exists.
+        """
+        query = """
+            SELECT max(event_time_ms) as end_ms
+            FROM market_snapshot
+            WHERE session_id = {session_id:String}
+        """
+        result = ch_client.query(query, parameters={"session_id": self.session_id})
+        if result.result_rows and result.result_rows[0][0]:
+            return result.result_rows[0][0]
+        return None
+
     def _start_async_worker_in_thread(self, worker, name: str):
         """Start an async worker in a separate thread with its own event loop."""
 
@@ -920,13 +937,9 @@ class JerryTraderBackendStarter:
             self.processor.start()
             logger.info("SnapshotProcessor started")
 
-            # In replay mode, bootstrap from ClickHouse using HistoricalLoader
+            # In replay mode, handle bootstrap
             if self.replay_date:
-                from jerry_trader.services.market_snapshot.historical_loader import (
-                    HistoricalLoader,
-                )
-
-                # Get ClickHouse config
+                # Get ClickHouse config first (needed for existing data check)
                 ch_cfg = self.roles.get("SnapshotProcessor", {}).get("clickhouse", {})
                 ch_host = ch_cfg.get("host", "localhost")
                 ch_port = ch_cfg.get("port", 8123)
@@ -946,74 +959,104 @@ class JerryTraderBackendStarter:
                     database=ch_db,
                 )
 
-                # Bootstrap settings from config
-                bootstrap_cfg = self.roles.get("SnapshotProcessor", {}).get(
-                    "bootstrap", {}
-                )
+                # Check if market_snapshot already has data for this session_id
+                # (built by backtest CLI or previous run)
+                existing_end_ms = self._query_existing_snapshot_end(ch_client)
 
-                # Convert HHMMSS start_time/end_time to epoch ms
-                bootstrap_start = None
-                bootstrap_end = None
-
-                start_time = bootstrap_cfg.get("start_time")
-                if start_time and self.replay_date:
-                    bootstrap_start = hhmm_to_epoch_ms(self.replay_date, start_time)
-
-                end_time = bootstrap_cfg.get("end_time")
-                if end_time and self.replay_date:
-                    bootstrap_end = hhmm_to_epoch_ms(self.replay_date, end_time)
-
-                logger.info(
-                    f"Bootstrap time range: start_ms={bootstrap_start} "
-                    f"({datetime.fromtimestamp(bootstrap_start / 1000, tz=self.tz).isoformat() if bootstrap_start else 'None'}), "
-                    f"end_ms={bootstrap_end} "
-                    f"({datetime.fromtimestamp(bootstrap_end / 1000, tz=self.tz).isoformat() if bootstrap_end else 'None'})"
-                )
-
-                def _run_bootstrap():
-                    loader = HistoricalLoader(
-                        processor=self.processor,
-                        ch_client=ch_client,
-                        session_id=self.session_id,
-                    )
+                if existing_end_ms:
+                    # Data exists -> skip bootstrap, clock jump to end + resume
                     logger.info(
-                        f"Starting ClickHouse bootstrap: start={bootstrap_start}, end={bootstrap_end}"
+                        f"Found existing snapshot data for session_id={self.session_id} "
+                        f"(end={datetime.fromtimestamp(existing_end_ms / 1000, tz=self.tz).strftime('%H:%M:%S')} ET)"
                     )
-                    result = loader.bootstrap(
-                        start_ms=bootstrap_start, end_ms=bootstrap_end
+                    logger.info("Skipping bootstrap - using existing snapshot data")
+
+                    from jerry_trader import clock
+
+                    end_ts_ns = existing_end_ms * 1_000_000
+                    clock.jump_to(end_ts_ns)
+                    clock.resume()
+
+                    if self.replayer:
+                        self.replayer.start_from_ms = existing_end_ms
+                        logger.info(f"Replayer start_from_ms set to {existing_end_ms}")
+
+                    self._bootstrap_complete_event.set()
+                    logger.info("Bootstrap complete event signaled (existing data)")
+                else:
+                    # No existing data -> run normal bootstrap from collector
+                    from jerry_trader.services.market_snapshot.historical_loader import (
+                        HistoricalLoader,
                     )
-                    logger.info(f"Bootstrap complete: {result}")
 
-                    # Jump clock to bootstrap end so replay continues from there
-                    if result.get("success") and result.get("end_ms"):
-                        from jerry_trader import clock
+                    # Bootstrap settings from config
+                    bootstrap_cfg = self.roles.get("SnapshotProcessor", {}).get(
+                        "bootstrap", {}
+                    )
 
-                        end_ts_ns = int(result["end_ms"]) * 1_000_000
-                        clock.jump_to(end_ts_ns)
-                        clock.resume()
+                    # Convert HHMMSS start_time/end_time to epoch ms
+                    bootstrap_start = None
+                    bootstrap_end = None
 
-                        # Tell replayer to start from bootstrap end (avoid re-processing)
-                        if self.replayer:
-                            self.replayer.start_from_ms = result["end_ms"]
-                            logger.info(
-                                f"Replayer start_from_ms set to {result['end_ms']}"
-                            )
-                        end_dt = datetime.fromtimestamp(
-                            result["end_ms"] / 1000, tz=self.tz
+                    start_time = bootstrap_cfg.get("start_time")
+                    if start_time and self.replay_date:
+                        bootstrap_start = hhmm_to_epoch_ms(self.replay_date, start_time)
+
+                    end_time = bootstrap_cfg.get("end_time")
+                    if end_time and self.replay_date:
+                        bootstrap_end = hhmm_to_epoch_ms(self.replay_date, end_time)
+
+                    logger.info(
+                        f"Bootstrap time range: start_ms={bootstrap_start} "
+                        f"({datetime.fromtimestamp(bootstrap_start / 1000, tz=self.tz).isoformat() if bootstrap_start else 'None'}), "
+                        f"end_ms={bootstrap_end} "
+                        f"({datetime.fromtimestamp(bootstrap_end / 1000, tz=self.tz).isoformat() if bootstrap_end else 'None'})"
+                    )
+
+                    def _run_bootstrap():
+                        loader = HistoricalLoader(
+                            processor=self.processor,
+                            ch_client=ch_client,
+                            session_id=self.session_id,
                         )
                         logger.info(
-                            f"🕐 Clock resumed at bootstrap end: {end_dt.strftime('%H:%M:%S')} ET"
+                            f"Starting ClickHouse bootstrap: start={bootstrap_start}, end={bootstrap_end}"
                         )
+                        result = loader.bootstrap(
+                            start_ms=bootstrap_start, end_ms=bootstrap_end
+                        )
+                        logger.info(f"Bootstrap complete: {result}")
 
-                    # Signal that bootstrap is complete (even if no result)
-                    self._bootstrap_complete_event.set()
-                    logger.info("Bootstrap complete event signaled")
+                        # Jump clock to bootstrap end so replay continues from there
+                        if result.get("success") and result.get("end_ms"):
+                            from jerry_trader import clock
 
-                bootstrap_thread = Thread(
-                    target=_run_bootstrap, name="CHBootstrap", daemon=True
-                )
-                bootstrap_thread.start()
-                self._threads.append(bootstrap_thread)
+                            end_ts_ns = int(result["end_ms"]) * 1_000_000
+                            clock.jump_to(end_ts_ns)
+                            clock.resume()
+
+                            # Tell replayer to start from bootstrap end (avoid re-processing)
+                            if self.replayer:
+                                self.replayer.start_from_ms = result["end_ms"]
+                                logger.info(
+                                    f"Replayer start_from_ms set to {result['end_ms']}"
+                                )
+                            end_dt = datetime.fromtimestamp(
+                                result["end_ms"] / 1000, tz=self.tz
+                            )
+                            logger.info(
+                                f"🕐 Clock resumed at bootstrap end: {end_dt.strftime('%H:%M:%S')} ET"
+                            )
+
+                        # Signal that bootstrap is complete (even if no result)
+                        self._bootstrap_complete_event.set()
+                        logger.info("Bootstrap complete event signaled")
+
+                    bootstrap_thread = Thread(
+                        target=_run_bootstrap, name="CHBootstrap", daemon=True
+                    )
+                    bootstrap_thread.start()
+                    self._threads.append(bootstrap_thread)
 
         # Start StateEngine (it creates its own thread internally)
         if self.state_engine:

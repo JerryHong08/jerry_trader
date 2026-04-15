@@ -23,7 +23,6 @@ const SNAPSHOT_FIELDS = [
   'symbol',
   'rank',
   'price',
-  'change',
   'changePercent',
   'volume',
   'relativeVolume5min',

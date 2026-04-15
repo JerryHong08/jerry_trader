@@ -32,6 +32,7 @@ from jerry_trader.shared.time.timezone import ms_to_hhmmss, parse_to_et_datetime
 logger = setup_logger(__name__, log_to_file=True)
 
 # ClickHouse market_snapshot columns (must match table schema)
+# Note: 'change' removed - never computed, always 0.0. Use 'changePercent' instead.
 _CH_SNAPSHOT_COLUMNS = [
     "symbol",
     "date",
@@ -51,7 +52,6 @@ _CH_SNAPSHOT_COLUMNS = [
     "ask_size",
     "rank",
     "competition_rank",
-    "change",
     "relativeVolumeDaily",
     "relativeVolume5min",
 ]
@@ -381,7 +381,6 @@ class HistoricalLoader:
                     float(row.get("ask_size", 0) or 0),
                     int(row.get("rank", 0) or 0),
                     int(row.get("competition_rank", 0) or 0),
-                    float(row.get("change", 0) or 0),
                     float(row.get("relativeVolumeDaily", 0) or 0),
                     float(row.get("relativeVolume5min", 0) or 0),
                 ]
@@ -415,12 +414,16 @@ class HistoricalLoader:
         start_ms: Optional[int] = None,
         end_ms: Optional[int] = None,
     ) -> pl.DataFrame:
-        """Query all snapshot data at once from ClickHouse."""
+        """Query all snapshot data at once from ClickHouse.
+
+        Note: market_snapshot_collector has raw collector data (no change/rank).
+        change and rank are computed during processing, not stored in collector.
+        """
         query = """
             SELECT
                 ticker, timestamp, price, volume, prev_close, prev_volume, vwap,
                 bid, ask, bid_size, ask_size,
-                changePercent, change, rank
+                changePercent
             FROM market_snapshot_collector FINAL
             WHERE date = {date:String} AND mode = {mode:String}
         """
@@ -455,8 +458,6 @@ class HistoricalLoader:
                 bid_size,
                 ask_size,
                 changePercent,
-                change,
-                rank,
             ) = row
             rows.append(
                 {
@@ -472,7 +473,6 @@ class HistoricalLoader:
                     "bid_size": float(bid_size or 0.0),
                     "ask_size": float(ask_size or 0.0),
                     "changePercent": float(changePercent or 0.0),
-                    "change": float(change or 0.0),
                 }
             )
 

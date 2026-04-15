@@ -37,6 +37,39 @@ def load_trades_from_parquet(
     """
     ...
 
+def load_trades(
+    lake_data_dir: str,
+    symbol: str,
+    date_yyyymmdd: str,
+    end_ts_ms: int = 0,
+    start_ts_ms: int = 0,
+    clickhouse_url: Optional[str] = None,
+    clickhouse_user: Optional[str] = None,
+    clickhouse_password: Optional[str] = None,
+    clickhouse_database: Optional[str] = None,
+) -> list[tuple[int, float, int]]:
+    """Unified trade loader: ClickHouse first, Parquet fallback.
+
+    Matches TickDataReplayer's data source priority.
+    Returns List[(ts_ms, price, size)] sorted ascending by sip_timestamp.
+
+    If ClickHouse config is provided, queries CH first (much faster for
+    single-ticker queries). Falls back to Parquet if CH fails or is not
+    configured.
+
+    Args:
+        lake_data_dir: Path to data-lake root (for Parquet fallback).
+        symbol: Ticker symbol.
+        date_yyyymmdd: Date in YYYYMMDD format.
+        end_ts_ms: Upper bound timestamp filter (exclusive).
+        start_ts_ms: Lower bound timestamp filter (inclusive).
+        clickhouse_url: ClickHouse HTTP URL (e.g. "http://localhost:8123").
+        clickhouse_user: ClickHouse username.
+        clickhouse_password: ClickHouse password.
+        clickhouse_database: ClickHouse database name.
+    """
+    ...
+
 def load_quotes_from_parquet(
     lake_data_dir: str,
     symbol: str,
@@ -161,6 +194,73 @@ class BarBuilder:
 
     def ticker_count(self) -> int:
         """Number of tickers currently tracked."""
+        ...
+
+    def detect_meeting_bars(self, ticker: str) -> Optional[dict[str, int]]:
+        """Detect meeting bars that straddle REST→WS boundary.
+
+        Called after the first WS tick arrives. Checks all active timeframes
+        to see if the current bar straddles the REST→WS boundary.
+
+        Args:
+            ticker: Ticker symbol.
+
+        Returns:
+            Dict mapping timeframe label → bar_start for meeting bars,
+            or None if no meeting bars detected.
+        """
+        ...
+
+    def set_rest_partial(self, ticker: str, timeframe: str, bar_dict: dict) -> bool:
+        """Store a REST partial bar for deferred merge.
+
+        Called from trades_backfill (Python) after building bars from
+        historical REST data. The REST partial will be merged with the
+        WS partial when the WS bar completes.
+
+        Args:
+            ticker: Ticker symbol.
+            timeframe: Timeframe label (e.g., "1m").
+            bar_dict: Bar dict with OHLCV fields (ET timestamps).
+
+        Returns:
+            True if stored successfully (or merged immediately if WS bar pending).
+        """
+        ...
+
+    def get_rest_partials(self, ticker: str) -> Optional[dict[str, dict]]:
+        """Get all pending REST partials for a ticker.
+
+        Args:
+            ticker: Ticker symbol.
+
+        Returns:
+            Dict mapping timeframe → bar_dict for stored REST partials,
+            or None if no partials stored.
+        """
+        ...
+
+    def clear_meeting_bar_state(self, ticker: str) -> None:
+        """Clear meeting bar state for a ticker.
+
+        Called when a ticker is removed or when bootstrap completes
+        without any meeting bars to merge.
+        """
+        ...
+
+    def set_first_ws_tick_ts(self, ticker: str, ts_ms: int) -> bool:
+        """Record the first WS tick timestamp for a ticker.
+
+        Called from Python when the first WS tick arrives.
+        The timestamp is used to detect which bars straddle the REST→WS boundary.
+
+        Args:
+            ticker: Ticker symbol.
+            ts_ms: First WS tick timestamp in ET milliseconds.
+
+        Returns:
+            True if this was the first WS tick (new), False if already set.
+        """
         ...
 
     def __repr__(self) -> str: ...

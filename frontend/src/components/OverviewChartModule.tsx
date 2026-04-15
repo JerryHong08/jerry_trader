@@ -801,7 +801,7 @@ export function OverviewChartModule({
   }, [chartSeriesData]);
 
   useEffect(() => {
-    if (!chartRef.current || !chartSeriesData.size) return;
+    if (!chartReady || !chartRef.current || !chartSeriesData.size) return;
 
     // Only apply time range constraints when following latest data
     // When user has manually scrolled, don't reset the view
@@ -822,7 +822,7 @@ export function OverviewChartModule({
 
     // Use global time range (from all tickers) to keep focus mode synced with overview
     const globalRange = globalTimeRangeRef.current;
-    if (!globalRange) return;
+    if (!globalRange || globalRange.min === null || globalRange.max === null) return;
 
     // Mark as applied BEFORE making changes to prevent re-entry
     timeRangeAppliedRef.current = currentKey;
@@ -849,7 +849,7 @@ export function OverviewChartModule({
       // Add some right padding synchronously
       chart.timeScale().scrollToPosition(10, false);
     }
-  }, [timeRange, chartSeriesData, isFollowingLatest, focusMode]);
+  }, [timeRange, chartSeriesData, isFollowingLatest, focusMode, chartReady]);
 
   // ============================================================================
   // Event Handlers
@@ -908,7 +908,7 @@ export function OverviewChartModule({
   // This syncs legend toggles with RankList eye icons and backend
 
   const resetZoom = useCallback(() => {
-    if (!chartRef.current || !chartSeriesData.size) return;
+    if (!chartReady || !chartRef.current || !chartSeriesData.size) return;
 
     const chart = chartRef.current;
     const selectedOption = timeRangeOptions.find(opt => opt.value === timeRange);
@@ -919,7 +919,7 @@ export function OverviewChartModule({
 
     // Use global time range to keep consistent with overview
     const globalRange = globalTimeRangeRef.current;
-    if (!globalRange) return;
+    if (!globalRange || globalRange.min === null || globalRange.max === null) return;
 
     if (selectedOption && selectedOption.minutes !== null) {
       const rangeSeconds = selectedOption.minutes * 60;
@@ -941,7 +941,7 @@ export function OverviewChartModule({
 
       chart.timeScale().scrollToPosition(10, false);
     }
-  }, [timeRange, chartSeriesData]);
+  }, [timeRange, chartSeriesData, chartReady]);
 
   const getConnectionStatusColor = useCallback(() => {
     switch (connectionStatus) {

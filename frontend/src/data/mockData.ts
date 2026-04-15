@@ -109,11 +109,9 @@ const MOCK_TICKERS: MockTicker[] = [
 export function getMockRankEntities(): Map<string, RankEntity> {
   const map = new Map<string, RankEntity>();
   MOCK_TICKERS.forEach((t, i) => {
-    const prevClose = t.price / (1 + t.changePercent / 100);
     const entity: RankEntity = {
       symbol: t.symbol,
       price: t.price,
-      change: t.price - prevClose,
       changePercent: t.changePercent,
       volume: t.volume,
       vwap: t.price * (1 + (Math.random() - 0.5) * 0.005),

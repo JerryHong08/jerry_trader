@@ -19,7 +19,7 @@ use crate::replayer::types::{DataType, RawQuote, RawTrade};
 #[derive(Debug, Clone, clickhouse::Row, serde::Deserialize)]
 struct ChTradeRow {
     ticker: String,
-    participant_timestamp: i64,
+    sip_timestamp: i64,  // Use SIP arrival time for replay timing (matches clock)
     price: f64,
     size: f64,
     exchange: i32,
@@ -28,7 +28,7 @@ struct ChTradeRow {
 #[derive(Debug, Clone, clickhouse::Row, serde::Deserialize)]
 struct ChQuoteRow {
     ticker: String,
-    participant_timestamp: i64,
+    sip_timestamp: i64,  // Use SIP arrival time for replay timing (matches clock)
     bid_price: f64,
     ask_price: f64,
     bid_size: u32,
@@ -63,7 +63,7 @@ pub async fn load_trades(
         .join(",");
 
     let query = format!(
-        "SELECT ticker, participant_timestamp, price, size, exchange \
+        "SELECT ticker, sip_timestamp, price, size, exchange \
          FROM trades \
          WHERE date = '{}' AND ticker IN ({}) \
          ORDER BY sip_timestamp",
@@ -88,7 +88,7 @@ pub async fn load_trades(
     let mut result: HashMap<String, Vec<RawTrade>> = HashMap::new();
     for row in rows {
         result.entry(row.ticker).or_default().push(RawTrade {
-            participant_timestamp: row.participant_timestamp,
+            participant_timestamp: row.sip_timestamp,  // SIP arrival time for replay
             price: Some(row.price),
             size: Some(row.size as i64),
             exchange: Some(row.exchange as i64),
@@ -117,7 +117,7 @@ pub async fn load_quotes(
         .join(",");
 
     let query = format!(
-        "SELECT ticker, participant_timestamp, bid_price, ask_price, bid_size, ask_size \
+        "SELECT ticker, sip_timestamp, bid_price, ask_price, bid_size, ask_size \
          FROM quotes \
          WHERE date = '{}' AND ticker IN ({}) \
          ORDER BY sip_timestamp",
@@ -142,7 +142,7 @@ pub async fn load_quotes(
     let mut result: HashMap<String, Vec<RawQuote>> = HashMap::new();
     for row in rows {
         result.entry(row.ticker).or_default().push(RawQuote {
-            participant_timestamp: row.participant_timestamp,
+            participant_timestamp: row.sip_timestamp,  // SIP arrival time for replay
             bid_price: Some(row.bid_price),
             ask_price: Some(row.ask_price),
             bid_size: Some(row.bid_size as i64),

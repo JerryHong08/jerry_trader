@@ -33,6 +33,12 @@ Foundation pure business logic value objects.
 - [x] [11.21](roadmap/experiment-framework.md) Experiment CLI query tool — Python query functions built into experiment_logger.py: find_experiments_by_hypothesis(), get_all_lessons(), get_ticker_insights()
 - [x] [11.22](roadmap/experiment-framework.md) Document experiment log usage in SKILL.md — how to read logs, query knowledge_base, learn from past experiments, use validation gates. Agent guide.
 
+
+## 12. Factor Engine Unified Architecture
+
+- [x] [12.1](roadmap/factor-trait-design.md) Design Rust unified Factor trait interface — compute_batch + update methods
+
+
 ## 2. Rust Core
 Performance-critical components rewritten in Rust.
 
@@ -44,6 +50,7 @@ Performance-critical components rewritten in Rust.
 
 - [x] 2.3.0 Add ClickHouse data source to Rust replayer — use `clickhouse` crate to query trades/quotes from CH as primary source (Parquet fallback), unify backtest data path, config-driven (date + ticker list)
 
+- [x] 2.10 Initialize Rust `env_logger` or pyo3 logging bridge so Rust `log::info!` / `log::warn!` messages appear in Python logs instead of being silently dropped
 
 ## 3. Services Layer
 Stateful workers and use-case implementations.
@@ -148,6 +155,11 @@ System-wide coordination and backtest infrastructure.
 - [x] [6.16](roadmap/mining-framework-clear-rules-dir-before-each-test.md) Mining framework: clear rules dir before each test
 
 - [x] 6.20 Fix SignalEvaluator to accept Rule list directly
+
+- [x] [6.19](roadmap/factor-plugin-architecture.md) Add factor unit test framework
+- [x] 6.21 Prepare 10+ trading days data for backtest validation
+- [x] [6.23](roadmap/fix-timing-race-snapshot-bootstrap-clock-jump-subscribe.md) Fix timing race: snapshot bootstrap → clock jump → subscribe
+
 
 ## 7. AI Agent Layer
 

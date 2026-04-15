@@ -71,7 +71,7 @@ export interface OverviewChartModuleSettings {
   topN?: number; // Number of top tickers to request from backend
 }
 
-export type RankListSortColumn = 'symbol' | 'state' | 'price' | 'change' | 'changePercent' | 'volume' | 'marketCap' | 'float' | 'relativeVolumeDaily' | 'relativeVolume5min' | 'news' | 'vwap';
+export type RankListSortColumn = 'symbol' | 'state' | 'price' | 'changePercent' | 'volume' | 'marketCap' | 'float' | 'relativeVolumeDaily' | 'relativeVolume5min' | 'news' | 'vwap';
 export type RankListSortDirection = 'asc' | 'desc';
 
 export interface RankListModuleSettings {
@@ -168,7 +168,6 @@ export type TickerState = 'Best' | 'Good' | 'OnWatch' | 'NotGood' | 'Bad';
 export interface RankItem {
   symbol: string;
   price: number;
-  change: number;
   changePercent: number;
   volume: number;
   vwap: number;

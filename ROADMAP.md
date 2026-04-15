@@ -12,8 +12,9 @@ Performance-critical components rewritten in Rust.
 
 - [-] 2.8 StateEngine rewrite in Rust
 - [-] 2.9 FactorEngine rewrite in Rust
-- [ ] 2.10 Initialize Rust `env_logger` or pyo3 logging bridge so Rust `log::info!` / `log::warn!` messages appear in Python logs instead of being silently dropped
 
+
+- [ ] [2.11](roadmap/rust-compute-box-architecture.md) Optimize BarsBuilder bootstrap - move load+ingest to Rust
 
 ## 3. Services Layer
 
@@ -63,12 +64,31 @@ System-wide coordination and backtest infrastructure.
 
 - [ ] [6.18](roadmap/factor-plugin-architecture.md) Document new factor validation SOP
 
-- [x] [6.19](roadmap/factor-plugin-architecture.md) Add factor unit test framework
 
 
-- [x] 6.21 Prepare 10+ trading days data for backtest validation
 
   Prepare data from 2026-03-02 to 2026-03-12 (10 trading days). 03-13 already exists. Run: prepare --date 2026-03-01 --end-date 2026-03-15
+
+- [ ] [6.22](roadmap/snapshot-filter-criteria.md) 统一 SnapshotFilterCriteria 抽象
+
+  将 backtest 和 runtime 中分散的 snapshot 筛选条件统一抽象为 SnapshotFilterCriteria domain 类，实现：
+1. 创建 domain/snapshot/filter.py - SnapshotFilterCriteria 类（时间范围、增益条件、量比条件、数量限制）
+2. PreFilter 接受 criteria 参数
+3. Runtime _load_rank_snapshot_to_redis 使用 criteria 筛选
+4. config.yaml 统一 snapshot_filter 配置入口
+
+相关：方案C runtime 检测已有数据时加载 rank snapshot 到 Redis stream，复用点 backtest CLI prepare/run、runtime bootstrap/replay
+
+  - [ ] 6.22.1 Runtime replay 检测已有数据时加载 rank snapshot 到 Redis stream
+
+    最小版本实现：
+1. backend_starter.py 在检测已有 ClickHouse 数据后，调用 _load_rank_snapshot_to_redis
+2. 查询 market_snapshot FINAL 最新 snapshot（max event_time_ms）
+3. 筛选 rank <= 20 的 tickers
+4. 写入 Redis stream market_snapshot_processed
+
+让前端 OverviewChart 和 RankList 能显示 backtest CLI 构建的数据
+
 
 ## 7. AI Agent Layer
 
@@ -133,13 +153,22 @@ Enhancements and additional modules.
 
 ## 12. Factor Engine Unified Architecture
 
-- [ ] [12.1](roadmap/factor-plugin-architecture.md) Design Rust unified Factor trait interface — compute_batch + update methods
 
 - [ ] [12.2](roadmap/factor-plugin-architecture.md) Implement RelativeVolume unified interface — validate design works for batch + incremental
 
 - [ ] [12.3](roadmap/factor-plugin-architecture.md) Migrate existing factors to unified trait — EMA, TradeRate, VWAPDeviation
 
 - [ ] [12.4](roadmap/factor-plugin-architecture.md) Eliminate Python Indicator classes — state moves to Rust, Python only configures
+
+## 13. Rust Compute Box Architecture
+
+- [ ] [13.1](roadmap/rust-compute-box-architecture.md) DataLayer 统一 trades 存储 - Rust 内部持有 trades，不再返回 Python
+
+- [ ] [13.2](roadmap/rust-compute-box-architecture.md) BarBuilder 内部化 bars 写入 - 完成 bars 直接写入 ClickHouse，删除 Python trades 返回
+
+- [ ] [13.3](roadmap/rust-compute-box-architecture.md) FactorEngineCore Rust 实现 - subscribe bars stream, 从 DataLayer warmup, compute + 写入 CH
+
+- [ ] [13.4](roadmap/rust-compute-box-architecture.md) WebSocket Publisher Rust 实现 - tokio WS server, 直接推送 bars + factors 到前端
 
 ## Design Concerns
 

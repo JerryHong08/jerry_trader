@@ -214,6 +214,7 @@ class BacktestRunner:
             from jerry_trader.services.backtest.data.snapshot_builder import build
 
             date_compact = config.date.replace("-", "")
+            # Unified session_id: "{date}_replay" (same format as backtest CLI and runtime)
             session_id = make_session_id(replay_date=date_compact)
             build(
                 date=config.date,
@@ -249,18 +250,30 @@ class BacktestRunner:
         """Step 3: Load DSL rules.
 
         If config.rules is provided, use them directly (no file I/O).
-        Otherwise, load from config.rules_dir.
+        Otherwise, load from config.rules_dir (supports file or directory).
         """
         if config.rules:
             logger.info(
                 f"Step 3: Using {len(config.rules)} rules from config (no file I/O)"
             )
-            evaluator = SignalEvaluator(rules=config.rules)
+            return SignalEvaluator(rules=config.rules)
+
+        from pathlib import Path
+
+        rules_path = Path(config.rules_dir)
+        if rules_path.is_file():
+            # Single rule file — parse directly
+            from jerry_trader.domain.strategy.rule_parser import parse_rule_file
+
+            logger.info(f"Step 3: Loading rule from file {rules_path}...")
+            rule = parse_rule_file(rules_path)
+            return SignalEvaluator(rules=[rule])
         else:
+            # Directory of rule files
             logger.info(f"Step 3: Loading rules from {config.rules_dir}...")
             evaluator = SignalEvaluator(rules_dir=config.rules_dir)
             evaluator.load_rules()
-        return evaluator
+            return evaluator
 
     def _step_compute(
         self,

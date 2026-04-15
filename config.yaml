@@ -218,13 +218,13 @@ machines:
 # =============================================================================
 defaults:
   replay_date: null #YYYYMMDD set to trigger bootstrap from ClickHouse
-  # replay_date: 20260306 #YYYYMMDD set to trigger bootstrap from ClickHouse
   # Global replay start time for ReplayClock initialization
   replay_start_time: null  # HHMMSS, e.g., "040000" for 04:00:00 ET
   # Used only when TickDataServer.manager_type == "synced-replayer"
-  # preload_tickers: list of tickers to preload for synced-replayer mode (null or empty = preload all)
-  # preload_tickers: ["NIPG","PRSO"]
-  preload_tickers: ["BIAF","ISPC"]
+  # preload_tickers: null # list of tickers to preload for synced-replayer mode (null or empty = preload all)
+  # preload_tickers: ["NIPG","PRSO"]  # 0306
+  preload_tickers: ["BIAF","ISPC"]  # 0313
+  # preload_tickers: ["BHAT"]  # 0305
   suffix_id: null
   load_history: null
   log_level: "DEBUG"

@@ -142,7 +142,9 @@ machines:
 # Defaults
 # =============================================================================
 defaults:
-  replay_date: null
+  replay_date: null  # YYYYMMDD, triggers replay mode + bootstrap
+  # suffix_id: Custom suffix for session_id (e.g., "v1" -> "20260305_replay_v1")
+  # Default: None -> session_id = "{date}_replay" (same as backtest CLI)
   suffix_id: null
   load_history: null
   log_level: "DEBUG"

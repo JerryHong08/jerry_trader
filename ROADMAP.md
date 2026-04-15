@@ -162,13 +162,37 @@ Enhancements and additional modules.
 
 ## 13. Rust Compute Box Architecture
 
-- [ ] [13.1](roadmap/rust-compute-box-architecture.md) DataLayer 统一 trades 存储 - Rust 内部持有 trades，不再返回 Python
+[详细设计](roadmap/rust-compute-box-architecture.md) — 将核心计算封装到 Rust 计算盒子，Python 只做配置层和 HTTP API。
 
-- [ ] [13.2](roadmap/rust-compute-box-architecture.md) BarBuilder 内部化 bars 写入 - 完成 bars 直接写入 ClickHouse，删除 Python trades 返回
+**Phase 1: DataLayer + Bootstrap Status**
 
-- [ ] [13.3](roadmap/rust-compute-box-architecture.md) FactorEngineCore Rust 实现 - subscribe bars stream, 从 DataLayer warmup, compute + 写入 CH
+- [ ] [13.1](roadmap/rust-compute-box-architecture.md) DataLayer - trades/bars_buffer 内部存储，get_recent_bars() 接口
+- [ ] [13.2](roadmap/rust-compute-box-architecture.md) BootstrapStatus - 状态管理（NotStarted/InProgress/Ready/Failed）
 
-- [ ] [13.4](roadmap/rust-compute-box-architecture.md) WebSocket Publisher Rust 实现 - tokio WS server, 直接推送 bars + factors 到前端
+**Phase 2: WebSocket Publisher**
+
+- [ ] [13.3](roadmap/rust-compute-box-architecture.md) WS Server - tokio async, Port 8000
+- [ ] [13.4](roadmap/rust-compute-box-architecture.md) Subscribe/Unsubscribe handlers
+- [ ] [13.5](roadmap/rust-compute-box-architecture.md) Bar + Factor 消息推送，SubscribeAck/BootstrapReady 协议
+
+**Phase 3: BarBuilderEngine 内部化**
+
+- [ ] [13.6](roadmap/rust-compute-box-architecture.md) BarBuilderEngine - bars 直接写入 buffer + CH
+- [ ] [13.7](roadmap/rust-compute-box-architecture.md) Bar broadcast channel → FactorEngineCore
+
+**Phase 4: FactorEngineCore**
+
+- [ ] [13.8](roadmap/rust-compute-box-architecture.md) FactorEngineCore - subscribe bar stream, compute factors
+- [ ] [13.9](roadmap/rust-compute-box-architecture.md) Factors 直接写入 CH + 推送 WS
+
+**Phase 5: Python 层简化**
+
+- [ ] [13.10](roadmap/rust-compute-box-architecture.md) ChartBFF - 只保留 HTTP API（历史查询）
+- [ ] [13.11](roadmap/rust-compute-box-architecture.md) BarsBuilderService/FactorEngine Python 版删除
+
+**Phase 6: Live Mode**
+
+- [ ] [13.12](roadmap/rust-compute-box-architecture.md) Rust HTTP client - fetch Polygon trades 或 CH 统一数据源
 
 ## Design Concerns
 

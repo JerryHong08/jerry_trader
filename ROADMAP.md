@@ -170,10 +170,10 @@ Enhancements and additional modules.
 - [x] [13.6](roadmap/rust-compute-box-architecture.md) BarBuilderEngine - bars 直接写入 buffer + CH
 - [x] [13.7](roadmap/rust-compute-box-architecture.md) Bar broadcast channel → FactorEngineCore
 - [x] [13.8](roadmap/rust-compute-box-architecture.md) FactorEngineCore - subscribe bar stream, compute factors
-- [-] [13.9](roadmap/rust-compute-box-architecture.md) Factors 直接写入 CH + 推送 WS
-- [ ] [13.10](roadmap/rust-compute-box-architecture.md) ChartBFF - 只保留 HTTP API（历史查询）
-- [ ] [13.11](roadmap/rust-compute-box-architecture.md) BarsBuilderService/FactorEngine Python 版删除
-- [ ] [13.12](roadmap/rust-compute-box-architecture.md) Rust HTTP client - fetch Polygon trades 或 CH 统一数据源
+- [x] [13.9](roadmap/rust-compute-box-architecture.md) Factors 直接写入 CH + 推送 WS
+- [x] [13.10](roadmap/chartbff-http-only.md) ChartBFF - 只保留 HTTP API（历史查询）
+- [~] [13.11](roadmap/python-service-deletion-blockers.md) BarsBuilderService/FactorEngine Python 版删除
+- [-] [13.12](roadmap/rust-compute-box-architecture.md) Rust HTTP client - fetch Polygon trades 或 CH 统一数据源
 
 ## Design Concerns
 

@@ -780,6 +780,276 @@ pub fn load_trades_from_parquet_sync(
     Ok(trades)
 }
 
+// ── ClickHouse trade loader (sync, for bootstrap) ───────────────────
+
+/// Load trades from ClickHouse synchronously.
+///
+/// Uses sip_timestamp for timing (matches clock).
+/// Filters TRF delayed trades with >1s delay.
+///
+/// Returns `Vec<(ts_ms, price, size)>` sorted ascending by sip_timestamp.
+/// Returns `Ok(None)` if ClickHouse is not configured or query fails
+/// (caller should fall back to Parquet).
+pub fn load_trades_from_clickhouse_sync(
+    clickhouse_url: &str,
+    clickhouse_user: &str,
+    clickhouse_password: &str,
+    clickhouse_database: &str,
+    symbol: &str,
+    date_yyyymmdd: &str,
+    end_ts_ms: i64,
+    start_ts_ms: i64,
+) -> Result<Option<Vec<(i64, f64, i64)>>> {
+    let year = &date_yyyymmdd[0..4];
+    let month = &date_yyyymmdd[4..6];
+    let day = &date_yyyymmdd[6..8];
+    let date_iso = format!("{}-{}-{}", year, month, day);
+
+    let start_ns = if start_ts_ms > 0 { start_ts_ms * 1_000_000 } else { 0 };
+    let end_ns = if end_ts_ms > 0 { end_ts_ms * 1_000_000 } else { 0 };
+
+    // Build query
+    let mut where_clauses = vec![
+        format!("ticker = '{}'", symbol),
+        format!("date = '{}'", date_iso),
+    ];
+    if start_ns > 0 {
+        where_clauses.push(format!("sip_timestamp >= {}", start_ns));
+    }
+    if end_ns > 0 {
+        where_clauses.push(format!("sip_timestamp < {}", end_ns));
+    }
+    // TRF delayed trade filter
+    where_clauses.push(
+        "(exchange != 4 OR sip_timestamp - participant_timestamp <= 1000000000)".to_string(),
+    );
+
+    let query = format!(
+        "SELECT sip_timestamp, price, size FROM trades WHERE {} ORDER BY sip_timestamp",
+        where_clauses.join(" AND ")
+    );
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("Failed to build tokio runtime for CH query")?;
+
+    let load_start = Instant::now();
+
+    let result = rt.block_on(async {
+        let client = clickhouse::Client::default()
+            .with_url(clickhouse_url)
+            .with_user(clickhouse_user)
+            .with_password(clickhouse_password)
+            .with_database(clickhouse_database);
+
+        #[derive(Debug, Clone, clickhouse::Row, serde::Deserialize)]
+        struct Row {
+            sip_timestamp: i64,
+            price: f64,
+            size: f64,
+        }
+
+        let rows: Vec<Row> = client
+            .query(&query)
+            .fetch_all::<Row>()
+            .await
+            .context("Failed to query CH trades")?;
+
+        Ok::<Vec<Row>, anyhow::Error>(rows)
+    });
+
+    match result {
+        Ok(rows) => {
+            let trades: Vec<(i64, f64, i64)> = rows
+                .into_iter()
+                .map(|r| (r.sip_timestamp / 1_000_000, r.price, r.size as i64))
+                .collect();
+
+            info!(
+                "load_trades_from_clickhouse_sync: {} loaded {} trades from CH in {:.1}ms",
+                symbol,
+                trades.len(),
+                load_start.elapsed().as_secs_f64() * 1000.0
+            );
+            Ok(Some(trades))
+        }
+        Err(e) => {
+            warn!(
+                "load_trades_from_clickhouse_sync: {} CH query failed: {}, falling back to Parquet",
+                symbol, e
+            );
+            Ok(None)
+        }
+    }
+}
+
+// ── Quote ClickHouse sync loader ──────────────────────────────────
+
+pub fn load_quotes_from_clickhouse_sync(
+    clickhouse_url: &str,
+    clickhouse_user: &str,
+    clickhouse_password: &str,
+    clickhouse_database: &str,
+    symbol: &str,
+    date_yyyymmdd: &str,
+    end_ts_ms: i64,
+    start_ts_ms: i64,
+) -> Result<Option<Vec<(i64, f64, f64, i64, i64)>>> {
+    let year = &date_yyyymmdd[0..4];
+    let month = &date_yyyymmdd[4..6];
+    let day = &date_yyyymmdd[6..8];
+    let date_iso = format!("{}-{}-{}", year, month, day);
+
+    let start_ns = if start_ts_ms > 0 { start_ts_ms * 1_000_000 } else { 0 };
+    let end_ns = if end_ts_ms > 0 { end_ts_ms * 1_000_000 } else { 0 };
+
+    let mut where_clauses = vec![
+        format!("ticker = '{}'", symbol),
+        format!("date = '{}'", date_iso),
+    ];
+    if start_ns > 0 {
+        where_clauses.push(format!("sip_timestamp >= {}", start_ns));
+    }
+    if end_ns > 0 {
+        where_clauses.push(format!("sip_timestamp < {}", end_ns));
+    }
+
+    let query = format!(
+        "SELECT sip_timestamp, bid_price, ask_price, bid_size, ask_size FROM quotes WHERE {} ORDER BY sip_timestamp",
+        where_clauses.join(" AND ")
+    );
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("Failed to build tokio runtime for CH quote query")?;
+
+    let load_start = Instant::now();
+
+    let result = rt.block_on(async {
+        let client = clickhouse::Client::default()
+            .with_url(clickhouse_url)
+            .with_user(clickhouse_user)
+            .with_password(clickhouse_password)
+            .with_database(clickhouse_database);
+
+        #[derive(Debug, Clone, clickhouse::Row, serde::Deserialize)]
+        struct Row {
+            sip_timestamp: i64,
+            bid_price: f64,
+            ask_price: f64,
+            bid_size: u32,
+            ask_size: u32,
+        }
+
+        let rows: Vec<Row> = client
+            .query(&query)
+            .fetch_all::<Row>()
+            .await
+            .context("Failed to query CH quotes")?;
+
+        Ok::<Vec<Row>, anyhow::Error>(rows)
+    });
+
+    match result {
+        Ok(rows) => {
+            let quotes: Vec<(i64, f64, f64, i64, i64)> = rows
+                .into_iter()
+                .map(|r| {
+                    (
+                        r.sip_timestamp / 1_000_000,
+                        r.bid_price,
+                        r.ask_price,
+                        r.bid_size as i64,
+                        r.ask_size as i64,
+                    )
+                })
+                .collect();
+
+            info!(
+                "load_quotes_from_clickhouse_sync: {} loaded {} quotes from CH in {:.1}ms",
+                symbol,
+                quotes.len(),
+                load_start.elapsed().as_secs_f64() * 1000.0
+            );
+            Ok(Some(quotes))
+        }
+        Err(e) => {
+            warn!(
+                "load_quotes_from_clickhouse_sync: {} CH query failed: {}, falling back to Parquet",
+                symbol, e
+            );
+            Ok(None)
+        }
+    }
+}
+
+/// Unified trade loader: ClickHouse first, Parquet fallback.
+///
+/// Matches TickDataReplayer's data source priority.
+/// Returns `Vec<(ts_ms, price, size)>` sorted ascending by sip_timestamp.
+pub fn load_trades_sync(
+    lake_data_dir: &str,
+    symbol: &str,
+    date_yyyymmdd: &str,
+    end_ts_ms: i64,
+    start_ts_ms: i64,
+    clickhouse_url: Option<&str>,
+    clickhouse_user: Option<&str>,
+    clickhouse_password: Option<&str>,
+    clickhouse_database: Option<&str>,
+) -> Result<Vec<(i64, f64, i64)>> {
+    // Try ClickHouse first if configured
+    if let (Some(url), Some(user), Some(password), Some(database)) =
+        (clickhouse_url, clickhouse_user, clickhouse_password, clickhouse_database)
+    {
+        if let Ok(Some(trades)) = load_trades_from_clickhouse_sync(
+            url, user, password, database,
+            symbol, date_yyyymmdd, end_ts_ms, start_ts_ms,
+        ) {
+            if !trades.is_empty() {
+                return Ok(trades);
+            }
+            // CH returned empty — fall through to Parquet
+        }
+    }
+
+    // Fallback to Parquet
+    load_trades_from_parquet_sync(lake_data_dir, symbol, date_yyyymmdd, end_ts_ms, start_ts_ms)
+}
+
+/// Unified quote loader: ClickHouse first, Parquet fallback.
+///
+/// Returns `Vec<(ts_ms, bid, ask, bid_size, ask_size)>` sorted ascending by sip_timestamp.
+/// Mirror of `load_trades_sync` for quote data.
+pub fn load_quotes_sync(
+    lake_data_dir: &str,
+    symbol: &str,
+    date_yyyymmdd: &str,
+    end_ts_ms: i64,
+    start_ts_ms: i64,
+    clickhouse_url: Option<&str>,
+    clickhouse_user: Option<&str>,
+    clickhouse_password: Option<&str>,
+    clickhouse_database: Option<&str>,
+) -> Result<Vec<(i64, f64, f64, i64, i64)>> {
+    // Try ClickHouse first if configured
+    if let (Some(url), Some(user), Some(password), Some(database)) =
+        (clickhouse_url, clickhouse_user, clickhouse_password, clickhouse_database)
+    {
+        if let Ok(Some(quotes)) = load_quotes_from_clickhouse_sync(
+            url, user, password, database,
+            symbol, date_yyyymmdd, end_ts_ms, start_ts_ms,
+        ) {
+            return Ok(quotes);
+        }
+    }
+
+    // Fallback to Parquet
+    load_quotes_from_parquet_sync(lake_data_dir, symbol, date_yyyymmdd, end_ts_ms, start_ts_ms)
+}
+
 // ── Standalone quote loader (for backtest) ──────────────────────────
 
 /// Load quotes from parquet for a single symbol/date synchronously.

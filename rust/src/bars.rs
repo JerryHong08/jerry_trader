@@ -625,6 +625,7 @@ impl BarBuilder {
 
                         let cb = bar.to_completed(ticker, tf);
                         self.completed_queue.push_back(cb.clone());
+
                         completed.push(cb.to_py_dict(py)?);
                         ticker_bars.last_closed_end.insert(tf, bar.bar_end);
                         ticker_bars.last_close_price.insert(tf, close_price);
@@ -1216,8 +1217,23 @@ impl BarBuilder {
         // Remove all REST partials for this ticker
         self.rest_partials.retain(|(t, _), _| t != ticker);
 
-        // Remove all pending WS meeting bars for this ticker
-        self.pending_ws_meeting_bars.retain(|(t, _), _| t != ticker);
+        // Recover pending WS meeting bars to completed_queue before dropping.
+        // These bars were deferred waiting for REST partials that will never
+        // arrive (e.g., trades_backfill found 0 historical trades). Without
+        // REST data, the WS-only bar stands as a complete bar.
+        let mut recovered: Vec<(String, Timeframe, BarState)> = Vec::new();
+        self.pending_ws_meeting_bars.retain(|(t, tf), bar| {
+            if t == ticker {
+                recovered.push((t.clone(), *tf, bar.clone()));
+                false
+            } else {
+                true
+            }
+        });
+        for (ticker_name, tf, bar) in recovered {
+            let cb = bar.to_completed(&ticker_name, tf);
+            self.completed_queue.push_back(cb);
+        }
     }
 
     /// Get all active tickers.

@@ -7,6 +7,7 @@
 
 use pyo3::prelude::*;
 use pyo3::types::PyList;
+use std::collections::HashMap;
 
 /// Return the z-score of `value` relative to `history`, or `None` if < 2 samples.
 ///
@@ -515,4 +516,73 @@ pub fn py_compute_quote_factors(
         .collect();
 
     QuoteFactorsResult { factors }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Forward-fill for batch backtest
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Result of forward-fill operation.
+///
+/// Contains merged factor snapshots where each timestamp has all factors
+/// from previous timestamps filled in.
+#[pyclass]
+#[derive(Debug, Clone)]
+pub struct ForwardFillResult {
+    /// Merged timeseries: Vec<(ts_ms, Vec<(factor_name, value)>)>
+    pub merged: Vec<(i64, Vec<(String, f64)>)>,
+}
+
+#[pymethods]
+impl ForwardFillResult {
+    #[getter]
+    fn merged(&self) -> Vec<(i64, Vec<(String, f64)>)> {
+        self.merged.clone()
+    }
+}
+
+/// Forward-fill factor timeseries.
+///
+/// Input: list of (ts_ms, dict_of_factors) sorted by ts_ms.
+/// Output: each timestamp gets all previous factors merged in.
+///
+/// Python signature:
+///   forward_fill_factors(ts: list[tuple[int, dict[str, float]]])
+///   → ForwardFillResult
+#[pyfunction]
+#[pyo3(name = "forward_fill_factors")]
+pub fn py_forward_fill_factors(
+    ts: Vec<(i64, HashMap<String, f64>)>,
+) -> ForwardFillResult {
+    use std::collections::BTreeMap;
+
+    if ts.is_empty() {
+        return ForwardFillResult { merged: vec![] };
+    }
+
+    // Sort by timestamp
+    let mut sorted: Vec<_> = ts;
+    sorted.sort_by_key(|(t, _)| *t);
+
+    let mut last_values: HashMap<String, f64> = HashMap::new();
+    let mut merged: Vec<(i64, Vec<(String, f64)>)> = Vec::with_capacity(sorted.len());
+
+    for (t, factors) in sorted {
+        // Start with last known values (forward-fill)
+        let mut current: HashMap<String, f64> = last_values.clone();
+        // Overwrite with new values at this timestamp
+        for (k, v) in &factors {
+            current.insert(k.clone(), *v);
+        }
+        // Collect as sorted vec for deterministic output
+        let mut entries: Vec<(String, f64)> = current.iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        merged.push((t, entries));
+        last_values = current;
+    }
+
+    ForwardFillResult { merged }
 }

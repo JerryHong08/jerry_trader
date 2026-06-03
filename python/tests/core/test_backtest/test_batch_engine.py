@@ -1,7 +1,5 @@
 """Tests for batch_engine — FactorEngineBatchAdapter."""
 
-from unittest.mock import MagicMock
-
 from jerry_trader.domain.backtest.types import Candidate
 from jerry_trader.domain.market import Bar
 from jerry_trader.services.backtest.batch_engine import (
@@ -70,47 +68,45 @@ class TestComputeBarFactors:
     """Test bar factor computation via live indicator instances."""
 
     def test_bar_factors_computed(self):
-        """Bar indicators should produce factor values after warmup."""
+        """Bar factors should produce factor values after warmup."""
         bars = [_make_bar("TEST", i * 60_000, 10.0 + i * 0.5) for i in range(25)]
         ts: FactorTimeseries = {}
 
-        # Use the static method directly — it just walks bars and updates indicators
         from jerry_trader.services.factor.factor_registry import get_factor_registry
 
         registry = get_factor_registry()
-        all_indicators = registry.create_indicators_for_type("bar")
-        bar_indicators = [i for i in all_indicators if hasattr(i, "update")]
-
-        FactorEngineBatchAdapter._compute_bar_factors(bars, bar_indicators, ts)
+        bar_specs = registry.get_factors_by_type("bar")
+        FactorEngineBatchAdapter._compute_bar_factors(bars, bar_specs, ts)
 
         # Should have entries for bars after warmup
         assert len(ts) > 0
 
 
-class TestComputeTickFactors:
-    """Test trade_rate factor via Rust bootstrap_trade_rate."""
+class TestComputeTradeFactors:
+    """Test trade_rate factor via Rust batch path."""
 
     def test_trade_rate_computed(self):
         trades = [(i * 1000, 10.0 + i * 0.01, 100) for i in range(100)]
         ts: FactorTimeseries = {}
 
-        # Create a mock tick indicator with window_ms
-        mock_ind = MagicMock()
-        mock_ind.name = "trade_rate"
-        mock_ind.window_ms = 20_000
-        mock_ind.min_trades = 5
+        from jerry_trader.services.factor.factor_registry import get_factor_registry
 
-        FactorEngineBatchAdapter._compute_tick_factors(trades, [mock_ind], ts)
+        registry = get_factor_registry()
+        trade_specs = registry.get_factors_by_type("trade")
+        FactorEngineBatchAdapter._compute_trade_factors(trades, trade_specs, ts)
 
         trade_rate_keys = [k for k, v in ts.items() if "trade_rate" in v]
         assert len(trade_rate_keys) > 0
 
     def test_no_trades_skips(self):
         ts: FactorTimeseries = {}
-        mock_ind = MagicMock()
-        mock_ind.name = "trade_rate"
 
-        FactorEngineBatchAdapter._compute_tick_factors([], [mock_ind], ts)
+        from jerry_trader.services.factor.factor_registry import get_factor_registry
+
+        registry = get_factor_registry()
+        trade_specs = registry.get_factors_by_type("trade")
+
+        FactorEngineBatchAdapter._compute_trade_factors([], trade_specs, ts)
         assert len(ts) == 0
 
 
@@ -125,18 +121,14 @@ class TestComputeQuoteFactors:
         ]
         ts: FactorTimeseries = {}
 
-        # Use live QuoteIndicator instances from registry
         from jerry_trader.services.factor.factor_registry import get_factor_registry
 
         registry = get_factor_registry()
-        all_quote = registry.create_indicators_for_type("quote")
-        from jerry_trader.services.factor.indicators import QuoteIndicator
+        quote_specs = registry.get_factors_by_type("quote")
 
-        quote_indicators = [i for i in all_quote if isinstance(i, QuoteIndicator)]
-
-        if quote_indicators:
-            FactorEngineBatchAdapter._compute_quote_factors(
-                quotes, quote_indicators, ts
+        if quote_specs:
+            FactorEngineBatchAdapter._compute_quote_factors_rust(
+                quotes, quote_specs, ts
             )
             # Should have factor entries
             assert len(ts) > 0

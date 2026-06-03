@@ -32,16 +32,6 @@ JAN15_0930_NS = 1_768_487_400_000_000_000
 JAN15_0930_MS = JAN15_0930_NS // 1_000_000
 
 
-# ── Fixtures ─────────────────────────────────────────────────────────
-
-
-@pytest.fixture(autouse=True)
-def reset_clock_after_test():
-    """Ensure clock.py is in live mode after every test."""
-    yield
-    clock.set_live_mode()
-
-
 # ══════════════════════════════════════════════════════════════════════
 #  Part 1: ReplayClock (Rust #[pyclass]) direct tests
 # ══════════════════════════════════════════════════════════════════════

@@ -4,6 +4,8 @@
 --   1) Keep InfluxDB writes (legacy)
 --   2) Add parallel writes into this table (supplement)
 --   3) Prefer this table for volume-history reload with Influx fallback
+--
+-- Note: 'change' column removed — was always 0.0, never computed. Use 'changePercent' instead.
 
 CREATE DATABASE IF NOT EXISTS jerry_trader;
 
@@ -30,7 +32,6 @@ CREATE TABLE IF NOT EXISTS jerry_trader.market_snapshot
 
     rank Int32,
     competition_rank Int32,
-    change Float64,
     relativeVolumeDaily Float64,
     relativeVolume5min Float64,
 

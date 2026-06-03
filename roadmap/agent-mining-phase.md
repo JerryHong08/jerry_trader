@@ -79,15 +79,24 @@ Output: Optimal parameter matrix per ticker type.
 
 ### Per-ticker performance
 
-| Ticker | Signals | Win Rate | Avg Return | Key Observation |
-|--------|---------|----------|------------|------------------|
-| BIAF | 13 | 62% | +0.65% | Success — persistent momentum |
-| KIDZ | 8 | 0% | -6.82% | Failure — no follow-through |
-| EDHL | 2 | 50% | -1.68% | Neutral |
-| FRSX | 1 | 0% | -18.35% | Failure |
-| ACXP | 1 | 0% | -19.46% | Failure |
+**⚠️ CORRECTION (2026-04-20): Earlier data was incorrect.**
 
-**Insight**: Ticker-specific behavior. BIAF has real buyers, KIDZ may be passive selling.
+Correct data from ClickHouse `backtest_results`:
+
+| Ticker | Signals | Win Rate | Avg Return | MFE | MAE | Key Observation |
+|--------|---------|----------|------------|-----|-----|------------------|
+| BIAF | 13 | 61.5% | +1.89% | +21.49% | -8.55% | Better risk/reward profile |
+| KIDZ | 8 | 62.5% | -0.34% | +6.37% | -20.29% | Worse risk/reward profile |
+| EDHL | 2 | 50.0% | -1.38% | +10.79% | -19.95% | Neutral |
+| FRSX | 1 | 0.0% | -13.26% | +1.10% | -25.82% | Failure |
+| ACXP | 1 | 0.0% | -8.46% | +6.70% | -39.44% | Failure |
+
+**Key insight**: Win rates are similar (61.5% vs 62.5%). The difference is in **MFE/MAE**:
+- BIAF: High upside potential (MFE +21%), Low downside risk (MAE -8%)
+- KIDZ: Low upside potential (MFE +6%), High downside risk (MAE -20%)
+
+**Wrong conclusion (earlier)**: "KIDZ has 0% win rate, stratification filters low-win tickers"
+**Correct understanding**: Stratification may predict risk/reward profile, NOT win rate
 
 ## Task Roadmap
 

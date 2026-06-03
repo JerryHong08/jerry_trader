@@ -1,0 +1,405 @@
+# Event Definition Configuration
+# Stage-based Architecture: WATCH → ENTRY → EXIT Flow
+#
+# Flow:
+#   1. FIRST_ENTRY trigger → WATCH event (选股)
+#   2. If WATCH matched → observe ticker (持续观察)
+#   3. CONTINUOUS trigger → ENTRY event (入场条件)
+#   4. If ENTRY matched → has_position (持仓)
+#   5. CONTINUOUS trigger → EXIT event (出场条件)
+#
+# Stage Types:
+# - watch: 选股阶段 - FIRST_ENTRY trigger, simple gap filter
+# - entry: 入场阶段 - CONTINUOUS trigger, momentum confirmation
+# - exit: 出场阶段 - CONTINUOUS trigger, has_position required
+#
+# FIRST_ENTRY Constraints:
+# - Bar-based factors (rel_vol_20, price_direction) need 20 bars warmup → NOT available
+# - Only use: entry_gap_pct (from candidate.gain_at_entry), session_phase (from time)
+#
+# Key distinction:
+# - entry_gap_pct: ticker's changePercent at the moment it entered top20 (dynamic)
+# - session_gap_pct: static gap from open vs prev_close (NOT used here)
+
+events:
+
+  # ────────────────────────────────────────────────────────────────────────
+  # Stage 1: WATCH (选股)
+  # Trigger: FIRST_ENTRY - ticker first enters top20
+  # Purpose: Decide which tickers to observe
+  # ────────────────────────────────────────────────────────────────────────
+
+  # WATCH stage gates WHEN to start observing a ticker, not gap magnitude.
+  # Cold validation (579K dense signals, 10 dates): entry_gap_pct > 4% filters 0
+  # samples — EVERY top20 ticker has gap > 10%. The gap condition is a no-op.
+  # Real value: temporal first_entry timing starts the 30-min WATCH window.
+  - name: gap_up_watch
+    description: "跳空股观察 (first_entry timing gate)"
+    stage: watch
+    trigger: first_entry
+    conditions:
+      - factor: entry_gap_pct
+        op: gt
+        value: 0.0  # Always true for top20 — timing gate only
+    validation:
+      note: "Zero discrimination (100% pass rate). Value is temporal timing."
+      expected_return: 0.02
+      min_win_rate: 0.45
+      signal_count: 30
+
+  # Stronger WATCH — still minimal discrimination since all top20 tickers gap > 10%
+  - name: gap_up_watch_strong
+    description: "跳空股观察 (tighter gap, still permissive)"
+    stage: watch
+    trigger: first_entry
+    conditions:
+      - factor: entry_gap_pct
+        op: gt
+        value: 4.0  # ~100% pass rate for top20 — timing gate
+    validation:
+      note: "Minimal discrimination. Value is temporal timing."
+      expected_return: 0.03
+      min_win_rate: 0.50
+      signal_count: 20
+
+  # ────────────────────────────────────────────────────────────────────────
+  # Stage 2: ENTRY (入场)
+  # Trigger: CONTINUOUS - evaluate after bar warmup
+  # Pre-condition: must have triggered a WATCH event
+  # Purpose: Decide when to enter (momentum confirmation)
+  # ────────────────────────────────────────────────────────────────────────
+
+  # ML-based entry - uses trained model for prediction
+  # Model v3: Ridge regression, 200 synthetic samples, R²=0.75
+  # Features: rel_vol_20, trade_rate, price_direction, gap_pct
+  # NOTE: price_direction AUC=0.518 (near-random) — model may overfit to noise
+  # NOTE: hard_constraint trade_rate < 100 is BACKWARDS — high trade_rate is positive (KS=0.828)
+  - name: ml_momentum_entry
+    description: "ML动量入场 (expected_return > 2%)"
+    stage: entry
+    trigger: continuous
+    pre_condition: gap_up_watch
+    model:
+      name: predictor_v3
+      min_expected_return: 0.02
+      min_confidence: 0.0
+    hard_constraints:
+      - factor: session_phase
+        op: eq
+        value: mid
+      - factor: trade_rate
+        op: lt
+        value: 100  # FIXME: backwards — winners have HIGH trade_rate
+      - factor: rel_vol_20
+        op: between
+        value: [1.5, 10.0]
+    validation:
+      expected_return: 0.02
+      min_win_rate: 0.40
+      signal_count: 50
+
+  # Cold validation (304K OOS samples, 5 dates Mar 9-13):
+  #   OOS precision(big+medium)=15.4%, MedMax=7.0%, n=21,399
+  # Factor analysis: trade_rate AUC=0.806 (KS=0.828), rel_vol_20 AUC=0.636 (KS=0.578)
+  - name: momentum_entry
+    description: "动量确认入场 (trade_rate>10 + rel_vol>2.0)"
+    stage: entry
+    trigger: continuous
+    pre_condition: gap_up_watch
+    conditions:
+      - factor: session_phase
+        op: eq
+        value: mid
+      - factor: trade_rate
+        op: gt
+        value: 10  # Losers median=0.3, winners median=39
+      - factor: rel_vol_20
+        op: gt
+        value: 2.0
+    validation:
+      note: "OOS prec=15.4%, MedMax=7.0%, 21K signals (cold validation)"
+      expected_return: 0.05
+      min_win_rate: 0.45
+      signal_count: 30
+
+  # Cold validation: OOS prec=11.5%, MedMax=7.1%, n=19,296
+  # Stricter trade_rate doesn't improve OOS precision (vs momentum_entry) —
+  # relaxed rel_vol (1.5 vs 2.0) introduces more noise
+  - name: activity_entry
+    description: "活跃度入场 (trade_rate>20 + rel_vol>1.5)"
+    stage: entry
+    trigger: continuous
+    pre_condition: gap_up_watch
+    conditions:
+      - factor: session_phase
+        op: eq
+        value: mid
+      - factor: trade_rate
+        op: gt
+        value: 20
+      - factor: rel_vol_20
+        op: gt
+        value: 1.5
+    validation:
+      note: "OOS prec=11.5%, MedMax=7.1%, 19K signals. Worse than momentum_entry."
+      expected_return: 0.06
+      min_win_rate: 0.50
+      signal_count: 25
+
+  # Cold validation: OOS prec=14.2%, MedMax=9.6%, n=4,728
+  # Highest MedMax but worst median exit return (-7.38%) — needs good exit strategy
+  - name: high_conviction_entry
+    description: "高确信入场 (trade_rate>50 + rel_vol>3.0)"
+    stage: entry
+    trigger: continuous
+    pre_condition: gap_up_watch_strong
+    conditions:
+      - factor: session_phase
+        op: eq
+        value: mid
+      - factor: trade_rate
+        op: gt
+        value: 50
+      - factor: rel_vol_20
+        op: gt
+        value: 3.0
+    validation:
+      note: "OOS prec=14.2%, MedMax=9.6%, 4.7K signals (cold validation)"
+      expected_return: 0.08
+      min_win_rate: 0.55
+      signal_count: 15
+
+  # ── Volume-first strategies (2026-05-07) ──
+  # Key insight: rel_vol is STABLE (IS→OOS Δ=-0.1pp), trade_rate is POWERFUL but UNSTABLE (Δ=-32pp).
+  # Making rel_vol the PRIMARY filter + minimal trade_rate (tr>5, just to remove dead tickers)
+  # achieves BETTER OOS precision than trade_rate-heavy strategies.
+  #
+  # Cold validation (579K samples, 10 dates):
+  #   volume_entry: OOS prec=17.8%, Δ=-7.3pp, n=30,155
+  #   volume_strong: OOS prec=19.6%, Δ=-9.1pp, n=18,604
+  #   volume_strong_10: OOS prec=19.9%, Δ=-9.7pp, n=15,032 (highest non-ML precision)
+  #
+  # Streaming backtest (8 dates, tp15_sl20 exit) — 2026-05-07:
+  #   momentum_entry:       47 signals, 55.3% win, +1.2% EV
+  #   volume_entry:         45 signals, 53.3% win, +1.6% EV
+  #   volume_strong:        32 signals, 59.4% win, +2.4% EV
+  #   volume_strong_10:     27 signals, 63.0% win, +3.5% EV ★ BEST
+  #   volume_quote_strong:  17 signals, 52.9% win, +0.6% EV (experimental)
+  #
+  # Factor effectiveness (cold validation AUC, MID phase, 579K samples):
+  #   trade_rate: AUC=0.806 IS, 0.669 OOS (strong but unstable Δ=+0.137)
+  #   quote_rate: AUC=0.743 IS, 0.661 OOS (3rd factor, Δ=+0.082, r=0.788 with trade_rate)
+  #   rel_vol_20: AUC=0.636 IS, 0.682 OOS (stable, only factor with negative Δ=-0.046!)
+  #   All other factors (price_dir, spread, gap, imbalance, vol_accel, ema) near-random.
+  #
+  # Batch mode generates ~2x signals but lower quality (no first-entry timing gate).
+  # Streaming mode (real-time simulation) is the preferred evaluation method.
+  # CRITICAL: -8% stop loss is too tight for pre-market. Use tp15_sl20 (TP+15%, SL-20%).
+  # 60% of signals hit -8% SL before reaching TP, even though many later rally 50-200%.
+  - name: volume_entry
+    description: "成交量优先入场 (rel_vol>3 + trade_rate>5)"
+    stage: entry
+    trigger: continuous
+    pre_condition: gap_up_watch
+    conditions:
+      - factor: session_phase
+        op: eq
+        value: mid
+      - factor: rel_vol_20
+        op: gt
+        value: 3.0  # Primary: stable volume filter (AUC=0.636)
+      - factor: trade_rate
+        op: gt
+        value: 5  # Secondary: remove dead tickers only (trade_rate<2 = 0% precision)
+    validation:
+      note: "OOS prec=17.8%, n=18.3K. +2.4pp vs momentum_entry."
+      expected_return: 0.05
+      min_win_rate: 0.50
+      signal_count: 30
+
+  - name: volume_strong
+    description: "强成交量入场 (rel_vol>5 + trade_rate>5)"
+    stage: entry
+    trigger: continuous
+    pre_condition: gap_up_watch
+    conditions:
+      - factor: session_phase
+        op: eq
+        value: mid
+      - factor: rel_vol_20
+        op: gt
+        value: 5.0  # Ultra-high volume (AUC=0.636, stable)
+      - factor: trade_rate
+        op: gt
+        value: 5  # Minimal activity filter (removes dead tickers)
+    validation:
+      note: "OOS prec=19.6%, n=18.6K. Streaming: 59.4% win, +2.4% EV, n=32 (8 dates)."
+      expected_return: 0.06
+      min_win_rate: 0.55
+      signal_count: 20
+
+  # Cold validation: OOS prec=19.9%, n=15K — tighter trade_rate>10 gives +0.3pp vs volume_strong
+  # Reduces signals ~20% vs volume_strong but improves precision
+  - name: volume_strong_10
+    description: "强成交量入场加强版 (rel_vol>5 + trade_rate>10) ★ RECOMMENDED"
+    stage: entry
+    trigger: continuous
+    pre_condition: gap_up_watch
+    conditions:
+      - factor: session_phase
+        op: eq
+        value: mid
+      - factor: rel_vol_20
+        op: gt
+        value: 5.0
+      - factor: trade_rate
+        op: gt
+        value: 10  # Tighter: better OOS precision (+0.3pp vs tr>5)
+    validation:
+      note: "OOS prec=19.9%, n=15K. Streaming: 63.0% win, +3.5% EV, n=27 (8 dates). BEST."
+      expected_return: 0.06
+      min_win_rate: 0.55
+      signal_count: 15
+
+  # Cold validation: OOS prec=20.4%, n=9.1K — highest standalone precision.
+  # quote_rate (AUC=0.710, Δ=+0.082) adds info beyond trade_rate (r=0.788),
+  # stratifying within tr bands: tr>5 + qr 0-5=8.4% prec, qr 50-200=18.6% prec.
+  # However, streaming backtest (n=17, 52.9% win, +0.6% EV) underperforms
+  # volume_strong_10. Sparse signals + bar-level granularity limit practical benefit.
+  - name: volume_quote_strong
+    description: "成交量+报价联合入场 (rel_vol>5 + trade_rate>5 + quote_rate>5) [EXPERIMENTAL]"
+    stage: entry
+    trigger: continuous
+    pre_condition: gap_up_watch
+    conditions:
+      - factor: session_phase
+        op: eq
+        value: mid
+      - factor: rel_vol_20
+        op: gt
+        value: 5.0
+      - factor: trade_rate
+        op: gt
+        value: 5
+      - factor: quote_rate
+        op: gt
+        value: 5  # Second source of activity signal (AUC=0.710)
+    validation:
+      note: "OOS prec=20.4%, n=9.1K. Streaming: 52.9% win, +0.6% EV, n=17. Below volume_strong_10."
+      expected_return: 0.07
+      min_win_rate: 0.55
+      signal_count: 12
+
+  # REMOVED: momentum_entry_strict — 0 signals across 8 backtest dates.
+  # price_direction AUC=0.518 (near-random), bid_ask_spread AUC=0.515 (near-random).
+  # rel_vol>3 is the only valid condition but alone generates 41K signals (cold validation).
+
+  # ────────────────────────────────────────────────────────────────────────
+  # Stage 3: EXIT (出场)
+  # Trigger: CONTINUOUS - evaluate while has_position
+  # Pre-condition: has_position (must have entered)
+  # Purpose: Decide when to exit (take profit / stop loss)
+  # Note: For now, we use fixed horizon for returns computation
+  #       Full EXIT logic requires unrealized_pnl_pct factor (TODO)
+  # ────────────────────────────────────────────────────────────────────────
+
+  # TODO: Implement unrealized_pnl_pct factor for real EXIT logic
+  # - name: take_profit_3pct
+  #   description: "止盈3%"
+  #   stage: exit
+  #   trigger: continuous
+  #   pre_condition: has_position
+  #   conditions:
+  #     - factor: unrealized_pnl_pct
+  #       op: gt
+  #       value: 3.0
+
+anti_patterns:
+  # Universal anti-patterns (always checked during ENTRY evaluation)
+
+  - name: reversal_gap_down
+    description: "跳空低开后的反转 - 陷阱"
+    conditions:
+      - factor: price_direction
+        op: between
+        value: [0.3, 0.5]
+      - factor: gap_pct
+        op: lt
+        value: -0.5
+    validation:
+      expected_return: -0.0818
+      min_win_rate: 0.41
+      signal_count: 551
+    action: AVOID
+
+  - name: false_breakout
+    description: "pd 0.5-0.7 假突破区"
+    conditions:
+      - factor: price_direction
+        op: between
+        value: [0.5, 0.7]
+    validation:
+      expected_return: -0.0266
+      min_win_rate: 0.35
+      signal_count: 8397
+    action: AVOID
+
+  - name: non_mid_phase
+    description: "非有效时间窗口 (避开 EARLY/LATE phase)"
+    conditions:
+      - factor: session_phase
+        op: ne
+        value: mid
+    validation:
+      expected_return: -0.0233
+      min_win_rate: 0.28
+      signal_count: 2185
+    action: AVOID
+
+  # Cold validation: trade_rate<2 filters 57-59% of samples with 0.0% big+medium precision
+  # This is the single most effective filter — removes guaranteed losers
+  - name: avoid_dead_ticker
+    description: "避免无交易活跃度 (trade_rate<2)"
+    conditions:
+      - factor: session_phase
+        op: eq
+        value: mid
+      - factor: trade_rate
+        op: lt
+        value: 2  # 57% of samples, 0.0% precision on winners
+    validation:
+      note: "Filters 57-59% of samples, 0.0% precision big+medium (cold validation)"
+      expected_return: -0.05
+      min_win_rate: 0.25
+      signal_count: 100
+    action: AVOID
+
+  - name: avoid_low_rel_vol
+    description: "避免低相对成交量 (rel_vol<1.5)"
+    conditions:
+      - factor: session_phase
+        op: eq
+        value: mid
+      - factor: rel_vol_20
+        op: lt
+        value: 1.5
+    validation:
+      expected_return: -0.02
+      min_win_rate: 0.35
+      signal_count: 100
+    action: AVOID
+
+  - name: avoid_high_bid_ask
+    description: "避免高买卖价差 (bid_ask_spread>70)"
+    conditions:
+      - factor: session_phase
+        op: eq
+        value: mid
+      - factor: bid_ask_spread
+        op: gt
+        value: 70
+    validation:
+      expected_return: -0.03
+      min_win_rate: 0.30
+      signal_count: 100
+    action: AVOID

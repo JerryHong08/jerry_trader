@@ -14,7 +14,7 @@ Tests cover:
 """
 
 from datetime import datetime, timedelta
-from typing import Dict, Optional
+from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import polars as pl

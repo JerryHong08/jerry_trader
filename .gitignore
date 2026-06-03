@@ -93,6 +93,8 @@ discard/
 *data.csv
 *.pkl
 *.sqlite3
+reports/*
+models/*
 
 # Misc
 momo_token.py

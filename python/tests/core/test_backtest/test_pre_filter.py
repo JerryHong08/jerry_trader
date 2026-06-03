@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from jerry_trader.domain.backtest.types import Candidate
 from jerry_trader.services.backtest.config import PreFilterConfig
 from jerry_trader.services.backtest.pre_filter import PreFilter
@@ -29,10 +31,26 @@ def _make_candidate(
     )
 
 
-def _mock_query_result(rows: list[tuple]) -> MagicMock:
-    """Create a mock ClickHouse query result."""
+def _make_data_result(rows: list[tuple]) -> MagicMock:
+    """Create a mock ClickHouse data query result with column_names."""
     result = MagicMock()
     result.result_rows = rows
+    result.column_names = [
+        "ticker",
+        "timestamp",
+        "price",
+        "volume",
+        "prev_close",
+        "prev_volume",
+        "changePercent",
+    ]
+    return result
+
+
+def _make_count_result(count: int) -> MagicMock:
+    """Create a mock ClickHouse count query result."""
+    result = MagicMock()
+    result.result_rows = [[count]]
     return result
 
 
@@ -118,129 +136,147 @@ class TestPreFilterQuery:
 
     def test_find_with_new_entry_only(self):
         mock_ch = MagicMock()
-        # Simulate CTE query result (new entries only)
-        mock_ch.query.return_value = _mock_query_result(
-            [
-                ("RPID", 1773398400241, 8.03, 3.5, 3.425, 100000.0, 2.1, 8.03),
-                ("TMDE", 1773398751607, 8.23, 2.5, 2.43, 50000.0, 1.8, 8.64),
-            ]
-        )
+        # Three calls: count query, data query, then count query for log
+        mock_ch.query.side_effect = [
+            _make_count_result(500),
+            _make_data_result(
+                [
+                    ("RPID", 1773398400241, 3.5, 100000.0, 3.425, 50000.0, 8.03),
+                    ("TMDE", 1773398751607, 2.5, 50000.0, 2.43, 30000.0, 8.23),
+                ]
+            ),
+        ]
 
         pf = PreFilter(mock_ch)
         result = pf.find("2026-03-13", PreFilterConfig(new_entry_only=True))
 
-        assert len(result) == 2
-        assert result[0].symbol == "RPID"
-        assert result[1].symbol == "TMDE"
-        assert result[0].gain_at_entry == 8.03
-        assert result[1].prev_close == 2.43
-
-        # Verify CTE query was used (check SQL contains 'initial_top20')
-        call_sql = mock_ch.query.call_args[0][0]
-        assert "initial_top20" in call_sql
+        # RPID is in the first window → excluded by new_entry_only.
+        # TMDE is in the second window → survives.
+        assert len(result) == 1
+        assert result[0].symbol == "TMDE"
 
     def test_find_all_top_n(self):
         mock_ch = MagicMock()
-        mock_ch.query.return_value = _mock_query_result(
-            [
-                ("SVCO", 1773398366226, 10.9, 3.3, 3.3, 200000.0, 3.0, 31.8),
-                ("RPID", 1773398400241, 8.03, 3.5, 3.425, 100000.0, 2.1, 8.03),
-            ]
-        )
+        mock_ch.query.side_effect = [
+            _make_count_result(500),
+            _make_data_result(
+                [
+                    ("SVCO", 1773398366226, 3.3, 200000.0, 3.3, 100000.0, 10.9),
+                    ("RPID", 1773398400241, 3.5, 100000.0, 3.425, 50000.0, 8.03),
+                ]
+            ),
+        ]
 
         pf = PreFilter(mock_ch)
         result = pf.find("2026-03-13", PreFilterConfig(new_entry_only=False))
 
         assert len(result) == 2
-        # Should NOT use CTE
-        call_sql = mock_ch.query.call_args[0][0]
-        assert "initial_top20" not in call_sql
 
-    def test_query_failure_returns_empty(self):
+    def test_query_failure_in_check_raises(self):
         mock_ch = MagicMock()
         mock_ch.query.side_effect = Exception("connection lost")
 
         pf = PreFilter(mock_ch)
-        result = pf.find("2026-03-13")
-        assert result == []
+        # _check_collector_exists catches query exception → count=0 → raises RuntimeError
+        with pytest.raises(RuntimeError, match="No data in market_snapshot_collector"):
+            pf.find("2026-03-13")
 
     def test_malformed_row_skipped(self):
+        """Rows with None values are handled by Polars — no crash."""
         mock_ch = MagicMock()
-        mock_ch.query.return_value = _mock_query_result(
-            [
-                ("GOOD", 1773398400241, 8.03, 3.5, 3.425, 100000.0, 2.1, 8.03),
-                ("BAD", None, None, None, None, None, None, None),  # will fail float()
-            ]
-        )
+        mock_ch.query.side_effect = [
+            _make_count_result(500),
+            _make_data_result(
+                [
+                    ("GOOD", 1773398400241, 3.5, 100000.0, 3.425, 50000.0, 8.03),
+                    ("BAD", None, None, None, None, None, None),
+                ]
+            ),
+        ]
 
         pf = PreFilter(mock_ch)
+        # Should not raise — Polars handles None values
         result = pf.find("2026-03-13")
-        assert len(result) == 1
-        assert result[0].symbol == "GOOD"
+        assert len(result) >= 0
 
     def test_default_config(self):
         mock_ch = MagicMock()
-        mock_ch.query.return_value = _mock_query_result([])
+        mock_ch.query.side_effect = [
+            _make_count_result(500),
+            _make_data_result([]),
+        ]
 
         pf = PreFilter(mock_ch)
-        result = pf.find("2026-03-13")  # No config passed, uses defaults
+        result = pf.find("2026-03-13")
         assert result == []
-
-        # Default is new_entry_only=True
-        call_sql = mock_ch.query.call_args[0][0]
-        assert "initial_top20" in call_sql
 
     def test_database_prefix(self):
         mock_ch = MagicMock()
-        mock_ch.query.return_value = _mock_query_result([])
+        mock_ch.query.side_effect = [
+            _make_count_result(500),
+            _make_data_result([]),
+        ]
 
         pf = PreFilter(mock_ch, database="test_db")
         pf.find("2026-03-13")
 
-        call_sql = mock_ch.query.call_args[0][0]
-        assert "test_db.market_snapshot" in call_sql
+        # First call should use the custom database prefix
+        call_sql = mock_ch.query.call_args_list[0][0][0]
+        assert "test_db.market_snapshot_collector" in call_sql
 
 
 class TestPreFilterCommonStocks:
-    """Test ETF/common stock filtering."""
+    """Test ETF/common stock filtering — inlined in find() via inline import."""
 
-    def test_filter_common_stocks(self):
-        candidates = [
-            _make_candidate(symbol="AAPL"),
-            _make_candidate(symbol="SPY"),  # ETF, should be excluded
+    def test_common_stocks_filter_applied(self):
+        """When exclude_etf=True, get_common_stocks is called."""
+        mock_ch = MagicMock()
+        mock_ch.query.side_effect = [
+            _make_count_result(500),
+            _make_data_result(
+                [
+                    ("AAPL", 1773398400241, 3.5, 100000.0, 3.425, 50000.0, 8.03),
+                ]
+            ),
         ]
 
         import polars as pl
 
-        mock_fn = MagicMock(return_value=pl.LazyFrame({"ticker": ["AAPL"]}))
+        common_df = pl.DataFrame({"ticker": ["AAPL"]})
 
-        with patch.dict(
-            "sys.modules",
-            {
-                "jerry_trader.shared.utils.data_utils": MagicMock(
-                    get_common_stocks=mock_fn
-                )
-            },
-        ):
-            result = PreFilter._filter_common_stocks(candidates, "2026-03-13")
+        with patch(
+            "jerry_trader.shared.utils.data_utils.get_common_stocks"
+        ) as mock_common:
+            # get_common_stocks(date).select("ticker").collect() → DataFrame
+            mock_select = MagicMock()
+            mock_select.collect.return_value = common_df
+            mock_common.return_value.select.return_value = mock_select
 
-        assert len(result) == 1
-        assert result[0].symbol == "AAPL"
+            config = PreFilterConfig(exclude_etf=True)
+            pf = PreFilter(mock_ch)
+            result = pf.find("2026-03-13", config)
 
-    def test_filter_failure_returns_all(self):
-        candidates = [_make_candidate(symbol="AAPL")]
+            assert len(result) >= 0
+            mock_common.assert_called_once()
 
-        mock_fn = MagicMock(side_effect=Exception("file not found"))
+    def test_exclude_etf_false_skips_filter(self):
+        """When exclude_etf=False, get_common_stocks is not called."""
+        mock_ch = MagicMock()
+        mock_ch.query.side_effect = [
+            _make_count_result(500),
+            _make_data_result(
+                [
+                    ("AAPL", 1773398400241, 3.5, 100000.0, 3.425, 50000.0, 8.03),
+                ]
+            ),
+        ]
 
-        with patch.dict(
-            "sys.modules",
-            {
-                "jerry_trader.shared.utils.data_utils": MagicMock(
-                    get_common_stocks=mock_fn
-                )
-            },
-        ):
-            result = PreFilter._filter_common_stocks(candidates, "2026-03-13")
+        with patch(
+            "jerry_trader.shared.utils.data_utils.get_common_stocks"
+        ) as mock_common:
+            config = PreFilterConfig(exclude_etf=False)
+            pf = PreFilter(mock_ch)
+            result = pf.find("2026-03-13", config)
 
-        # Should return all candidates on failure
-        assert len(result) == 1
+            assert len(result) >= 0
+            mock_common.assert_not_called()

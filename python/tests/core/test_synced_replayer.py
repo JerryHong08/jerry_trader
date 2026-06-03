@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List
 from unittest.mock import MagicMock
 
 import pytest
@@ -708,8 +708,10 @@ class TestEndToEndMockPipeline:
 #  Part 8: Integration — real Rust TickDataReplayer + Parquet data
 # ══════════════════════════════════════════════════════════════════════
 
-# Paths for real data — skip tests if unavailable
-LAKE_DATA_DIR = "/mnt/blackdisk/quant_data/polygon_data/lake"
+# Paths for real data — configurable via POLYGON_LAKE_DIR env var
+LAKE_DATA_DIR = os.getenv(
+    "POLYGON_LAKE_DIR", "/mnt/blackdisk/quant_data/polygon_data/lake"
+)
 REPLAY_DATE = "20260306"
 QUOTES_PARQUET = os.path.join(
     LAKE_DATA_DIR, "us_stocks_sip", "quotes_v1", "2026", "03", "2026-03-06.parquet"

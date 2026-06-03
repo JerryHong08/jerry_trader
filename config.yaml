@@ -111,26 +111,26 @@ machines:
         redis: "redis-a"
         # influxdb: "influxdb-b"
         clickhouse: "clickhouse-a"
-      SnapshotProcessor:
-        enabled: true
-        redis: "redis-a"
-        clickhouse: "clickhouse-a"
-        bootstrap:  # Bootstrap settings (for replay mode)
-          start_time: "040000"  # HHMMSS, e.g., "040000" for 04:00:00 ET
-          end_time: "080500"    # HHMMSS, e.g., "080500" for 08:05:00 ET
-      Replayer:
-        enabled: true
-        speed: 1.0
-        start_time: null    # HHMMSS, e.g., "080500" for 08:05:00 ET — set by bootstrap after completion
-        end_time: null      # HHMMSS, e.g., "093000" for 09:30:00 ET
-        rollback_to: null
-        clear: false
-        redis: "redis-a"
-        clickhouse: "clickhouse-a"
-        # clock_redis: points to the clock-master machine's Redis so the
-        # replayer can follow the shared ReplayClock via RemoteClockFollower.
-        # clock_redis: "redis-a@WSL2"
-        clock_redis: "redis-a"
+      # SnapshotProcessor:
+      #   enabled: true
+      #   redis: "redis-a"
+      #   clickhouse: "clickhouse-a"
+      #   bootstrap:  # Bootstrap settings (for replay mode)
+      #     start_time: "040000"  # HHMMSS, e.g., "040000" for 04:00:00 ET
+      #     end_time: "080500"    # HHMMSS, e.g., "080500" for 08:05:00 ET
+      # Replayer:
+      #   enabled: true
+      #   speed: 1.0
+      #   start_time: null    # HHMMSS, e.g., "080500" for 08:05:00 ET — set by bootstrap after completion
+      #   end_time: null      # HHMMSS, e.g., "093000" for 09:30:00 ET
+      #   rollback_to: null
+      #   clear: false
+      #   redis: "redis-a"
+      #   clickhouse: "clickhouse-a"
+      #   # clock_redis: points to the clock-master machine's Redis so the
+      #   # replayer can follow the shared ReplayClock via RemoteClockFollower.
+      #   # clock_redis: "redis-a@WSL2"
+      #   clock_redis: "redis-a"
 
   mibuntu:
     limit: "market_open"    # market_open | market_close | null (never stop)
@@ -218,13 +218,13 @@ machines:
 # =============================================================================
 defaults:
   replay_date: null #YYYYMMDD set to trigger bootstrap from ClickHouse
-  # replay_date: 20260306 #YYYYMMDD set to trigger bootstrap from ClickHouse
   # Global replay start time for ReplayClock initialization
   replay_start_time: null  # HHMMSS, e.g., "040000" for 04:00:00 ET
   # Used only when TickDataServer.manager_type == "synced-replayer"
-  # preload_tickers: list of tickers to preload for synced-replayer mode (null or empty = preload all)
-  # preload_tickers: ["NIPG","PRSO"]
-  preload_tickers: ["BIAF","ISPC"]
+  # preload_tickers: null # list of tickers to preload for synced-replayer mode (null or empty = preload all)
+  preload_tickers: ["NIPG","PRSO"]  # 0306
+  # preload_tickers: ["BIAF","ISPC"]  # 0313
+  # preload_tickers: ["BHAT"]  # 0305
   suffix_id: null
   load_history: null
   log_level: "DEBUG"

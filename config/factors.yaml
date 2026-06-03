@@ -25,6 +25,7 @@ factors:
 
   ema_20:
     class: EMA
+    rust_key: ema
     type: bar
     params:
       period: 20
@@ -70,6 +71,7 @@ factors:
 
   trade_rate:
     class: TradeRate
+    rust_key: trade_rate
     type: trade
     params:
       window_ms: 20000  # 20 second rolling window
@@ -89,9 +91,144 @@ factors:
         - "Sustained high rate = continuous participation"
       data_source: trade ticks
       warmup: requires min_trades in window
-    # trade-based factors apply to all timeframes (computed independently)
+    # tick-based factors apply to all timeframes (computed independently)
     timeframes:
-      - trade
+      - tick
+
+  large_trade_ratio:
+    class: LargeTradeRatio
+    rust_key: large_trade_ratio
+    type: trade
+    params:
+      window_ms: 20000    # 20 second rolling window
+      min_trades: 5       # Minimum trades before computing ratio
+      large_multiplier: 2.0  # Size > multiplier * mean = "large"
+    display:
+      name: LargeTradeRatio
+      description: Ratio of large trades to total trades in window
+      color: "#dc2626"   # red
+      priceScale: right
+      mode: panel
+    definition:
+      formula: "count(trades with size > large_multiplier * mean_size) / total_trades"
+      unit: "ratio [0, 1]"
+      interpretation:
+        - ">> 0.3 = institutional footprint detected"
+        - "<< 0.1 = retail-dominated trading"
+        - "Rising = increasing big-money participation"
+      data_source: trade ticks
+      warmup: requires min_trades in window
+    timeframes:
+      - tick
+
+  aggressor_ratio:
+    class: AggressorRatio
+    rust_key: aggressor_ratio
+    type: trade
+    params:
+      window_ms: 20000    # 20 second rolling window
+      min_trades: 5       # Minimum trades before computing ratio
+    display:
+      name: AggressorRatio
+      description: Buyer-initiated trade ratio in rolling window (tick test)
+      color: "#8b5cf6"    # purple
+      priceScale: right
+      mode: panel
+    definition:
+      formula: "buyer_initiated_trades / total_trades, where buyer-initiated = uptick vs previous trade price"
+      unit: "ratio [0, 1]"
+      interpretation:
+        - "> 0.5 = buyer dominance, bullish pressure"
+        - "< 0.5 = seller dominance, bearish pressure"
+        - "> 0.7 = strong buying, potential breakout"
+        - "< 0.3 = strong selling, potential breakdown"
+      data_source: trade ticks (price direction vs previous trade)
+      warmup: requires min_trades in window
+    timeframes:
+      - tick
+
+  # ────────────────────────────────────────────────────────────────────────
+  # Quote-based Indicators (microstructure)
+  # ────────────────────────────────────────────────────────────────────────
+
+  quote_rate:
+    class: QuoteRate
+    rust_key: quote_rate
+    type: quote
+    params:
+      window_ms: 10000   # 10 second rolling window
+      min_quotes: 10     # Minimum quotes before computing rate
+    display:
+      name: QuoteRate
+      description: Quote update frequency (quotes per second)
+      color: "#22c55e"   # green
+      priceScale: right
+      mode: panel
+    definition:
+      formula: "count(quotes_in_window) / window_seconds"
+      unit: "quotes/second"
+      interpretation:
+        - "High rate = active market attention, real liquidity"
+        - "Low rate = stale quotes, potential fake signal"
+        - "> 10 quotes/sec = genuine market activity"
+        - "< 1 quote/sec = suspicious, likely manipulation"
+      data_source: quote stream (bid/ask updates)
+      warmup: requires min_quotes in window
+    timeframes:
+      - tick
+
+  bid_ask_spread:
+    class: BidAskSpread
+    rust_key: bid_ask_spread
+    type: quote
+    params:
+      window_ms: 5000    # 5 second rolling average
+    display:
+      name: SpreadBPS
+      description: Bid-ask spread in basis points
+      color: "#ec4899"   # pink
+      priceScale: right
+      mode: panel
+    definition:
+      formula: "(ask - bid) / mid_price * 10000"
+      unit: "basis points (bps)"
+      interpretation:
+        - "Tight spread (low bps) = active market, good liquidity"
+        - "Wide spread (high bps) = thin market, risky entry"
+        - "Rapidly tightening = potential breakout incoming"
+        - "> 100 bps = illiquid, avoid"
+      data_source: quote stream (bid/ask prices)
+      warmup: requires at least 1 quote in window
+    timeframes:
+      - tick
+
+  order_imbalance:
+    class: OrderImbalance
+    rust_key: order_imbalance
+    type: quote
+    params:
+      window_ms: 5000    # 5 second rolling average
+    display:
+      name: OrderImb
+      description: Bid-ask size imbalance ratio
+      color: "#6366f1"   # indigo
+      priceScale: right
+      mode: panel
+    definition:
+      formula: "(bid_size - ask_size) / (bid_size + ask_size)"
+      unit: "ratio [-1, +1]"
+      interpretation:
+        - "+1.0 = pure buying pressure (all bids)"
+        - "-1.0 = pure selling pressure (all asks)"
+        - "0.0 = balanced market"
+        - "> 0.3 = strong buy interest"
+        - "< -0.3 = strong sell interest"
+        - "Near 0 = active, balanced market (good)"
+        - "Extreme (-0.9) = heavily skewed, suspicious"
+      data_source: quote stream (bid/ask sizes)
+      warmup: requires at least 1 quote in window
+    timeframes:
+      - tick
 
   # ────────────────────────────────────────────────────────────────────────
   # Future Indicators (examples)
@@ -110,25 +247,143 @@ factors:
   #   timeframes:
   #     - tick
 
-  # relative_volume:
-  #   class: RelativeVolume
-  #   type: bar
-  #   params:
-  #     lookback_periods: 20
-  #   display:
-  #     name: RelVol
-  #     description: Volume relative to 20-period average
-  #     color: "#f59e0b"
-  #     priceScale: right
-  #   definition:
-  #     formula: "current_bar_volume / mean(last_N_bars_volume)"
-  #     unit: "ratio (1.0 = average)"
-  #     interpretation:
-  #       - "> 1.0 = above average activity"
-  #       - "< 1.0 = below average activity"
-  #       - "Higher values indicate stronger market participation"
-  #     data_source: bar volume
-  #     warmup: requires N bars history
-  #   timeframes:
-  #     - 1m
-  #     - 5m
+  relative_volume:
+    class: RelativeVolume
+    rust_key: relative_volume
+    type: bar
+    params:
+      lookback: 20
+    display:
+      name: RelVol
+      description: Volume relative to 20-period average
+      color: "#f59e0b"
+      priceScale: right
+      mode: panel
+    definition:
+      formula: "current_bar_volume / mean(last_N_bars_volume)"
+      unit: "ratio (1.0 = average)"
+      interpretation:
+        - "> 1.0 = above average activity"
+        - "< 1.0 = below average activity"
+        - "Higher values indicate stronger market participation"
+        - "> 2.0 = unusual activity, potential breakout"
+        - "> 3.0 = possible institutional participation"
+      data_source: bar volume
+      warmup: requires N bars history
+    timeframes:
+      - 1m
+      - 5m
+      - 15m
+
+  price_direction:
+    class: PriceDirection
+    rust_key: price_direction
+    type: bar
+    params: {}
+    display:
+      name: PriceDir
+      description: Bar close position within high-low range
+      color: "#8b5cf6"
+      priceScale: right
+      mode: panel
+    definition:
+      formula: "(close - low) / (high - low)"
+      unit: "ratio [0, 1]"
+      interpretation:
+        - "1.0 = close at high (pure buying pressure)"
+        - "0.0 = close at low (pure selling pressure)"
+        - "0.5 = close at midpoint (neutral)"
+        - "> 0.7 = strong buying, avoid passive sell traps"
+        - "< 0.3 = selling pressure, even if price rises"
+      data_source: bar OHLC
+      warmup: none (single bar computation)
+    timeframes:
+      - 1m
+      - 5m
+      - 15m
+
+  gap_percent:
+    class: GapPercent
+    rust_key: gap_percent
+    type: bar
+    params: {}
+    display:
+      name: GapPct
+      description: Gap percentage from previous bar close
+      color: "#ef4444"
+      priceScale: right
+      mode: panel
+    definition:
+      formula: "(current_open - prev_close) / prev_close * 100"
+      unit: "percent"
+      interpretation:
+        - "0 = no gap"
+        - "> 5 = gapped up 5%"
+        - "> 15 = large gap, avoid chasing"
+        - "< -5 = gapped down 5%"
+      data_source: bar OHLC (consecutive bars)
+      warmup: 2 bars (need previous close)
+    timeframes:
+      - 1m
+      - 5m
+      - 15m
+
+  vwap_deviation:
+    class: VwapDeviation
+    rust_key: vwap_deviation
+    type: bar
+    params:
+      period: 20
+    display:
+      name: VWAPDev
+      description: Price deviation from VWAP in percent
+      color: "#10b981"   # emerald green
+      priceScale: right
+      mode: panel
+    definition:
+      formula: "(close - vwap) / vwap * 100, where vwap = sum(close_i * volume_i) / sum(volume_i) over N bars"
+      unit: "percent"
+      interpretation:
+        - "> 0 = price above VWAP (premium, bullish)"
+        - "< 0 = price below VWAP (discount, bearish)"
+        - "Crossing above 0 = potential breakout"
+        - "Extreme values (> 2%) = overbought/oversold, likely mean reversion"
+      data_source: bar OHLCV
+      warmup: period bars (default 20)
+    timeframes:
+      - 1m
+      - 5m
+      - 15m
+      - 30m
+      - 1h
+
+  # ────────────────────────────────────────────────────────────────────────
+  # Volume Acceleration Indicators
+  # ────────────────────────────────────────────────────────────────────────
+
+  vol_accel_5_15:
+    class: VolumeAcceleration
+    rust_key: volume_acceleration
+    type: bar
+    params:
+      short_window: 5
+      long_window: 15
+    display:
+      name: VolAccel
+      description: Volume acceleration sustainability (rolling bar windows)
+      color: "#06b6d4"
+      priceScale: right
+      mode: panel
+    definition:
+      formula: "(vol_prev_short / vol_older_long) / (vol_recent / vol_prev_short)"
+      unit: "ratio"
+      interpretation:
+        - "> 1.0 = volume acceleration is increasing (good entry signal)"
+        - "< 1.0 = volume acceleration is decaying (avoid)"
+        - "Measures momentum sustainability without fixed time windows"
+      data_source: bar volumes (rolling windows)
+      warmup: 2*short_window + long_window bars (35 bars for default)
+    timeframes:
+      - 1m
+      - 5m
+      - 15m

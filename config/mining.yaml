@@ -1,0 +1,93 @@
+# Mining Configuration
+#
+# Defines search space for strategy mining.
+# All thresholds and factor combinations are configurable.
+#
+# Usage:
+#   poetry run python -m jerry_trader.services.backtest.mining --config config/mining.yaml
+
+# Ticker Stratification (ROADMAP 11.20)
+# Classify tickers before mining to filter out unsuitable candidates
+# Key insight from BIAF vs KIDZ analysis:
+#   - Low float + contaminated TRF = avoid (threshold mining fails)
+#   - Large float + clean TRF = momentum_candidate (threshold works)
+stratification:
+  # Float shares threshold
+  # <500K = low float (illiquid, prone to manipulation)
+  low_float_threshold: 500_000
+
+  # Delayed TRF ratio threshold
+  # >10% delayed TRF = contaminated data (stale trade reports)
+  high_delayed_trf_threshold: 0.10
+
+  # Require BOTH conditions to avoid (vs ANY)
+  # If true: only avoid when BOTH low_float AND contaminated
+  # If false: avoid when EITHER condition fails
+  require_both: false
+
+  # Categories after classification:
+  # - momentum_candidate: suitable for threshold mining
+  # - avoid: not suitable, excluded from mining
+  # - unknown: missing data, included (assume OK)
+
+# Search space: factor thresholds to explore
+# NOTE: Thresholds calibrated to actual factor value ranges:
+#   - trade_rate: trades per second (typical range 1-10)
+#   - rel_vol_20: volume ratio (typical range 0-15)
+#   - price_direction: bar position in high-low range (0-1)
+#   - gap_pct: gap percentage from previous close
+search_space:
+  trade_rate:
+    op: GT
+    values: [1, 2, 3, 5, 8]  # Trades per second scale
+    timeframe: trade
+
+  rel_vol_20:  # Indicator outputs 'rel_vol_20', not 'relative_volume'
+    op: GT
+    values: [1.0, 2.0, 3.0, 5.0]  # Volume ratio scale
+    timeframe: 1m
+
+  price_direction:
+    op: GT
+    values: [0.3, 0.5, 0.7]  # Bar position scale (0-1)
+    timeframe: 1m
+
+  gap_pct:  # Indicator outputs 'gap_pct', not 'gap_percent'
+    op: LT
+    values: [10, 15, 20]  # Max gap percentage
+    timeframe: 1m
+
+# Factor combinations to test
+combinations:
+  # Single factor baseline
+  - factors: [trade_rate]
+    name: baseline
+
+  # Two-factor
+  - factors: [trade_rate, rel_vol_20]
+    name: volume_confirmed
+
+  - factors: [trade_rate, price_direction]
+    name: direction_confirmed
+
+  # Three-factor (gap filter)
+  - factors: [trade_rate, rel_vol_20, gap_pct]
+    name: gap_filtered
+
+  # NOTE: Disabled 4-factor combination (strict_entry) for now
+  # - factors: [trade_rate, rel_vol_20, price_direction, gap_pct]
+  #   name: strict_entry
+
+# Validation gates for multi-date validation
+validation:
+  min_dates: 10
+  min_signals: 30
+  min_win_rate: 0.50
+  min_profit_factor: 1.0
+  max_pf_drift: 0.20
+
+# Execution settings
+execution:
+  parallel: true
+  workers: 4
+  record_experiment: true

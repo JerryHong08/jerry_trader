@@ -2,7 +2,66 @@
 
 ### Feat
 
+- **backtest**: Event Framework (ROADMAP 11.32-11.34) — Boolean Event Selection framework replacing Rule-based mining
+  - Event/Condition domain types for Boolean signal selection
+  - EventEvaluator for accept/reject filtering
+  - EventValidator with Avg Return + Win Rate metrics (replacing IC)
+  - events.yaml config with validated events and anti-patterns
+  - `mine_events()` and `--events` CLI for Event-based mining
+  - SessionPhase detection (early/mid/late window)
+
+- **backtest**: Autoresearch-style Research Loop (ROADMAP 11.35) — agent-driven hypothesis validation methodology
+  - mining-program.md: research guide with hypothesis-first protocol
+  - results.tsv: experiment tracking (date, hypothesis, avg_return, verdict)
+  - mining-lessons.md: failure/success pattern recording
+  - CLI `--record --experiment-id --hypothesis` for automatic logging
+
+### Findings
+
+- **validation**: 10-day Event validation (ROADMAP 11.36) — reversal_entry_neutral_gap NOT profitable without outlier
+  - Original validation: avg_return=+4.29% (inflated by 2026-03-09 outlier with avg_return=+36.30%)
+  - Excluding outlier: avg_return=-0.56%, win_rate=48.78%
+  - **Conclusion**: Event Framework works correctly, but Event definition needs adjustment or regime detection
+
+### Refactor
+
+- **backtest**: Mining cleanup — removed deprecated Rule-based mining code
+  - Deleted `ic_analysis.py` (IC proven ineffective as validation metric)
+  - Deleted `ticker_stratification.py`, `stratification_validation.py`
+  - Removed `mine()`, `mine_multifactor()`, `mine_date_range()` and related methods
+  - Cleaned unused imports, fixed class structure
+
 - **agent**: ATC-R Agent System architecture design — Rule Engine (Strategy DSL) + Agent Think (LLM reasoning) + Backtest integration
+- **backtest**: Experiment logging framework — `run_id` linking to ClickHouse for reproducible experiment tracking
+- **backtest**: Mining pipeline (`mining.py`) — threshold sweep, multi-condition rules, parameter optimization
+- **backtest**: Multi-factor mining (ROADMAP 11.15/11.16) — `generate_multifactor_candidates()` creates 24 rule combinations: trade_rate + rel_vol + price_direction + gap_percent
+- **backtest**: `--multifactor` CLI option — run multi-factor strategy mining with 4 factor combinations
+- **backtest**: `validate_strategy()` — multi-date validation workflow with stability metrics (ROADMAP 11.17)
+- **backtest**: Config-driven mining (ROADMAP 11.23) — YAML search space, no hardcoded thresholds, `--config` CLI option
+- **backtest**: Mining batch optimization (ROADMAP 11.24) — shared preprocessing (`SharedBacktestData`), 272 candidates in ~50s instead of 90+ min
+- **backtest**: `mine_batch()` — one-time PreFilter + DataLoader + FactorEngine, fast signal evaluation per rule (~0.1s)
+- **backtest**: Mining → backtest_results persistence (ROADMAP 11.28) — all mining signals persisted to ClickHouse, foundation for Signal Framework IC calculation
+- **backtest**: Multi-date parallel mining (ROADMAP 6.15) — `mine_date_range()` with ProcessPoolExecutor, aggregate report, validation gates
+- **backtest**: Mining parallel execution (ROADMAP 6.14) — `--date-range --parallel --workers N` CLI options
+- **backtest**: AggregateMiningResult — cross-date statistics (stability, blockers, validation status)
+- **backtest**: `/mine` skill — Agent mining workflow with knowledge queries
+- **backtest**: CLI enhancements — `--date-range`, `--parallel`, `--dry-run` support
+- **factor**: Auto-registration (ROADMAP 6.17) — `__init_subclass__` eliminates manual INDICATOR_CLASSES dict
+- **factor**: Unified Factor interface (V4) — `compute_batch()` + `update()` for batch + incremental
+- **factor**: RelativeVolume (ROADMAP 11.9) — volume relative to N-period average
+- **factor**: PriceDirection (ROADMAP 11.10) — buy/sell pressure from bar close position
+- **factor**: GapPercent (ROADMAP 11.11) — gap percentage from previous close
+- **replayer**: CHReplayer ClickHouse data source with Parquet fallback — unified historical data loading
+- **rust**: Logging bridge — Python logging forwarded to Rust for unified log output
+- **rust**: Unified trade loader — `load_trades_from_ch()` and `load_trades_from_parquet()` with consistent interface
+
+### Design
+
+- **factor**: Factor Engine unified architecture (Section 12) — trait-based plugin system, batch + incremental compute
+- **factor**: Factor trait design — `FactorConfig`, `FactorState`, `compute_batch()`, `compute_incremental()` interface
+- **compute**: Rust Compute Box architecture (Section 13) — DataLayer, BootstrapStatus, WS Publisher, FactorEngineCore
+- **backtest**: Experiment framework — statistical validation, reproducibility, knowledge transfer workflow
+- **agent**: Agent mining phase — factor implementation roadmap, threshold optimization, multi-date validation
 
 ### Fix
 

@@ -11,11 +11,9 @@ import gzip
 import pickle
 import threading
 import time
-import uuid
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
-import redis
 
 from jerry_trader.services.orchestration.bootstrap_coordinator import (
     BOOTSTRAP_TIMEFRAMES,
@@ -93,8 +91,8 @@ class TestBootstrapCoordinatorCore:
         coordinator.start_bootstrap("AAPL", timeframes=["1m"])
 
         # Simulate completion - mark all consumers done
-        coordinator.register_consumer("AAPL", "tick_warmup", "factor_engine")
-        coordinator.report_done("AAPL", "tick_warmup", "factor_engine")
+        coordinator.register_consumer("AAPL", "trade_warmup", "factor_engine")
+        coordinator.report_done("AAPL", "trade_warmup", "factor_engine")
         coordinator.on_bars_ready("AAPL", "1m")
         coordinator.register_consumer("AAPL", "bar_warmup:1m", "factor_engine")
         coordinator.report_done("AAPL", "bar_warmup:1m", "factor_engine")
@@ -167,11 +165,11 @@ class TestBootstrapCoordinatorCore:
         """Test register_consumer adds consumer to tracking."""
         coordinator.start_bootstrap("AAPL", timeframes=["1m"])
 
-        coordinator.register_consumer("AAPL", "tick_warmup", "factor_engine")
+        coordinator.register_consumer("AAPL", "trade_warmup", "factor_engine")
 
         bootstrap = coordinator.get_bootstrap("AAPL")
-        assert "factor_engine" in bootstrap.tick_consumers
-        assert bootstrap.tick_consumers["factor_engine"] is False
+        assert "factor_engine" in bootstrap.trade_consumers
+        assert bootstrap.trade_consumers["factor_engine"] is False
 
     def test_register_bar_consumer(self, coordinator):
         """Test register_consumer for bar_warmup per timeframe."""
@@ -182,16 +180,16 @@ class TestBootstrapCoordinatorCore:
         bootstrap = coordinator.get_bootstrap("AAPL")
         assert "factor_engine" in bootstrap.timeframes["1m"].bar_consumers
 
-    def test_report_done_tick_warmup(self, coordinator):
-        """Test report_done marks tick_warmup complete."""
+    def test_report_done_trade_warmup(self, coordinator):
+        """Test report_done marks trade_warmup complete."""
         coordinator.start_bootstrap("AAPL", timeframes=["1m"])
-        coordinator.register_consumer("AAPL", "tick_warmup", "factor_engine")
+        coordinator.register_consumer("AAPL", "trade_warmup", "factor_engine")
 
-        coordinator.report_done("AAPL", "tick_warmup", "factor_engine")
+        coordinator.report_done("AAPL", "trade_warmup", "factor_engine")
 
         bootstrap = coordinator.get_bootstrap("AAPL")
-        assert bootstrap.tick_consumers["factor_engine"] is True
-        assert bootstrap.all_tick_consumers_done() is True
+        assert bootstrap.trade_consumers["factor_engine"] is True
+        assert bootstrap.all_trade_consumers_done() is True
 
     def test_report_done_bar_warmup(self, coordinator):
         """Test report_done marks bar_warmup complete and updates state."""
@@ -210,8 +208,8 @@ class TestBootstrapCoordinatorCore:
         coordinator.start_bootstrap("AAPL", timeframes=["1m"])
 
         # Complete tick warmup
-        coordinator.register_consumer("AAPL", "tick_warmup", "factor_engine")
-        coordinator.report_done("AAPL", "tick_warmup", "factor_engine")
+        coordinator.register_consumer("AAPL", "trade_warmup", "factor_engine")
+        coordinator.report_done("AAPL", "trade_warmup", "factor_engine")
 
         # Complete bar warmup
         coordinator.on_bars_ready("AAPL", "1m")
@@ -224,7 +222,7 @@ class TestBootstrapCoordinatorCore:
     def test_is_ready_not_ready(self, coordinator):
         """Test is_ready returns False when consumers pending."""
         coordinator.start_bootstrap("AAPL", timeframes=["1m"])
-        coordinator.register_consumer("AAPL", "tick_warmup", "factor_engine")
+        coordinator.register_consumer("AAPL", "trade_warmup", "factor_engine")
         # Don't report done
 
         bootstrap = coordinator.get_bootstrap("AAPL")
@@ -244,8 +242,8 @@ class TestBootstrapCoordinatorCore:
         # Complete in background
         def complete():
             time.sleep(0.01)
-            coordinator.register_consumer("AAPL", "tick_warmup", "fe")
-            coordinator.report_done("AAPL", "tick_warmup", "fe")
+            coordinator.register_consumer("AAPL", "trade_warmup", "fe")
+            coordinator.report_done("AAPL", "trade_warmup", "fe")
             coordinator.on_bars_ready("AAPL", "1m")
             coordinator.register_consumer("AAPL", "bar_warmup:1m", "fe")
             coordinator.report_done("AAPL", "bar_warmup:1m", "fe")
@@ -299,10 +297,10 @@ class TestBootstrapCoordinatorIntegration:
         assert plan.timeframes["10s"].state == TimeframeState.READY
 
         # 4. FactorEngine registers and completes
-        coordinator.register_consumer("TSLA", "tick_warmup", "factor_engine")
+        coordinator.register_consumer("TSLA", "trade_warmup", "factor_engine")
         coordinator.register_consumer("TSLA", "bar_warmup:10s", "factor_engine")
 
-        coordinator.report_done("TSLA", "tick_warmup", "factor_engine")
+        coordinator.report_done("TSLA", "trade_warmup", "factor_engine")
         coordinator.report_done("TSLA", "bar_warmup:10s", "factor_engine")
 
         # 5. Verify ready
@@ -323,8 +321,8 @@ class TestBootstrapCoordinatorIntegration:
         # 1d is ws_only, no bars ready needed
 
         # 4. FactorEngine completes all phases
-        coordinator.register_consumer("AAPL", "tick_warmup", "factor_engine")
-        coordinator.report_done("AAPL", "tick_warmup", "factor_engine")
+        coordinator.register_consumer("AAPL", "trade_warmup", "factor_engine")
+        coordinator.report_done("AAPL", "trade_warmup", "factor_engine")
 
         coordinator.register_consumer("AAPL", "bar_warmup:10s", "factor_engine")
         coordinator.register_consumer("AAPL", "bar_warmup:1m", "factor_engine")
@@ -340,8 +338,8 @@ class TestBootstrapCoordinatorIntegration:
         coordinator.start_bootstrap("MSFT", timeframes=["1m"])
         coordinator.store_trades("MSFT", [(1000, 100.0, 10)])
         coordinator.on_bars_ready("MSFT", "1m")
-        coordinator.register_consumer("MSFT", "tick_warmup", "fe")
-        coordinator.report_done("MSFT", "tick_warmup", "fe")
+        coordinator.register_consumer("MSFT", "trade_warmup", "fe")
+        coordinator.report_done("MSFT", "trade_warmup", "fe")
         coordinator.register_consumer("MSFT", "bar_warmup:1m", "fe")
         coordinator.report_done("MSFT", "bar_warmup:1m", "fe")
 
@@ -361,16 +359,16 @@ class TestBootstrapCoordinatorIntegration:
         coordinator.start_bootstrap("GOOGL", timeframes=["1m", "5m"])
 
         # Multiple services as consumers
-        coordinator.register_consumer("GOOGL", "tick_warmup", "factor_engine")
-        coordinator.register_consumer("GOOGL", "tick_warmup", "state_engine")
+        coordinator.register_consumer("GOOGL", "trade_warmup", "factor_engine")
+        coordinator.register_consumer("GOOGL", "trade_warmup", "state_engine")
 
         # One completes
-        coordinator.report_done("GOOGL", "tick_warmup", "factor_engine")
-        assert not coordinator.get_bootstrap("GOOGL").all_tick_consumers_done()
+        coordinator.report_done("GOOGL", "trade_warmup", "factor_engine")
+        assert not coordinator.get_bootstrap("GOOGL").all_trade_consumers_done()
 
         # Other completes
-        coordinator.report_done("GOOGL", "tick_warmup", "state_engine")
-        assert coordinator.get_bootstrap("GOOGL").all_tick_consumers_done()
+        coordinator.report_done("GOOGL", "trade_warmup", "state_engine")
+        assert coordinator.get_bootstrap("GOOGL").all_trade_consumers_done()
 
 
 class TestGlobalCoordinator:
@@ -444,12 +442,12 @@ class TestEdgeCases:
     def test_report_done_unknown_symbol(self, coordinator):
         """Test report_done with unknown symbol is no-op."""
         # Should not raise
-        coordinator.report_done("UNKNOWN", "tick_warmup", "factor_engine")
+        coordinator.report_done("UNKNOWN", "trade_warmup", "factor_engine")
 
     def test_register_consumer_unknown_symbol(self, coordinator):
         """Test register_consumer with unknown symbol is no-op."""
         # Should not raise
-        coordinator.register_consumer("UNKNOWN", "tick_warmup", "factor_engine")
+        coordinator.register_consumer("UNKNOWN", "trade_warmup", "factor_engine")
 
     def test_on_bars_ready_unknown_symbol(self, coordinator):
         """Test on_bars_ready with unknown symbol is no-op."""

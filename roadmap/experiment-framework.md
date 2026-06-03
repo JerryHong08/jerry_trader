@@ -104,6 +104,36 @@ lessons:
 
 ## Validation Gates (Simplified)
 
+### Statistical Validation Principle (CRITICAL)
+
+**任何数据驱动的结论必须通过统计学验证。**
+
+| 违规示例 | 问题 |
+|---------|------|
+| "BIAF 比 KIDZ 好" | 单 ticker 对比，样本量 = 2 |
+| "阈值 150 有效" | 单日期验证，可能 outlier |
+| "策略盈利" | 无置信区间，无显著性检验 |
+
+**正确的验证流程：**
+
+```
+观察现象 (case study) → 提出假设 → 统计验证 → 确认/否定
+```
+
+- Case study = hypothesis generator，不是 proof
+- 需要批量验证后才能 deployment
+
+### Minimum Standards
+
+| 维度 | 最小要求 | 当前状态 |
+|-----|---------|---------|
+| Ticker sample | > 100 | ❌ 目前只分析了 2 个 |
+| Date sample | > 10 | ❌ 目前只验证了 1 天 |
+| Significance | p < 0.05 | ❌ 未做检验 |
+| Confidence interval | 95% CI | ❌ 未计算 |
+
+### Gates
+
 | Stage | Requirements |
 |-------|-------------|
 | quick_check | signals > 5, win_rate > 30% |

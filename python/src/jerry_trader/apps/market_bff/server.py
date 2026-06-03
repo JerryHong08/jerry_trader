@@ -438,18 +438,28 @@ class JerryTraderBFF:
                 }
 
             # Get news IDs sorted by timestamp (most recent first)
-            news_ids = self.r.zrevrange(ticker_key, 0, limit - 1)
+            try:
+                news_ids = self.r.zrevrange(ticker_key, 0, limit - 1)
 
-            articles = []
-            for news_id in news_ids:
-                item_key = f"{self.NEWS_ITEM_PREFIX}:{news_id}"
-                article = self.r.hgetall(item_key)
-                if article:
-                    articles.append(article)
+                articles = []
+                for news_id in news_ids:
+                    item_key = f"{self.NEWS_ITEM_PREFIX}:{news_id}"
+                    article = self.r.hgetall(item_key)
+                    if article:
+                        articles.append(article)
 
-            # If no news found, queue for news-only fetch (not full static)
-            if not articles:
-                self.r.sadd(self.NEWS_PENDING_SET, ticker_upper)
+                # If no news found, queue for news-only fetch (not full static)
+                if not articles:
+                    self.r.sadd(self.NEWS_PENDING_SET, ticker_upper)
+            except Exception as e:
+                logger.error(f"Redis error fetching news for {ticker_upper}: {e}")
+                return {
+                    "ticker": ticker_upper,
+                    "news": [],
+                    "count": 0,
+                    "error": str(e),
+                    "timestamp": datetime.now().isoformat(),
+                }
                 logger.info(f"News not found for {ticker_upper}, queued for news fetch")
 
             return {
@@ -486,10 +496,25 @@ class JerryTraderBFF:
         @self.app.websocket("/ws/{client_id}")
         async def websocket_endpoint(websocket: WebSocket, client_id: str):
             await self.manager.connect(websocket, client_id)
+            origin = websocket.headers.get("origin", "unknown")
+            logger.info(f"WebSocket connect: {client_id} origin={origin}")
 
             # Auto-subscribe to market snapshot and send initial data
             self.manager.subscribe(client_id, "market_snapshot")
-            await self._send_initial_data(client_id)
+
+            try:
+                await self._send_initial_data(client_id)
+            except Exception as e:
+                logger.error(
+                    f"WebSocket bootstrap failed for {client_id}: {e}", exc_info=True
+                )
+                await self._safe_send_json(
+                    websocket,
+                    {"type": "error", "message": f"Bootstrap failed: {e}"},
+                )
+                await websocket.close(code=1011)
+                self.manager.disconnect(client_id)
+                return
 
             try:
                 while True:
@@ -577,6 +602,14 @@ class JerryTraderBFF:
                 },
                 client_id,
             )
+
+    @staticmethod
+    async def _safe_send_json(websocket: WebSocket, data: dict):
+        """Send JSON through a WebSocket that may already be closing."""
+        try:
+            await websocket.send_json(data)
+        except Exception:
+            pass
 
     async def _send_initial_data(self, client_id: str):
         """Send initial data to a newly connected client."""

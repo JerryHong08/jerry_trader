@@ -64,7 +64,6 @@ _SNAPSHOT_COLUMNS = [
     "ask_size",
     "rank",
     "competition_rank",
-    "change",
     "relativeVolumeDaily",
     "relativeVolume5min",
 ]
@@ -816,10 +815,7 @@ def process_from_collector(
     df = df.filter(pl.col("ticker").is_in(common_set))
     logger.info(f"Filtered to common stocks: {before:,} -> {len(df):,} rows")
 
-    # Step 3: Compute change (price - prev_close) for market_snapshot output
-    df = df.with_columns((pl.col("price") - pl.col("prev_close")).alias("change"))
-
-    # Step 4: Per-window iteration with prev_df filling + compute_ranks
+    # Step 3: Per-window iteration with prev_df filling + compute_ranks
     # prev_df filling is required BEFORE ranking — it carries forward previously-seen
     # tickers into subsequent windows, which affects rank distribution and subscription set.
     logger.info("Building subscription set (per-window with prev_df filling)...")
@@ -920,7 +916,6 @@ def process_from_collector(
                 bid_size,
                 ask_size,
                 changePercent,
-                change,
                 rank,
                 relativeVolumeDaily,
                 relativeVolume5min,
@@ -942,7 +937,6 @@ def process_from_collector(
                 row[13],
                 row[14],
                 row[15],
-                row[16],
             )
             ch_rows.append(
                 [
@@ -964,7 +958,6 @@ def process_from_collector(
                     float(ask_size or 0),
                     int(rank or 0),
                     int(competition_rank or 0),
-                    float(change or 0),
                     float(relativeVolumeDaily or 1.0),
                     float(relativeVolume5min or 0),
                 ]

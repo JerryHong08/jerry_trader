@@ -765,7 +765,6 @@ class SnapshotProcessor:
                     float(stream_data.get("ask_size", 0.0)),
                     int(stream_data.get("rank", 0)),
                     int(stream_data.get("competition_rank", 0)),
-                    float(stream_data.get("change", 0.0)),
                     float(stream_data.get("relativeVolumeDaily", 0.0)),
                     float(stream_data.get("relativeVolume5min", 0.0)),
                 ]
@@ -805,7 +804,6 @@ class SnapshotProcessor:
                         "ask_size",
                         "rank",
                         "competition_rank",
-                        "change",
                         "relativeVolumeDaily",
                         "relativeVolume5min",
                     ],

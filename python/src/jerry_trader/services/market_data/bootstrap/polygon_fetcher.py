@@ -414,6 +414,83 @@ def fetch_polygon_trades(
     return all_trades
 
 
+def fetch_polygon_quotes(
+    symbol: str,
+    from_ms: Optional[int] = None,
+) -> List[Tuple[int, float, float, int, int]]:
+    """Paginate Polygon /v3/quotes/{symbol} from a start point to now.
+
+    Returns list of (ts_ms, bid, ask, bid_size, ask_size) tuples,
+    sorted ascending by sip_timestamp. Filters out halted/closed quotes
+    (both bid and ask price are 0).
+
+    Args:
+        symbol: Ticker symbol.
+        from_ms: Start of fetch window (epoch ms, inclusive).
+                 If None, defaults to 4:00 AM ET today (session start).
+    """
+    if from_ms is not None:
+        cutoff_ns = int(from_ms * 1_000_000)
+    else:
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        cutoff_et = now_et.replace(
+            hour=BOOTSTRAP_MARKET_OPEN_ET, minute=0, second=0, microsecond=0
+        )
+        cutoff_ns = int(cutoff_et.timestamp() * 1e9)
+
+    all_quotes: List[Tuple[int, float, float, int, int]] = []
+    url = (
+        f"{POLYGON_REST_BASE}/v3/quotes/{symbol}"
+        f"?order=desc&limit={BOOTSTRAP_BATCH_SIZE}&sort=timestamp"
+        f"&timestamp.gte={cutoff_ns}"
+        f"&apiKey={api_key}"
+    )
+
+    page = 0
+    while url:
+        page += 1
+        try:
+            resp = requests.get(url, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            logger.error(f"fetch_polygon_quotes - {symbol} page {page}: {e}")
+            break
+
+        results = data.get("results", [])
+        if not results:
+            break
+
+        for q in results:
+            sip_ts_ns = q.get("sip_timestamp", 0)
+            bid = q.get("bid_price", 0.0)
+            ask = q.get("ask_price", 0.0)
+            bid_size = q.get("bid_size", 0)
+            ask_size = q.get("ask_size", 0)
+            ts_ms = sip_ts_ns // 1_000_000  # ns → ms
+            # Skip halted/closed quotes (both sides zero)
+            if bid > 0 or ask > 0:
+                all_quotes.append((ts_ms, bid, ask, bid_size, ask_size))
+
+        # Check if we've reached data before cutoff
+        oldest_ns = results[-1].get("sip_timestamp", 0)
+        if oldest_ns and oldest_ns < cutoff_ns:
+            break
+
+        next_url = data.get("next_url")
+        if next_url:
+            url = f"{next_url}&apiKey={api_key}"
+        else:
+            break
+
+    logger.info(
+        f"fetch_polygon_quotes - {symbol}: fetched {len(all_quotes)} quotes "
+        f"in {page} pages"
+    )
+    all_quotes.sort(key=lambda q: q[0])
+    return all_quotes
+
+
 def fetch_polygon_trades_window(
     symbol: str,
     from_ms: int,

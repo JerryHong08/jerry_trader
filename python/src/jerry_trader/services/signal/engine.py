@@ -1,10 +1,18 @@
-"""Signal Engine — real-time DSL rule evaluation.
+"""Signal Engine — real-time event evaluation.
 
-Subscribes to FactorEngine Redis channels, evaluates loaded DSL rules
+Subscribes to FactorEngine Redis channels, evaluates events from events.yaml
 against incoming factor updates, and emits trigger events.
 
+Unified with Backtest: Both use events.yaml as the single source of truth.
+EventEvaluator handles the condition matching logic.
+
+ML Integration (roadmap/ml-event-architecture.md):
+- ML-based events use ModelRegistry for prediction
+- hard_constraints checked before ML prediction
+- Returns (should_enter, expected_return, confidence) for ML events
+
 Usage:
-    engine = SignalEngine(redis_client, rules_dir="config/rules/")
+    engine = SignalEngine(redis_client, events_config_path="config/events.yaml")
     engine.start()  # starts background thread
     engine.stop()   # graceful shutdown
 """
@@ -18,88 +26,16 @@ from typing import Any
 
 import redis
 
-from jerry_trader.domain.strategy.rule import ComparisonOp, Condition, Rule, TriggerType
-from jerry_trader.domain.strategy.rule_parser import load_rules_from_dir
+from jerry_trader.domain.event import Event
+from jerry_trader.services.backtest.event_evaluator import (
+    EventEvaluator,
+    MLEvaluationResult,
+    TickerState,
+)
+from jerry_trader.services.model_registry import get_model_registry
 from jerry_trader.shared.logging.logger import setup_logger
 
 logger = setup_logger("signal_engine", log_to_file=True)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Condition Evaluator
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def evaluate_condition(
-    condition: Condition,
-    factors: dict[str, float],
-) -> bool:
-    """Evaluate a single condition against current factor values.
-
-    Args:
-        condition: The condition to evaluate.
-        factors: Current factor values {name: value}.
-
-    Returns:
-        True if condition is satisfied.
-    """
-    value = factors.get(condition.factor)
-    if value is None:
-        return False
-
-    if condition.op in (
-        ComparisonOp.GT,
-        ComparisonOp.LT,
-        ComparisonOp.GTE,
-        ComparisonOp.LTE,
-        ComparisonOp.EQ,
-    ):
-        assert condition.value is not None
-        if condition.op == ComparisonOp.GT:
-            return value > condition.value
-        elif condition.op == ComparisonOp.LT:
-            return value < condition.value
-        elif condition.op == ComparisonOp.GTE:
-            return value >= condition.value
-        elif condition.op == ComparisonOp.LTE:
-            return value <= condition.value
-        else:  # EQ
-            return abs(value - condition.value) < 1e-9
-    elif condition.op == ComparisonOp.BETWEEN:
-        assert condition.lo is not None and condition.hi is not None
-        return condition.lo <= value <= condition.hi
-    elif condition.op in (ComparisonOp.CROSS_ABOVE, ComparisonOp.CROSS_BELOW):
-        # Cross requires historical buffer — not supported in Phase 1
-        logger.debug(f"Cross operator not yet supported: {condition.op}")
-        return False
-    else:
-        return False
-
-
-def evaluate_trigger(
-    conditions: list[Condition],
-    trigger_type: TriggerType,
-    factors: dict[str, float],
-) -> bool:
-    """Evaluate a trigger's conditions against factor values.
-
-    Args:
-        conditions: List of conditions.
-        trigger_type: AND or OR composition.
-        factors: Current factor values.
-
-    Returns:
-        True if trigger fires.
-    """
-    if not conditions:
-        return False
-
-    results = [evaluate_condition(c, factors) for c in conditions]
-
-    if trigger_type == TriggerType.AND:
-        return all(results)
-    else:  # OR
-        return any(results)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -108,16 +44,19 @@ def evaluate_trigger(
 
 
 class SignalEngine:
-    """Real-time DSL rule evaluation engine.
+    """Real-time event evaluation engine.
 
     Subscribes to FactorEngine Redis pub/sub channels and evaluates
-    loaded DSL rules against incoming factor updates.
+    events from events.yaml against incoming factor updates.
+
+    Unified with Backtest: uses the same EventEvaluator and events.yaml
+    for consistent signal matching logic.
     """
 
     def __init__(
         self,
         redis_client: redis.Redis,
-        rules_dir: str = "config/rules/",
+        events_config_path: str = "config/events.yaml",
         symbols: list[str] | None = None,
         timeframes: list[str] | None = None,
         storage: Any | None = None,
@@ -125,16 +64,19 @@ class SignalEngine:
         return_fill_interval_sec: float = 120.0,
     ):
         self.redis_client = redis_client
-        self.rules_dir = rules_dir
+        self.events_config_path = events_config_path
         self.symbols = [s.upper() for s in symbols] if symbols else []
-        self.timeframes = timeframes or ["trade", "10s", "1m", "5m"]
+        self.timeframes = timeframes or ["tick", "10s", "1m", "5m"]
         self._storage = storage
         self._clickhouse_config = clickhouse_config
         self._return_fill_interval_sec = return_fill_interval_sec
 
-        # Loaded rules
-        self._rules: list[Rule] = []
-        self._rules_lock = threading.Lock()
+        # Event evaluator (shared logic with backtest)
+        self._evaluator: EventEvaluator | None = None
+
+        # Ticker state tracking for stage-based evaluation
+        self._ticker_states: dict[str, TickerState] = {}
+        self._states_lock = threading.Lock()
 
         # Subscription state
         self._pubsub: redis.client.PubSub | None = None
@@ -145,9 +87,9 @@ class SignalEngine:
         self._return_fill_thread: threading.Thread | None = None
 
         # Trigger dedup: prevent logging same trigger within cooldown period
-        # Key: (rule_id, symbol), Value: last_trigger_time_ms
+        # Key: (event_name, symbol), Value: last_trigger_time_ms
         self._last_trigger: dict[tuple[str, str], int] = {}
-        self._trigger_cooldown_sec: float = 60.0  # Minimum 60s between same trigger
+        self._trigger_cooldown_sec: float = 60.0
 
         self._trigger_count: int = 0
 
@@ -156,35 +98,45 @@ class SignalEngine:
         return self._trigger_count
 
     @property
-    def rules(self) -> list[Rule]:
-        """Current loaded rules (copy)."""
-        with self._rules_lock:
-            return list(self._rules)
+    def events(self) -> list[Event]:
+        """Current loaded events (copy)."""
+        if self._evaluator is None:
+            return []
+        return list(self._evaluator.events)
+
+    @property
+    def anti_patterns(self) -> list[Event]:
+        """Current loaded anti-patterns (copy)."""
+        if self._evaluator is None:
+            return []
+        return list(self._evaluator.anti_patterns)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Lifecycle
     # ─────────────────────────────────────────────────────────────────────────
 
-    def load_rules(self) -> int:
-        """Load DSL rules from rules directory.
+    def load_events(self) -> int:
+        """Load events from events.yaml config file.
 
         Returns:
-            Number of rules loaded.
+            Number of events loaded.
         """
-        rules = load_rules_from_dir(self.rules_dir)
-        enabled = [r for r in rules if r.enabled]
+        self._evaluator = EventEvaluator(config_path=self.events_config_path)
 
-        with self._rules_lock:
-            self._rules = enabled
+        event_count = len(self._evaluator.events)
+        anti_count = len(self._evaluator.anti_patterns)
 
         logger.info(
-            f"SignalEngine: loaded {len(enabled)} enabled rules "
-            f"from {self.rules_dir}"
+            f"SignalEngine: loaded {event_count} events, {anti_count} anti-patterns "
+            f"from {self.events_config_path}"
         )
-        for rule in enabled:
-            logger.info(f"  Rule: {rule.id} v{rule.version} — {rule.name}")
+        for event in self._evaluator.events:
+            logger.info(
+                f"  Event: {event.name} stage={event.stage.value} "
+                f"trigger={event.trigger.value}"
+            )
 
-        return len(enabled)
+        return event_count
 
     def start(self) -> None:
         """Start the signal engine in a background thread."""
@@ -192,7 +144,7 @@ class SignalEngine:
             logger.warning("SignalEngine: already running")
             return
 
-        self.load_rules()
+        self.load_events()
 
         self._running.set()
         self._thread = threading.Thread(
@@ -204,7 +156,6 @@ class SignalEngine:
         logger.info("SignalEngine: started")
 
         # Start return fill background thread in live mode only.
-        # In replay mode, run ReturnFiller once after replay completes.
         if self._clickhouse_config and not self._is_replay_mode():
             self._return_fill_thread = threading.Thread(
                 target=self._return_fill_loop,
@@ -323,7 +274,7 @@ class SignalEngine:
             return
 
         symbol = data.get("symbol", "").upper()
-        timeframe = data.get("timeframe", "trade")
+        timeframe = data.get("timeframe", "tick")
         factors = data.get("factors", {})
         timestamp_ms = data.get("timestamp_ms", 0)
 
@@ -334,9 +285,9 @@ class SignalEngine:
         if price is not None:
             price = float(price)
 
-        self._evaluate_rules(symbol, timeframe, factors, timestamp_ms, price)
+        self._evaluate_events(symbol, timeframe, factors, timestamp_ms, price)
 
-    def _evaluate_rules(
+    def _evaluate_events(
         self,
         symbol: str,
         timeframe: str,
@@ -344,68 +295,96 @@ class SignalEngine:
         timestamp_ms: int,
         price: float | None = None,
     ) -> None:
-        """Evaluate all rules against current factor snapshot."""
-        with self._rules_lock:
-            rules = list(self._rules)
+        """Evaluate all events against current factor snapshot.
 
-        for rule in rules:
-            # Check if rule has conditions for this timeframe
-            rule_timeframes = {c.timeframe for c in rule.trigger.conditions}
-            if timeframe not in rule_timeframes:
-                continue
+        Supports both boolean and ML-based events:
+        - Boolean: EventEvaluator.match_signal()
+        - ML: EventEvaluator.match_signal_with_ml()
+        """
+        if self._evaluator is None:
+            return
 
-            # Only evaluate conditions relevant to this timeframe
-            matching_conditions = [
-                c for c in rule.trigger.conditions if c.timeframe == timeframe
-            ]
+        # Build signal dict for matching
+        signal = {
+            "trigger_time_ns": timestamp_ms * 1_000_000,
+            "trigger_time_ms": timestamp_ms,
+            "symbol": symbol,
+            "trigger_price": price,
+            **factors,
+        }
 
-            # For AND trigger: we need ALL conditions met.
-            # If some conditions are for different timeframes, we can't evaluate
-            # them here — skip full evaluation until we have multi-timeframe support.
-            if rule.trigger.type == TriggerType.AND:
-                # Phase 1: only evaluate if ALL conditions match current timeframe
-                if len(matching_conditions) != len(rule.trigger.conditions):
-                    continue
+        # Use hybrid matching (supports both boolean and ML events)
+        matched_event, ml_result = self._evaluator.match_signal_with_ml(signal)
 
-            if not evaluate_trigger(matching_conditions, rule.trigger.type, factors):
-                continue
+        if matched_event is None:
+            return
 
-            # Trigger fired! Check cooldown using global clock
-            import jerry_trader.clock as clock_mod
+        # Trigger fired! Check cooldown using global clock
+        import jerry_trader.clock as clock_mod
 
-            now_ms = clock_mod.now_ms()
-            cooldown_key = (rule.id, symbol)
-            last_ms = self._last_trigger.get(cooldown_key, 0)
-            if now_ms - last_ms < self._trigger_cooldown_sec * 1000:
-                continue
+        now_ms = clock_mod.now_ms()
+        cooldown_key = (matched_event.name, symbol)
+        last_ms = self._last_trigger.get(cooldown_key, 0)
+        if now_ms - last_ms < self._trigger_cooldown_sec * 1000:
+            return
 
-            self._last_trigger[cooldown_key] = now_ms
-            self._trigger_count += 1
+        self._last_trigger[cooldown_key] = now_ms
+        self._trigger_count += 1
 
-            self._on_trigger(rule, symbol, timeframe, factors, timestamp_ms, price)
+        self._on_trigger(
+            matched_event,
+            symbol,
+            timeframe,
+            factors,
+            timestamp_ms,
+            price,
+            ml_result=ml_result,
+        )
 
     def _on_trigger(
         self,
-        rule: Rule,
+        event: Event,
         symbol: str,
         timeframe: str,
         factors: dict[str, float],
         timestamp_ms: int,
         price: float | None = None,
+        ml_result: MLEvaluationResult | None = None,
     ) -> None:
-        """Handle a triggered rule — log and persist to ClickHouse."""
+        """Handle a triggered event — log and persist to ClickHouse.
+
+        Args:
+            event: Matched event
+            symbol: Ticker symbol
+            timeframe: Timeframe string
+            factors: Factor values
+            timestamp_ms: Trigger timestamp
+            price: Trigger price
+            ml_result: ML evaluation result (for ML-based events)
+        """
         factor_summary = ", ".join(f"{k}={v:.4f}" for k, v in factors.items())
 
-        logger.info(
-            f"SIGNAL TRIGGERED: rule={rule.id} symbol={symbol} "
-            f"tf={timeframe} ts={timestamp_ms} factors=[{factor_summary}]"
+        # Build log message
+        log_msg = (
+            f"SIGNAL TRIGGERED: event={event.name} symbol={symbol} "
+            f"tf={timeframe} ts={timestamp_ms} stage={event.stage.value} "
+            f"factors=[{factor_summary}]"
         )
+
+        # Add ML info if available
+        if ml_result is not None:
+            log_msg += (
+                f" expected_return={ml_result.expected_return:.2%} "
+                f"confidence={ml_result.confidence:.2f}"
+            )
+
+        logger.info(log_msg)
 
         # Persist to ClickHouse via SignalStorage
         if self._storage:
             self._storage.write_signal_event(
-                rule_id=rule.id,
-                rule_version=rule.version,
+                rule_id=event.name,  # Use event name as rule_id for compatibility
+                rule_version=1,  # Events don't have versions
                 symbol=symbol,
                 timeframe=timeframe,
                 trigger_time_ns=timestamp_ms * 1_000_000,

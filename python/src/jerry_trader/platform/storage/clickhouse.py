@@ -8,6 +8,7 @@ clickhouse_connect and provides raw query primitives that any service
 
 import logging
 import os
+import threading
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Set
 
@@ -38,9 +39,22 @@ TF_DURATION_SEC: Dict[str, int] = {
 }
 
 
+_thread_local = threading.local()
+
+
+def _get_thread_cache() -> dict[str, object]:
+    """Return this thread's client cache, creating it on first access."""
+    if not hasattr(_thread_local, "cache"):
+        _thread_local.cache = {}
+    return _thread_local.cache
+
+
 def get_clickhouse_client(clickhouse_config: Optional[Dict] = None):
     """
-    Create and return a connected clickhouse_connect client, or None on failure.
+    Return a per-thread cached clickhouse_connect client.
+
+    Each thread gets its own client to avoid "concurrent queries within
+    the same session" errors from ClickHouse's HTTP protocol.
 
     Args:
         clickhouse_config: Dict with keys: host, port, user, database, password_env.
@@ -56,6 +70,11 @@ def get_clickhouse_client(clickhouse_config: Optional[Dict] = None):
     password_env = ch_cfg.get("password_env", "CLICKHOUSE_PASSWORD")
     ch_password = os.getenv(password_env, "")
 
+    cache = _get_thread_cache()
+    cache_key = f"{ch_host}:{ch_port}:{ch_user}:{ch_db}"
+    if cache_key in cache:
+        return cache[cache_key]
+
     if not ch_password:
         logger.info("No ClickHouse password configured — client not created")
         return None
@@ -70,6 +89,7 @@ def get_clickhouse_client(clickhouse_config: Optional[Dict] = None):
         )
         client.command("SELECT 1")  # connectivity check
         logger.info(f"ClickHouse connected: {ch_host}:{ch_port}/{ch_db}")
+        cache[cache_key] = client
         return client
     except Exception as exc:
         logger.warning(f"ClickHouse unavailable: {exc}")

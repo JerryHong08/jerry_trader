@@ -6,17 +6,16 @@ MarketsnapshotCollector: Collects market snapshot data from Polygon.io API, vali
 import json
 import logging
 import os
-import threading
 import time
 from datetime import datetime
 from datetime import time as dtime
-from queue import Empty, Queue
 from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
 
 import exchange_calendars as xcals
 import polars as pl
 import redis
+import requests
 from dotenv import load_dotenv
 
 from jerry_trader.platform.config.config import cache_dir
@@ -55,8 +54,39 @@ class MarketsnapshotCollector:
         self.calendar = xcals.get_calendar("XNYS")
         self.last_successful_fetch = None
         self.last_request_time = None
-        self.fetch_timeout = 30  # seconds to consider connection stuck
+        self.fetch_timeout = 30  # seconds for HTTP read timeout
         self.min_interval = 5  # minimum seconds between requests
+        self._consecutive_timeouts = 0
+        self._max_consecutive_timeouts = 5  # rebuild session after this many
+
+        self._init_session()
+
+    def _init_session(self):
+        """Create a fresh HTTP session with connection pooling."""
+        if hasattr(self, "http_session"):
+            try:
+                self.http_session.close()
+            except Exception:
+                pass
+        self.http_session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=1,
+            pool_maxsize=2,
+            max_retries=0,
+            pool_block=False,
+        )
+        self.http_session.mount("https://", adapter)
+        proxy = os.environ.get("HTTP_PROXY")
+        if proxy:
+            self.http_session.proxies = {"http": proxy, "https": proxy}
+
+    def _rebuild_session(self):
+        """Force-recreate the HTTP session to kill stuck TCP connections."""
+        logger.warning(
+            "run_collector_engine - 🔧 Rebuilding HTTP session (%d consecutive timeouts)",
+            self._consecutive_timeouts,
+        )
+        self._init_session()
 
     def is_trading_day_today(self):
         today = datetime.now(self.tz).date()
@@ -94,51 +124,30 @@ class MarketsnapshotCollector:
         return elapsed > self.fetch_timeout
 
     def fetch_snapshot_with_timeout(self, timeout=20):
-        """Fetch snapshot with timeout using threading"""
-        result_queue = Queue()
-
-        def fetch_worker():
-            try:
-                # Use requests directly with proxy support
-                import requests
-
-                proxy = os.environ.get("HTTP_PROXY")
-                # logger.debug(f'fetch_snapshot_with_timeout - Using proxy: {proxy}')
-                proxies = {"http": proxy, "https": proxy} if proxy else None
-
-                url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
-                params = {
-                    "include_otc": "false",
-                    "apiKey": os.getenv("POLYGON_API_KEY"),
-                }
-
-                response = requests.get(
-                    url, params=params, proxies=proxies, timeout=timeout
-                )
-                response.raise_for_status()
-                data = response.json()
-
-                # Convert to TickerSnapshot objects if needed, or just return raw data
-                result_queue.put(("success", data["tickers"]))
-            except Exception as e:
-                result_queue.put(("error", e))
-
-        # Start fetch in separate thread
-        fetch_thread = threading.Thread(target=fetch_worker, daemon=True)
-        fetch_thread.start()
-
-        # Wait for result with timeout
+        """Fetch snapshot directly (no thread) — timeout=(connect, read) is sufficient."""
+        url = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
+        params = {
+            "include_otc": "false",
+            "apiKey": os.getenv("POLYGON_API_KEY"),
+        }
         try:
-            status, data = result_queue.get(timeout=timeout)
-            if status == "success":
-                return data
-            else:
-                logger.info(f"fetch_snapshot_with_timeout - ❌ Fetch error: {data}")
-                return None
-        except Empty:
-            logger.info(
-                f"fetch_snapshot_with_timeout - ⚠️  Fetch timeout after {timeout}s - connection appears stuck"
+            response = self.http_session.get(
+                url,
+                params=params,
+                timeout=(10, timeout),  # (connect, read)
             )
+            response.raise_for_status()
+            return response.json()["tickers"]
+        except requests.exceptions.ReadTimeout:
+            logger.info(
+                f"fetch_snapshot_with_timeout - ⚠️  Read timeout after {timeout}s"
+            )
+            return None
+        except requests.exceptions.ConnectTimeout:
+            logger.info("fetch_snapshot_with_timeout - ⚠️  Connect timeout after 10s")
+            return None
+        except Exception as e:
+            logger.info(f"fetch_snapshot_with_timeout - ❌ Fetch error: {e}")
             return None
 
     def run_collector_engine(self):
@@ -160,12 +169,24 @@ class MarketsnapshotCollector:
 
                 # Handle timeout/stuck connection
                 if snapshot is None:
-                    logger.info(
-                        "run_collector_engine - 🔄 Will retry on next iteration..."
+                    self._consecutive_timeouts += 1
+                    # Exponential backoff: 5, 10, 20, 40, 60 (capped)
+                    backoff = min(
+                        self.min_interval * (2 ** (self._consecutive_timeouts - 1)), 60
                     )
+                    logger.info(
+                        "run_collector_engine - 🔄 Timeout #%d, backing off %ds",
+                        self._consecutive_timeouts,
+                        backoff,
+                    )
+                    # Rebuild session if we've exceeded the threshold
+                    if self._consecutive_timeouts >= self._max_consecutive_timeouts:
+                        self._rebuild_session()
+                    time.sleep(backoff)
                     continue
 
-                # Record successful fetch
+                # Record successful fetch, reset backoff
+                self._consecutive_timeouts = 0
                 self.last_successful_fetch = time.time()
 
                 # Process data - flatten all nested dicts and save everything
@@ -271,6 +292,7 @@ class MarketsnapshotCollector:
                     f"run_collector_engine - ❌ Error in collector loop, retrying...: {e}"
                 )
                 # Don't update last_successful_fetch on error
+                time.sleep(self.min_interval)
                 continue
         logger.info("run_collector_engine - ⏹ Premarket ended. Exit cleanly.")
 

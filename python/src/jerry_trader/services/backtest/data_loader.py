@@ -69,8 +69,9 @@ class DataLoader:
         # NOTE: We no longer fallback to Parquet because monolithic files (~3GB)
         # require full scan per ticker (233s/ticker). Instead, raise error if
         # CH doesn't have tickdata, prompting user to run import-ticks first.
+        # NOTE: Quotes are optional since no QuoteIndicator is currently configured.
+        # Only trades are required for the mining pipeline.
         missing_trades: list[str] = []
-        missing_quotes: list[str] = []
 
         for candidate in candidates:
             symbol = candidate.symbol
@@ -79,24 +80,21 @@ class DataLoader:
 
             if not trades:
                 missing_trades.append(symbol)
-            if not quotes:
-                missing_quotes.append(symbol)
 
             result[symbol] = TickerData(
                 symbol=symbol,
                 trades=trades,
-                quotes=quotes,
+                quotes=quotes,  # Optional - may be empty if no quotes data
                 candidate=candidate,
             )
 
-        # Check coverage - fail fast if missing data
-        if missing_trades or missing_quotes:
-            # Deduplicate missing tickers
-            missing = sorted(set(missing_trades + missing_quotes))
+        # Check coverage - fail fast if missing trades data
+        # Quotes are optional since no QuoteIndicator is configured
+        if missing_trades:
             raise RuntimeError(
-                f"ClickHouse has no tickdata for {len(missing)} tickers: {missing[:10]}{'...' if len(missing) > 10 else ''}\n"
+                f"ClickHouse has no trades data for {len(missing_trades)} tickers: {missing_trades[:10]}{'...' if len(missing_trades) > 10 else ''}\n"
                 f"  → Run: poetry run python -m jerry_trader.services.backtest.data.cli import-ticks --date {date}\n"
-                f"  Or pass specific tickers: --tickers {','.join(missing[:5])}"
+                f"  Or pass specific tickers: --tickers {','.join(missing_trades[:5])}"
             )
 
         # 3. Load 1m bars from ClickHouse (batch for all candidates)

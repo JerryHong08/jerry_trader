@@ -1,13 +1,9 @@
-"""Batch factor engine for backtest — reuses live FactorRegistry indicators.
+"""Batch factor engine for backtest — reads FactorSpec from registry, computes via Rust.
 
-Key principle: backtest and live share the *exact same* indicator instances
-(created from FactorRegistry). Any new indicator added to the registry
-automatically works in backtest — no parallel computation path.
-
-Three indicator types:
-  1. Bar indicators (EMA, etc.) — walk bars chronologically, call update()
-  2. Tick indicators (TradeRate) — Rust bootstrap_trade_rate() for batch warmup
-  3. Quote indicators (spread, etc.) — walk quotes chronologically
+All factor computation delegates to Rust PyFactorEngine:
+  1. Bar factors — compute_batch_bar()
+  2. Trade factors — compute_batch_trade()
+  3. Quote factors — compute_batch_quote()
 
 Output: FactorTimeseries = dict[ts_ms, dict[str, float]]
 """
@@ -17,17 +13,13 @@ from __future__ import annotations
 from bisect import bisect_left
 from collections import defaultdict
 
-from jerry_trader._rust import bootstrap_trade_rate
+from jerry_trader._rust import PyBar, PyFactorEngine, PyTrade, forward_fill_factors
 from jerry_trader.domain.market import Bar
 from jerry_trader.services.backtest.config import TickerData
 from jerry_trader.services.factor.factor_registry import (
     FactorRegistry,
+    FactorSpec,
     get_factor_registry,
-)
-from jerry_trader.services.factor.indicators import (
-    BarIndicator,
-    QuoteIndicator,
-    TickIndicator,
 )
 from jerry_trader.shared.logging.logger import setup_logger
 
@@ -38,14 +30,11 @@ FactorTimeseries = dict[int, dict[str, float]]
 
 
 class FactorEngineBatchAdapter:
-    """Reuses live FactorRegistry indicators for batch backtest.
+    """Batch factor computation via Rust PyFactorEngine.
 
-    Creates fresh indicator instances from the same FactorRegistry
-    that live FactorEngine uses. Feeds data in chronological order
-    and collects all factor outputs into an in-memory FactorTimeseries.
-
-    This guarantees backtest factors are identical to live factors —
-    new indicators added to FactorRegistry automatically work here.
+    Reads FactorSpec from the registry and delegates all computation
+    to Rust — same code path as live FactorEngine warmup. New factors
+    added to factors.yaml + Rust registry automatically work here.
     """
 
     def __init__(self, registry: FactorRegistry | None = None):
@@ -63,43 +52,93 @@ class FactorEngineBatchAdapter:
         Returns:
             Unified factor timeseries: {timestamp_ms: {factor_name: value}}
         """
+        import time
+
         symbol = ticker_data.symbol
         ts: FactorTimeseries = defaultdict(dict)
 
-        # Create fresh indicator instances — same source as live FactorEngine
-        all_indicators = self._registry.create_indicators_for_type("bar")
-        bar_indicators: list[BarIndicator] = [
-            i for i in all_indicators if isinstance(i, BarIndicator)
-        ]
+        total_start = time.time()
 
-        all_tick = self._registry.create_indicators_for_type("trade")
-        tick_indicators: list[TickIndicator] = [
-            i for i in all_tick if isinstance(i, TickIndicator)
-        ]
+        # Get factor specs directly (no need to instantiate Python indicators)
+        bar_specs = self._registry.get_factors_by_type("bar")
+        trade_specs = self._registry.get_factors_by_type("trade")
+        quote_specs = self._registry.get_factors_by_type("quote")
 
-        all_quote = self._registry.create_indicators_for_type("quote")
-        quote_indicators: list[QuoteIndicator] = [
-            i for i in all_quote if isinstance(i, QuoteIndicator)
-        ]
-
-        # 1. Build bars from trades via BarBuilder, then feed to bar indicators
-        if bar_indicators:
+        # 1. Build bars from trades via BarBuilder, then feed to bar factors
+        bars: list[Bar] = []
+        t0 = time.time()
+        if bar_specs:
             bars = self._build_bars_from_trades(ticker_data)
-            self._compute_bar_factors(bars, bar_indicators, ts)
+            self._compute_bar_factors(bars, bar_specs, ts)
+        t1 = time.time()
+        bar_elapsed = t1 - t0
 
-        # 2. Tick factors via Rust batch warmup (same as FactorEngine._process_bootstrap_trades)
-        if tick_indicators and ticker_data.trades:
-            self._compute_tick_factors(ticker_data.trades, tick_indicators, ts)
+        # 2. Trade factors via Rust batch warmup (same as FactorEngine._process_bootstrap_trades)
+        t0 = time.time()
+        if trade_specs and ticker_data.trades:
+            self._compute_trade_factors(ticker_data.trades, trade_specs, ts)
+        t1 = time.time()
+        tick_elapsed = t1 - t0
 
-        # 3. Quote factors (if any quote indicators registered)
-        if quote_indicators and ticker_data.quotes:
-            self._compute_quote_factors(ticker_data.quotes, quote_indicators, ts)
+        # 3. Quote factors via Rust batch compute
+        t0 = time.time()
+        if quote_specs and ticker_data.quotes:
+            self._compute_quote_factors_rust(ticker_data.quotes, quote_specs, ts)
+        t1 = time.time()
+        quote_elapsed = t1 - t0
+
+        # 4. Forward-fill to merge factors across timestamps
+        t0 = time.time()
+        ts = self._forward_fill_factors(ts)
+        t1 = time.time()
+        ff_elapsed = t1 - t0
+
+        # 4b. Inject entry_gap_pct from candidate
+        # This is the TRUE gap at the moment ticker entered top20 (Ross Cameron style)
+        # IMPORTANT: This is NOT session_gap_pct (static open vs prev_close),
+        # but the dynamic changePercent at entry time!
+        entry_gap_pct = 0.0
+        if ticker_data.candidate:
+            entry_gap_pct = ticker_data.candidate.gain_at_entry
+            # Set entry_gap_pct for ALL timestamps (it's a constant for the ticker)
+            for t in ts.keys():
+                ts[t]["entry_gap_pct"] = entry_gap_pct
+            logger.debug(
+                f"{symbol}: entry_gap_pct={entry_gap_pct:.2f}% "
+                f"(gain_at_entry from candidate)"
+            )
+        else:
+            logger.warning(f"{symbol}: entry_gap_pct not computed (no candidate)")
+
+        # 4c. Inject session_phase for all timestamps
+        # session_phase is derived from time of day (mid: 4:00-9:30 NY)
+        from jerry_trader.domain.session import get_session_phase_from_epoch_ms
+
+        for t in ts.keys():
+            phase = get_session_phase_from_epoch_ms(t)
+            ts[t]["session_phase"] = phase.value  # string: "early", "mid", "late"
+
+        total_ts = len(ts)
+
+        # 5. Filter: only output timestamps from first_entry_ms onwards
+        # This aligns with live behavior — we don't compute signals for a ticker
+        # before it enters the subscription set (top 20).
+        # Full data is still used for factor warmup (e.g., EMA, relative_volume),
+        # but we only expose the post-subscription window to the event evaluator.
+        if ticker_data.candidate and ticker_data.candidate.first_entry_ms > 0:
+            entry_ms = ticker_data.candidate.first_entry_ms
+            ts = {t: v for t, v in ts.items() if t >= entry_ms}
+
+        total_elapsed = time.time() - total_start
 
         logger.debug(
             f"BatchEngine: {symbol} — "
-            f"{len(ts)} factor timestamps, "
-            f"{len(bar_indicators)} bar ind, {len(tick_indicators)} tick ind, "
-            f"{len(quote_indicators)} quote ind"
+            f"{len(ts)} factor timestamps (filtered from {total_ts}), "
+            f"{len(bar_specs)} bar, {len(trade_specs)} trade, "
+            f"{len(quote_specs)} quote | "
+            f"timing: bar={bar_elapsed:.2f}s, tick={tick_elapsed:.2f}s, "
+            f"quote={quote_elapsed:.2f}s, "
+            f"ff={ff_elapsed:.2f}s, total={total_elapsed:.2f}s"
         )
 
         return dict(ts)
@@ -138,85 +177,105 @@ class FactorEngineBatchAdapter:
     @staticmethod
     def _compute_bar_factors(
         bars: list[Bar],
-        indicators: list[BarIndicator],
+        specs: list[FactorSpec],
         ts: FactorTimeseries,
     ) -> None:
-        """Walk bars chronologically, update bar indicators.
-
-        Same loop as FactorEngine._on_bar() / _bootstrap_bars_for_timeframe().
-        """
-        for bar in bars:
-            factors: dict[str, float] = {}
-            for ind in indicators:
-                value = ind.update(bar)
-                if value is not None:
-                    factors[ind.name] = value
-
-            if factors:
-                ts.setdefault(bar.bar_end, {}).update(factors)
-
-    @staticmethod
-    def _compute_tick_factors(
-        trades: list[tuple[int, float, int]],
-        indicators: list[TickIndicator],
-        ts: FactorTimeseries,
-    ) -> None:
-        """Batch tick indicator warmup via Rust.
-
-        Same approach as FactorEngine._process_bootstrap_trades():
-        uses Rust bootstrap_trade_rate for windowed tick indicators.
-        """
-        timestamps = [int(t) for t, _, _ in trades]
-        if not timestamps:
+        """Compute bar factors via Rust PyFactorEngine.compute_batch_bar()."""
+        if not bars or not specs:
             return
 
-        for ind in indicators:
-            if hasattr(ind, "window_ms"):
-                result = bootstrap_trade_rate(
-                    timestamps,
-                    window_ms=getattr(ind, "window_ms", 20_000),
-                    min_trades=getattr(ind, "min_trades", 5),
-                    compute_interval_ms=1000,
-                )
-                for ts_ms, rate in result.snapshots:
-                    ts.setdefault(ts_ms, {})[ind.name] = rate
-            else:
-                # Fallback: Python loop warmup for non-windowed tick indicators
-                last_compute_ms = 0
-                for ts_ms, price, size in trades:
-                    ts_ms = int(ts_ms)
-                    ind.on_tick(ts_ms, float(price), int(size))
-                    if ts_ms - last_compute_ms >= 1000:
-                        value = ind.compute(ts_ms)
-                        if value is not None:
-                            ts.setdefault(ts_ms, {})[ind.name] = value
-                        last_compute_ms = ts_ms
+        engine = PyFactorEngine()
+        py_bars = [
+            PyBar(b.bar_start, b.open, b.high, b.low, b.close, int(b.volume))
+            for b in bars
+        ]
+
+        for spec in specs:
+            rust_params = {k: float(v) for k, v in spec.params.items()}
+            values = engine.compute_batch_bar(spec.rust_key, py_bars, rust_params)
+            for bar, val in zip(bars, values):
+                if val is not None:
+                    ts.setdefault(bar.bar_end, {})[spec.id] = val
 
     @staticmethod
-    def _compute_quote_factors(
-        quotes: list[tuple[int, float, float, int, int]],
-        indicators: list[QuoteIndicator],
+    def _compute_trade_factors(
+        trades: list[tuple[int, float, int]],
+        specs: list[FactorSpec],
         ts: FactorTimeseries,
     ) -> None:
-        """Walk quotes chronologically, update quote indicators.
+        """Batch trade factor warmup via Rust PyFactorEngine.compute_batch_trade()."""
+        if not trades or not specs:
+            return
 
-        Same pattern as FactorEngine._on_quote() + _compute_loop().
-        Compute every 1 second.
+        sorted_trades = sorted(trades, key=lambda x: x[0])
+        t0 = sorted_trades[0][0]
+        t_end = sorted_trades[-1][0]
+        first_compute = t0 - (t0 % 1000) + 1000
+        compute_ts = list(range(first_compute, t_end + 1000, 1000))
+        if not compute_ts:
+            return
+
+        engine = PyFactorEngine()
+        py_trades = [PyTrade(t, p, s) for t, p, s in sorted_trades]
+
+        for spec in specs:
+            rust_params = {k: float(v) for k, v in spec.params.items()}
+            values = engine.compute_batch_trade(
+                spec.rust_key,
+                py_trades,
+                compute_ts,
+                rust_params,
+            )
+            for ct, val in zip(compute_ts, values):
+                if val is not None:
+                    ts.setdefault(ct, {})[spec.id] = val
+
+    @staticmethod
+    def _compute_quote_factors_rust(
+        quotes: list[tuple[int, float, float, int, int]],
+        specs: list[FactorSpec],
+        ts: FactorTimeseries,
+    ) -> None:
+        """Batch compute quote factors via Rust PyFactorEngine.compute_batch_quote()."""
+        if not quotes or not specs:
+            return
+
+        engine = PyFactorEngine()
+
+        for spec in specs:
+            rust_params = {k: float(v) for k, v in spec.params.items()}
+            results = engine.compute_batch_quote(spec.rust_key, quotes, rust_params)
+            for ts_ms, val in results:
+                if val is not None:
+                    ts.setdefault(ts_ms, {})[spec.id] = val
+
+    @staticmethod
+    def _forward_fill_factors(ts: FactorTimeseries) -> FactorTimeseries:
+        """Forward-fill missing factors from most recent previous timestamp.
+
+        Different factor types are computed at different timestamps:
+        - Bar factors at bar_end (every 60s)
+        - Tick factors at trade timestamps (~1s intervals)
+        - Quote factors at quote timestamps (~1s intervals)
+
+        This merges them so each timestamp has all available factors.
+        Uses Rust implementation for speed.
         """
-        last_compute_ms = 0
-        for ts_ms, bid, ask, bid_size, ask_size in quotes:
-            ts_ms = int(ts_ms)
-            for ind in indicators:
-                ind.on_quote(
-                    ts_ms, float(bid), float(ask), int(bid_size), int(ask_size)
-                )
+        if not ts:
+            return ts
 
-            if ts_ms - last_compute_ms >= 1000:
-                for ind in indicators:
-                    value = ind.compute(ts_ms)
-                    if value is not None:
-                        ts.setdefault(ts_ms, {})[ind.name] = value
-                last_compute_ms = ts_ms
+        # Convert to list of (ts_ms, dict) for Rust
+        ts_list = [(t, factors) for t, factors in ts.items()]
+
+        # Call Rust forward-fill
+        result = forward_fill_factors(ts_list)
+
+        # Convert back to dict
+        merged: dict[int, dict[str, float]] = {}
+        for ts_ms, factor_list in result.merged:
+            merged[ts_ms] = dict(factor_list)
+
+        return merged
 
 
 def get_factors_at(ts: FactorTimeseries, target_ms: int) -> dict[str, float]:

@@ -41,7 +41,9 @@ import clickhouse_connect
 import redis
 
 from jerry_trader import clock as clock_mod
-from jerry_trader._rust import BarBuilder, load_trades_from_parquet
+from jerry_trader._rust import BarBuilder
+from jerry_trader._rust import load_quotes as load_quotes_from_rust
+from jerry_trader._rust import load_trades as load_trades_from_rust
 from jerry_trader.domain.market import Bar
 from jerry_trader.platform.config.config import lake_data_dir
 from jerry_trader.platform.config.session import make_session_id, parse_session_id
@@ -50,6 +52,7 @@ from jerry_trader.platform.messaging.event_bus import EventBus
 from jerry_trader.platform.storage.ohlcv_writer import write_bars
 from jerry_trader.services.bar_builder.bar_query_service import ClickHouseClient
 from jerry_trader.services.market_data.bootstrap.polygon_fetcher import (
+    fetch_polygon_quotes,
     fetch_polygon_trades,
 )
 from jerry_trader.services.market_data.feeds.unified_tick_manager import (
@@ -244,6 +247,9 @@ class BarsBuilderService:
         self._first_ws_tick_ts: Dict[str, int] = {}
         self._bootstrap_done: Dict[str, set] = {}
         self._bootstrap_events: Dict[str, Event] = {}
+        self._quotes_backfilled: set[str] = (
+            set()
+        )  # tickers that already had quotes loaded
 
         # ── EventBus (inter-service messaging) ──────────────────────
         self._event_bus = event_bus
@@ -458,6 +464,16 @@ class BarsBuilderService:
                     name=f"bootstrap-{symbol}",
                 ).start()
 
+                # Run quotes_backfill once per ticker alongside trades_backfill
+                if symbol not in self._quotes_backfilled:
+                    self._quotes_backfilled.add(symbol)
+                    Thread(
+                        target=self.quotes_backfill,
+                        args=(symbol, None),
+                        daemon=True,
+                        name=f"quote-bootstrap-{symbol}",
+                    ).start()
+
         # Track all timeframes for this ticker
         new_timeframes_added = False
         for tf in timeframes:
@@ -609,6 +625,7 @@ class BarsBuilderService:
         # Clear bootstrap state so re-subscribe triggers fresh bootstrap
         self._first_ws_tick_ts.pop(symbol, None)
         self._bootstrap_done.pop(symbol, None)
+        self._quotes_backfilled.discard(symbol)
         # Remove bootstrap event (trades_backfill may still be running —
         # setting it ensures any wait_for_bootstrap() call returns immediately)
         evt = self._bootstrap_events.pop(symbol, None)
@@ -648,31 +665,139 @@ class BarsBuilderService:
             )
         return result
 
-    def _load_trades_from_parquet(
-        self, symbol: str, start_ts_ms: int = 0
-    ) -> List[tuple]:
-        """Load trades from local parquet via Rust.
+    def _load_trades(self, symbol: str, start_ts_ms: int = 0) -> List[tuple]:
+        """Load trades for bootstrap via Rust (ClickHouse first, Parquet fallback).
 
-        Delegates to jerry_trader._rust.load_trades_from_parquet which
-        handles partitioned/monolithic fallback, ticker filtering, ns→ms
-        conversion, and sorting — all in Rust/Polars.
+        Delegates to jerry_trader._rust.load_trades which matches
+        TickDataReplayer's data source priority — CH first, Parquet fallback.
+        All timestamp handling, TRF filtering, and sorting happen in Rust.
 
-        Both start_ts_ms and end_ts_ms are applied as predicate-pushdown
-        filters at scan time so only the needed trade window is loaded.
-
-        Returns List[(ts_ms, price, size)] sorted ascending by timestamp.
+        Returns List[(ts_ms, price, size)] sorted ascending by sip_timestamp.
         """
+        # Wait for clock to be ready (not paused) before querying trades.
+        # In replay mode, backend bootstrap may still be running and clock
+        # hasn't jumped to bootstrap end yet. Wait up to 30 seconds.
+        clock_obj = clock_mod.get_clock()
+        if clock_obj and clock_obj.is_paused:
+            logger.info(
+                f"_load_trades - {symbol}: clock is paused, waiting for resume..."
+            )
+            wait_start = time.time()
+            while clock_obj.is_paused and (time.time() - wait_start) < 30:
+                time.sleep(0.1)
+            if clock_obj.is_paused:
+                logger.warning(
+                    f"_load_trades - {symbol}: clock still paused after 30s, proceeding anyway"
+                )
+            else:
+                logger.info(
+                    f"_load_trades - {symbol}: clock resumed after {time.time() - wait_start:.1f}s"
+                )
+
         end_ts_ms = clock_mod.now_ms()
-        trades = load_trades_from_parquet(
-            lake_data_dir, symbol, self.db_date, end_ts_ms, start_ts_ms
+
+        # Debug: log clock state
+        clock_obj = clock_mod.get_clock()
+        if clock_obj:
+            logger.info(
+                f"_load_trades - {symbol}: clock state - "
+                f"is_paused={clock_obj.is_paused}, "
+                f"now_ms={end_ts_ms} ({self._ms_to_et(end_ts_ms)} ET)"
+            )
+        else:
+            logger.warning(
+                f"_load_trades - {symbol}: NO CLOCK INITIALIZED! "
+                f"Using wall clock time: {end_ts_ms} ({self._ms_to_et(end_ts_ms)} ET)"
+            )
+
+        # Resolve CH config from BarsBuilder role config
+        ch_cfg = self._ch_config
+        ch_url = None
+        ch_user = None
+        ch_password = None
+        ch_database = None
+        if isinstance(ch_cfg, dict):
+            ch_url = (
+                f"http://{ch_cfg.get('host', 'localhost')}:{ch_cfg.get('port', 8123)}"
+            )
+            ch_user = ch_cfg.get("user", "default")
+            ch_database = ch_cfg.get("database", "jerry_trader")
+            _pw_env = ch_cfg.get("password_env", "CLICKHOUSE_PASSWORD")
+            ch_password = os.getenv(_pw_env, "")
+
+        trades = load_trades_from_rust(
+            lake_data_dir,
+            symbol,
+            self.db_date,
+            end_ts_ms,
+            start_ts_ms,
+            clickhouse_url=ch_url,
+            clickhouse_user=ch_user,
+            clickhouse_password=ch_password,
+            clickhouse_database=ch_database,
         )
         logger.info(
-            f"_load_trades_from_parquet - {symbol}: "
-            f"loaded {len(trades)} trades from parquet (via Rust), "
+            f"_load_trades - {symbol}: "
+            f"loaded {len(trades)} trades, "
             f"range=[{self._ms_to_et(start_ts_ms) if start_ts_ms else 'start'} → "
             f"{self._ms_to_et(end_ts_ms)}]"
         )
         return trades
+
+    def _load_quotes(self, symbol: str, start_ts_ms: int = 0) -> List[tuple]:
+        """Load quotes for bootstrap via Rust (ClickHouse first, Parquet fallback).
+
+        Mirror of _load_trades for quote data.
+        Returns List[(ts_ms, bid, ask, bid_size, ask_size)] sorted ascending.
+        """
+        end_ts_ms = clock_mod.now_ms()
+
+        clock_obj = clock_mod.get_clock()
+        if clock_obj:
+            logger.info(
+                f"_load_quotes - {symbol}: clock state - "
+                f"is_paused={clock_obj.is_paused}, "
+                f"now_ms={end_ts_ms} ({self._ms_to_et(end_ts_ms)} ET)"
+            )
+        else:
+            logger.warning(
+                f"_load_quotes - {symbol}: NO CLOCK INITIALIZED! "
+                f"Using wall clock time: {end_ts_ms} ({self._ms_to_et(end_ts_ms)} ET)"
+            )
+
+        # Resolve CH config from BarsBuilder role config
+        ch_cfg = self._ch_config
+        ch_url = None
+        ch_user = None
+        ch_password = None
+        ch_database = None
+        if isinstance(ch_cfg, dict):
+            ch_url = (
+                f"http://{ch_cfg.get('host', 'localhost')}:{ch_cfg.get('port', 8123)}"
+            )
+            ch_user = ch_cfg.get("user", "default")
+            ch_database = ch_cfg.get("database", "jerry_trader")
+            _pw_env = ch_cfg.get("password_env", "CLICKHOUSE_PASSWORD")
+            ch_password = os.getenv(_pw_env, "")
+
+        quotes = load_quotes_from_rust(
+            lake_data_dir,
+            symbol,
+            self.db_date,
+            end_ts_ms,
+            start_ts_ms,
+            clickhouse_url=ch_url,
+            clickhouse_user=ch_user,
+            clickhouse_password=ch_password,
+            clickhouse_database=ch_database,
+        )
+        logger.info(
+            f"_load_quotes - {symbol}: "
+            f"loaded {len(quotes)} quotes, "
+            f"range=[{self._ms_to_et(start_ts_ms) if start_ts_ms else 'start'} → "
+            f"{self._ms_to_et(end_ts_ms)}]"
+        )
+        return quotes
 
     def trades_backfill(
         self,
@@ -720,12 +845,34 @@ class BarsBuilderService:
             if self.run_mode == "live":
                 raw_trades = fetch_polygon_trades(symbol, from_ms=from_ms)
             else:
-                raw_trades = self._load_trades_from_parquet(
-                    symbol, start_ts_ms=from_ms or 0
-                )
+                raw_trades = self._load_trades(symbol, start_ts_ms=from_ms or 0)
 
             if not raw_trades:
                 logger.info(f"trades_backfill - {symbol}: no historical trades found")
+                # Mark bootstrap-done so _on_trade skips meeting bar
+                # detection. Without REST partials, every WS bar would
+                # be incorrectly deferred as a meeting bar waiting for a
+                # REST half that will never arrive.
+                if symbol not in self._bootstrap_done:
+                    self._bootstrap_done[symbol] = set()
+                self._bootstrap_done[symbol].update(bootstrap_tfs)
+
+                # Clean up any meeting bars that _on_trade may have
+                # already registered (handles the race condition where
+                # the first WS tick arrives before trades_backfill runs).
+                self.bar_builder.clear_meeting_bar_state(symbol)
+
+                # Notify coordinator so factor engine doesn't timeout.
+                if self._coordinator:
+                    for tf in bootstrap_tfs:
+                        self._coordinator.on_bars_ready(symbol, tf)
+                    self._coordinator.store_trades(
+                        symbol=symbol,
+                        trades=[],
+                        from_ms=from_ms,
+                        first_ws_ts=self._first_ws_tick_ts.get(symbol),
+                    )
+
                 return
 
             trades: List[tuple] = raw_trades
@@ -929,6 +1076,57 @@ class BarsBuilderService:
             evt = self._bootstrap_events.pop(symbol, None)
             if evt:
                 evt.set()
+
+    def quotes_backfill(
+        self,
+        symbol: str,
+        from_ms: int | None = None,
+    ) -> None:
+        """Fetch historical quotes and store for quote indicator warmup.
+
+        Mirror of trades_backfill's quote-loading portion. No bar building
+        needed — just load raw quotes and store in coordinator so
+        FactorEngine._process_bootstrap_quotes can consume them.
+
+        Live mode:   Polygon REST API (fetch_polygon_quotes)
+        Replay mode: local parquet files via Rust (CH first, Parquet fallback)
+        """
+        logger.info(
+            f"quotes_backfill - {symbol}: starting ({self.run_mode} mode), "
+            f"from_ms={self._ms_to_et(from_ms) if from_ms else 'session_start'}"
+        )
+
+        try:
+            # ── Fetch quotes ──────────────────────────────────────────
+            if self.run_mode == "live":
+                raw_quotes = fetch_polygon_quotes(symbol, from_ms=from_ms)
+            else:
+                raw_quotes = self._load_quotes(symbol, start_ts_ms=from_ms or 0)
+
+            if not raw_quotes:
+                logger.info(f"quotes_backfill - {symbol}: no historical quotes found")
+                return
+
+            first_q = raw_quotes[0]
+            last_q = raw_quotes[-1]
+            logger.info(
+                f"quotes_backfill - {symbol}: loaded {len(raw_quotes)} quotes, "
+                f"range [{self._ms_to_et(first_q[0])} → "
+                f"{self._ms_to_et(last_q[0])}]"
+            )
+
+            # ── Store in coordinator for FactorEngine warmup ──────────
+            if self._coordinator:
+                quotes_key = self._coordinator.store_quotes(
+                    symbol=symbol,
+                    quotes=raw_quotes,
+                )
+                logger.info(
+                    f"quotes_backfill - {symbol}: stored {len(raw_quotes)} quotes "
+                    f"in coordinator at {quotes_key}"
+                )
+        except Exception:
+            logger.exception(f"quotes_backfill - {symbol}: failed")
 
     def pre_register_bootstrap(self, symbol: str) -> None:
         """Pre-create a bootstrap Event for this ticker.

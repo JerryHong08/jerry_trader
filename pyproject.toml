@@ -35,6 +35,7 @@ dependencies = [
     "clickhouse-connect (>=0.8,<0.14)",
     "s3fs (>=2026.2.0,<2027.0.0)",
     "smart-open[s3] (>=7.5.1,<8.0.0)",
+    "xgboost (>=3.2.0,<4.0.0)",
 ]
 
 [tool.poetry]
@@ -44,6 +45,7 @@ packages = [{include = "jerry_trader", from = "python/src"}]
 maturin = ">=1.0,<2.0"
 pre-commit = "^4.2.0"
 pytest = "^8.4.1"
+pytest-asyncio = "^0.24.0"
 commitizen = "^4.9.1"
 black = "^25.12.0"
 isort = "^7.0.0"
@@ -54,6 +56,10 @@ ipympl = "^0.10.0"
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]
+asyncio_mode = "auto"
+markers = [
+    "integration: marks tests that require external infrastructure (ClickHouse, Redis, etc.)",
+]
 
 [tool.commitizen]
 name = "cz_conventional_commits"

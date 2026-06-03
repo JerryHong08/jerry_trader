@@ -739,7 +739,7 @@ class ChartBFF:
                 logger.warning(f"⏱️ Subscribe: {symbol} bootstrap timeout")
 
             # Auto-subscribe to factors
-            actual_timeframe = timeframe if timeframe else "trade"
+            actual_timeframe = timeframe if timeframe else "tick"
             await self._auto_subscribe_factors(
                 websocket,
                 symbol,
@@ -800,8 +800,8 @@ class ChartBFF:
             symbols = [s.upper() for s in symbols if s]
 
         # Timeframe for bar-based factors (e.g., "1m", "5m")
-        # Use "trade" for trade-based factors (TradeRate, etc.)
-        timeframe = data.get("timeframe", "trade")
+        # Use "tick" for tick-level factors (trade_rate, quote_rate, etc.)
+        timeframe = data.get("timeframe", "tick")
 
         if not symbols:
             logger.warning("⚠️ No symbols in factor subscribe request")
@@ -871,7 +871,7 @@ class ChartBFF:
         else:
             symbols = [s.upper() for s in symbols if s]
 
-        timeframe = data.get("timeframe", "trade")
+        timeframe = data.get("timeframe", "tick")
 
         if not symbols:
             logger.warning("⚠️ No symbols in factor unsubscribe request")
@@ -950,14 +950,14 @@ class ChartBFF:
         self,
         websocket: WebSocket,
         symbol: str,
-        timeframe: str = "trade",
+        timeframe: str = "tick",
     ) -> None:
         """Consume factor updates from Redis pub/sub and forward to WebSocket.
 
         Args:
             websocket: WebSocket connection
             symbol: Ticker symbol
-            timeframe: Timeframe for factors (e.g., "1m", "5m", "trade")
+            timeframe: Timeframe for factors (e.g., "1m", "5m", "tick")
         """
         # Wait for factor bootstrap to complete before consuming real-time updates
         # This prevents receiving real-time factors before historical bootstrap is ready

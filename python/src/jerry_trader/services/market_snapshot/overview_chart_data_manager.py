@@ -294,7 +294,6 @@ class JerryTraderChartDataManager:
                     "symbol": item.get("symbol", ""),
                     "rank": item.get("rank", 999),
                     "price": item.get("price", 0.0),
-                    "change": item.get("change", 0.0),
                     "changePercent": item.get("changePercent", 0.0),
                     "volume": item.get("volume", 0),
                     "relativeVolume5min": item.get("relativeVolume5min", 1.0),

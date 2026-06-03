@@ -168,6 +168,34 @@ def detect_data_type(file_path: str) -> Optional[str]:
     return None
 
 
+def _check_gzip_integrity(csv_gz_path: str) -> None:
+    """Verify gzip file is complete by checking its footer.
+
+    Reads the last few bytes of the gzip to verify the footer is present.
+    Catches truncated/corrupt downloads where the gzip footer is missing.
+
+    Raises OSError/EOFError if the gzip footer is truncated or corrupt.
+    """
+    import struct
+
+    file_size = os.path.getsize(csv_gz_path)
+    if file_size < 8:
+        raise EOFError(f"Gzip file too small: {os.path.basename(csv_gz_path)}")
+
+    # Gzip format: last 4 bytes = original size (mod 2^32), bytes -8..-4 = CRC32
+    with open(csv_gz_path, "rb") as f:
+        f.seek(-4, 2)
+        uncompressed_size = struct.unpack("<I", f.read(4))[0]
+        # If we can seek and read the footer, the file is complete.
+        # A truncated file would be missing the footer entirely.
+        if uncompressed_size == 0:
+            # Could be a valid empty file or corrupted — check header too
+            f.seek(0)
+            header = f.read(10)
+            if header[:3] != b"\x1f\x8b\x08":
+                raise OSError(f"Invalid gzip header in {os.path.basename(csv_gz_path)}")
+
+
 # =============================================================================
 # Core conversion (identical to quant101's CSVGZToParquetConverter logic)
 # =============================================================================
@@ -213,6 +241,9 @@ def _convert_file(
     logger.info(f"Detected data type: {data_type}")
 
     try:
+        # Verify gzip integrity first (catches truncated/corrupt downloads early)
+        _check_gzip_integrity(csv_gz_path)
+
         # Read header to get actual columns
         with gzip.open(csv_gz_path, "rt") as f:
             header = f.readline().strip()

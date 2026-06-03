@@ -103,13 +103,13 @@ class FactorStorage:
             logger.error(f"FactorStorage: Failed to check table existence - {e}")
 
     def write_factor_snapshot(
-        self, snapshot: FactorSnapshot, timeframe: str = "trade"
+        self, snapshot: FactorSnapshot, timeframe: str = "tick"
     ) -> int:
         """Write factor snapshot to ClickHouse.
 
         Args:
             snapshot: FactorSnapshot with computed factors
-            timeframe: Timeframe for these factors (e.g., 'trade', '1m', '5m')
+            timeframe: Timeframe for these factors (e.g., 'tick', '1m', '5m')
 
         Returns:
             Number of factor rows written

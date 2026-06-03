@@ -12,7 +12,6 @@ from typing import Any
 
 from jerry_trader.domain.backtest.types import Candidate
 from jerry_trader.domain.market.bar import Bar
-from jerry_trader.domain.strategy.rule import Rule
 
 
 @dataclass
@@ -80,8 +79,7 @@ class BacktestConfig:
 
     Attributes:
         date: Backtest date in YYYY-MM-DD format.
-        rules: Direct list of Rule objects (for mining/testing, no file I/O).
-        rules_dir: Directory containing DSL rule YAML files (for production).
+        events_config_path: Path to events.yaml config file.
         gain_threshold: Minimum gain % for pre-filter (convenience shortcut
             for pre_filter.min_gain_pct).
         slippage_buffer: Buffer on ask price for slippage model (e.g. 0.001 = 0.1%).
@@ -95,13 +93,10 @@ class BacktestConfig:
         quotes_dir: Directory containing quotes Parquet files.
         candidates_only: Dry-run: stop after pre-filter.
         detailed: Show factor values at trigger time in console output.
-
-    Note: If rules is provided, rules_dir is ignored (no file I/O needed).
     """
 
     date: str
-    rules: list[Rule] | None = None  # Direct rules (preferred for mining)
-    rules_dir: str = "config/rules/"  # Fallback: load from directory
+    events_config_path: str = "config/events.yaml"
     gain_threshold: float = 2.0
     slippage_buffer: float = 0.001
     default_slippage: float = 0.002

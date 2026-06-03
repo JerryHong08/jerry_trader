@@ -7,6 +7,9 @@ No dependencies on infrastructure (Redis, ClickHouse, etc.).
 # Backtest
 from jerry_trader.domain.backtest import BacktestResult, Candidate, SignalResult
 
+# Event
+from jerry_trader.domain.event import Condition, Event, EventAction
+
 # Market data
 from jerry_trader.domain.market import (
     Bar,
@@ -27,6 +30,13 @@ from jerry_trader.domain.order import (
     OrderStatus,
     OrderType,
     TimeInForce,
+)
+
+# Session
+from jerry_trader.domain.session import (
+    SessionPhase,
+    get_session_phase,
+    is_effective_window,
 )
 
 # Strategy
@@ -63,4 +73,12 @@ __all__ = [
     "Candidate",
     "SignalResult",
     "BacktestResult",
+    # Event
+    "Event",
+    "EventAction",
+    "Condition",
+    # Session
+    "SessionPhase",
+    "get_session_phase",
+    "is_effective_window",
 ]

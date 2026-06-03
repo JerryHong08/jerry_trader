@@ -45,6 +45,40 @@ def _get_ch_client(database: str = "jerry_trader"):
     return get_clickhouse_client(config)
 
 
+def cmd_status(args):
+    """Check data status with trading calendar awareness."""
+    from datetime import datetime, timedelta
+
+    from jerry_trader.services.backtest.data.status import (
+        check_date_range_status,
+        print_status_summary,
+        update_status_file,
+    )
+
+    # Determine date range
+    if args.date:
+        start_date = args.date
+    else:
+        # Auto: check recent 20 days
+        today = datetime.now()
+        start_date = (today - timedelta(days=20)).strftime("%Y-%m-%d")
+
+    if args.end_date:
+        end_date = args.end_date
+    else:
+        end_date = datetime.now().strftime("%Y-%m-%d")
+
+    ch_client = _get_ch_client()
+
+    print(f"\nChecking data status: {start_date} to {end_date}")
+    results = check_date_range_status(start_date, end_date, ch_client)
+    print_status_summary(results)
+
+    if args.update:
+        update_status_file(results)
+        print(f"\nUpdated: data/status.yaml")
+
+
 def cmd_check(args):
     """Check data readiness for a date or date range."""
     from jerry_trader.services.backtest.data.checker import (
@@ -142,12 +176,13 @@ def cmd_build_snapshot(args):
         return
 
     # Full build (Stage 1-3)
+    # Backtest uses "_replay" suffix (same as runtime) — unified session_id
     mode = args.mode
     session_id = args.session_id
     if not session_id:
         date_compact = args.date.replace("-", "")
         session_id = make_session_id(
-            replay_date=date_compact if mode == "replay" else None,
+            replay_date=date_compact if mode == "replay" else None
         )
 
     collector_count, processed_count = build(
@@ -437,6 +472,7 @@ def cmd_prepare(args):
     from jerry_trader.platform.config.session import make_session_id
     from jerry_trader.services.backtest.data.checker import (
         DataStatus,
+        check_clickhouse_snapshot,
         check_date,
         check_date_range,
         print_check_result,
@@ -450,39 +486,142 @@ def cmd_prepare(args):
     start_date = args.date
     end_date = args.end_date or args.date
 
+    # Pre-check: determine which dates already have healthy parquet
+    from pathlib import Path
+
+    from jerry_trader.platform.config.config import lake_data_dir
+
+    dates = _generate_dates(start_date, end_date)
+    dates_need_fetch: list[str] = []
+    dates_have_data: list[str] = []
+    incomplete_files: list[tuple[str, str, int]] = []
+
+    for date in dates:
+        year, month, _ = date.split("-")
+        trades_file = (
+            Path(lake_data_dir)
+            / "us_stocks_sip"
+            / "trades_v1"
+            / year
+            / month
+            / f"{date}.parquet"
+        )
+        quotes_file = (
+            Path(lake_data_dir)
+            / "us_stocks_sip"
+            / "quotes_v1"
+            / year
+            / month
+            / f"{date}.parquet"
+        )
+
+        trades_ok = trades_file.exists() and trades_file.stat().st_size >= 1_000_000
+        quotes_ok = quotes_file.exists() and quotes_file.stat().st_size >= 1_000_000
+
+        if trades_file.exists() and not trades_ok:
+            incomplete_files.append((date, "trades", trades_file.stat().st_size))
+        if quotes_file.exists() and not quotes_ok:
+            incomplete_files.append((date, "quotes", quotes_file.stat().st_size))
+
+        if trades_ok and quotes_ok:
+            dates_have_data.append(date)
+        else:
+            dates_need_fetch.append(date)
+
+    # Warn about missing/incomplete data
+    if dates_need_fetch:
+        print("\n⚠ Missing parquet files:")
+        for date in dates_need_fetch:
+            year, month, _ = date.split("-")
+            trades_file = (
+                Path(lake_data_dir)
+                / "us_stocks_sip"
+                / "trades_v1"
+                / year
+                / month
+                / f"{date}.parquet"
+            )
+            quotes_file = (
+                Path(lake_data_dir)
+                / "us_stocks_sip"
+                / "quotes_v1"
+                / year
+                / month
+                / f"{date}.parquet"
+            )
+            parts = []
+            if not trades_file.exists():
+                parts.append("trades")
+            if not quotes_file.exists():
+                parts.append("quotes")
+            print(f"  {date}: {', '.join(parts)} missing")
+        print("  → Will download and convert")
+
+    if incomplete_files:
+        print("\n⚠ Suspiciously small parquet files (< 1MB) — will re-fetch:")
+        for date, dtype, size in incomplete_files:
+            print(f"  {date}: {dtype} ({size / 1024:.1f} KB)")
+
     if end_date != start_date:
         # Date range mode
         print(f"\n{'=' * 60}")
         print(f"  PREPARE — {start_date} to {end_date}")
         print(f"{'=' * 60}")
 
-        dates = _generate_dates(start_date, end_date)
-        print(f"  {len(dates)} trading days to prepare")
+        print(
+            f"  {len(dates)} trading days: "
+            f"{len(dates_have_data)} with parquet, "
+            f"{len(dates_need_fetch)} need fetch"
+        )
 
-        # Step 1: Download (date range)
-        print(f"\n[1/4] Downloading {len(dates)} dates...")
-        try:
-            download_date_range(
+        # Step 1+2: Download and convert only missing dates
+        if dates_need_fetch:
+            print(f"\n[1/5] Downloading {len(dates_need_fetch)} dates...")
+            try:
+                for date in dates_need_fetch:
+                    download_date_range(
+                        date,
+                        date,
+                        data_types=["trades_v1", "quotes_v1"],
+                        max_workers=2,
+                    )
+            except Exception as e:
+                print(f"  Download failed (non-fatal): {e}")
+
+            print(f"\n[2/5] Converting {len(dates_need_fetch)} dates...")
+            for date in dates_need_fetch:
+                convert_date_range(date, date, data_types=["trades_v1", "quotes_v1"])
+        else:
+            print(f"\n[1/5] All parquet files exist — skipping download")
+            print(f"[2/5] All parquet files exist — skipping convert")
+
+        # Step 3: Build bars from trades (for backtest visualization)
+        print(f"\n[3/5] Building bars from trades...")
+        ch_client = _get_ch_client() if not args.no_ch else None
+        if ch_client:
+            from jerry_trader.services.backtest.data.bar_builder import (
+                build_bars_date_range,
+            )
+
+            bar_results = build_bars_date_range(
                 start_date,
                 end_date,
-                data_types=["trades_v1", "quotes_v1", "day_aggs_v1"],
-                max_workers=2,
+                ch_client,
+                database=args.database,
+                tickers=args.tickers,
             )
-        except Exception as e:
-            print(f"  Download failed (non-fatal): {e}")
+            total_bars = sum(bar_results.values())
+            print(f"  Built {total_bars} bars across {len(dates)} dates")
+        else:
+            print("  Skipping (no ClickHouse client)")
 
-        # Step 2: Convert (date range)
-        print(f"\n[2/4] Converting {len(dates)} dates...")
-        convert_date_range(start_date, end_date, data_types=["trades_v1", "quotes_v1"])
-
-        # Step 3: Check (date range)
-        print(f"\n[3/4] Checking {len(dates)} dates...")
-        ch_client = _get_ch_client() if not args.no_ch else None
+        # Step 4: Check (date range)
+        print(f"\n[4/5] Checking {len(dates)} dates...")
         results = check_date_range(start_date, end_date, ch_client=ch_client)
         print_date_range_summary(results)
 
-        # Step 4: Build snapshot for each date that needs it
-        print(f"\n[4/4] Building snapshots...")
+        # Step 5: Build snapshot for each date that needs it
+        print(f"\n[5/5] Building snapshots...")
         if ch_client:
             for date in dates:
                 result = check_date(date, ch_client=ch_client)
@@ -505,34 +644,53 @@ def cmd_prepare(args):
         print(f"{'=' * 60}\n")
 
     else:
-        # Single date mode (original logic)
+        # Single date mode
         date = start_date
-        data_types = ["trades_v1", "quotes_v1", "day_aggs_v1"]
         ch_client = _get_ch_client() if not args.no_ch else None
+        has_parquet = date in dates_have_data
 
         print(f"\n{'=' * 60}")
         print(f"  PREPARE — {date}")
         print(f"{'=' * 60}")
 
-        # Step 1: Download
-        print(f"\n[1/4] Downloading...")
-        try:
-            download_date_range(date, date, data_types=data_types, max_workers=2)
-        except Exception as e:
-            print(f"  Download failed (non-fatal): {e}")
+        # Step 1+2: Download and convert only if parquet missing
+        if has_parquet:
+            print(f"\n[1/5] Parquet already exists — skipping download")
+            print(f"[2/5] Parquet already exists — skipping convert")
+        else:
+            print(f"\n[1/5] Downloading...")
+            try:
+                download_date_range(
+                    date, date, data_types=["trades_v1", "quotes_v1"], max_workers=2
+                )
+            except Exception as e:
+                print(f"  Download failed (non-fatal): {e}")
 
-        # Step 2: Convert
-        print(f"\n[2/4] Converting...")
-        convert_date_range(date, date, data_types=["trades_v1", "quotes_v1"])
+            print(f"\n[2/5] Converting...")
+            convert_date_range(date, date, data_types=["trades_v1", "quotes_v1"])
 
-        # Step 3: Check
-        print(f"\n[3/4] Checking...")
+        # Step 3: Build bars from trades
+        print(f"\n[3/5] Building bars from trades...")
+        if ch_client:
+            from jerry_trader.services.backtest.data.bar_builder import (
+                build_bars_from_trades,
+            )
+
+            bar_count = build_bars_from_trades(
+                date, ch_client, database=args.database, tickers=args.tickers
+            )
+            print(f"  Built {bar_count} bars")
+        else:
+            print("  Skipping (no ClickHouse client)")
+
+        # Step 4: Check
+        print(f"\n[4/5] Checking...")
         result = check_date(date, ch_client=ch_client)
         print_check_result(result)
 
-        # Step 4: Build snapshot if missing
+        # Step 5: Build snapshot if missing
         if result.snapshot.status != DataStatus.READY and ch_client:
-            print(f"\n[4/4] Building snapshot...")
+            print(f"\n[5/5] Building snapshot...")
             date_compact = date.replace("-", "")
             session_id = make_session_id(replay_date=date_compact)
             build(
@@ -542,8 +700,11 @@ def cmd_prepare(args):
                 mode="replay",
                 session_id=session_id,
             )
+            # Re-check snapshot after building to get fresh status
+            snapshot = check_clickhouse_snapshot(date, ch_client, args.database)
+            result.snapshot = snapshot
         else:
-            print(f"\n[4/4] Snapshot already exists — skipping")
+            print(f"\n[5/5] Snapshot already exists — skipping")
 
         print(f"\n{'=' * 60}")
         print(f"  PREPARE COMPLETE — {result.summary}")
@@ -592,6 +753,19 @@ def main():
     common.add_argument(
         "--no-ch", action="store_true", help="Skip ClickHouse operations"
     )
+
+    # status (NEW - auto-check data availability with trading calendar)
+    p_status = subparsers.add_parser(
+        "status", help="Check data status with trading calendar awareness"
+    )
+    p_status.add_argument("--date", help="Start date (YYYY-MM-DD, default: auto)")
+    p_status.add_argument(
+        "--end-date", help="End date (YYYY-MM-DD, default: 20 days from start)"
+    )
+    p_status.add_argument(
+        "--update", action="store_true", help="Update data/status.yaml file"
+    )
+    p_status.set_defaults(func=cmd_status)
 
     # check
     p_check = subparsers.add_parser(
@@ -727,6 +901,11 @@ def main():
     )
     p_prep.add_argument(
         "--database", default="jerry_trader", help="ClickHouse database"
+    )
+    p_prep.add_argument(
+        "--tickers",
+        nargs="+",
+        help="Only prepare specific tickers (default: all tickers)",
     )
     p_prep.set_defaults(func=cmd_prepare)
 

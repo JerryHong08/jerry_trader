@@ -27,9 +27,9 @@ Usage:
     coordinator.on_bars_ready("AAPL", "1m")
 
     # FactorEngine registers and reports
-    coordinator.register_consumer("AAPL", "tick_warmup", "factor_engine")
+    coordinator.register_consumer("AAPL", "trade_warmup", "factor_engine")
     coordinator.register_consumer("AAPL", "bar_warmup:10s", "factor_engine")
-    coordinator.report_done("AAPL", "tick_warmup", "factor_engine")
+    coordinator.report_done("AAPL", "trade_warmup", "factor_engine")
 
     # ChartBFF waits
     coordinator.wait_for_ticker_ready("AAPL", timeout=30.0)
@@ -37,6 +37,7 @@ Usage:
 
 from __future__ import annotations
 
+import base64
 import gzip
 import logging
 import pickle
@@ -147,18 +148,31 @@ class TickerBootstrap:
     from_ms: int | None = None
     first_ws_ts: int | None = None
 
+    # Quotes storage
+    quotes_key: str = ""
+    quotes: list[tuple[int, float, float, int, int]] = field(default_factory=list)
+
     # Tick warmup consumers (shared across all timeframes)
-    tick_consumers: dict[str, bool] = field(default_factory=dict)
+    trade_consumers: dict[str, bool] = field(default_factory=dict)
+
+    # Quote warmup consumers
+    quote_consumers: dict[str, bool] = field(default_factory=dict)
 
     # Timing
     start_time_ns: int = 0
     end_time_ns: int = 0
 
-    def all_tick_consumers_done(self) -> bool:
+    def all_trade_consumers_done(self) -> bool:
         """All tick consumers done (or no tick consumers registered)."""
-        if not self.tick_consumers:
+        if not self.trade_consumers:
             return True
-        return all(self.tick_consumers.values())
+        return all(self.trade_consumers.values())
+
+    def all_quote_consumers_done(self) -> bool:
+        """All quote consumers done (or no quote consumers registered)."""
+        if not self.quote_consumers:
+            return True
+        return all(self.quote_consumers.values())
 
     def all_timeframes_done(self) -> bool:
         """All timeframe bar warmups done."""
@@ -169,7 +183,11 @@ class TickerBootstrap:
 
     def is_ready(self) -> bool:
         """Ticker fully ready: trades done + all timeframes done."""
-        return self.all_tick_consumers_done() and self.all_timeframes_done()
+        return (
+            self.all_trade_consumers_done()
+            and self.all_quote_consumers_done()
+            and self.all_timeframes_done()
+        )
 
     def to_dict(self) -> dict[str, Any]:
         elapsed_ms = 0
@@ -181,9 +199,9 @@ class TickerBootstrap:
         return {
             "symbol": self.symbol,
             "trades_state": self.trades_state.name,
-            "tick_consumers": {
-                "total": len(self.tick_consumers),
-                "done": sum(self.tick_consumers.values()),
+            "trade_consumers": {
+                "total": len(self.trade_consumers),
+                "done": sum(self.trade_consumers.values()),
             },
             "timeframes": {
                 tf: {"state": status.state.name, "consumers": len(status.bar_consumers)}
@@ -510,9 +528,11 @@ class BootstrapCoordinator:
         """
         trades_key = f"bootstrap:trades:{symbol}:{uuid.uuid4().hex[:8]}"
 
-        # Compress and store
+        # Compress, base64-encode (Redis client has decode_responses=True,
+        # so stored values must be valid UTF-8), and store
         compressed = gzip.compress(pickle.dumps(trades))
-        self.redis.setex(trades_key, self.TRADES_TTL_SECONDS, compressed)
+        encoded = base64.b64encode(compressed).decode("ascii")
+        self.redis.setex(trades_key, self.TRADES_TTL_SECONDS, encoded)
 
         with self._lock:
             if symbol in self._bootstraps:
@@ -562,13 +582,67 @@ class BootstrapCoordinator:
                 if bootstrap.trades:
                     return bootstrap.trades
 
-                # Fallback to Redis
+                # Fallback to Redis (stored as base64-encoded gzip pickle)
                 if bootstrap.trades_key:
                     data = self.redis.get(bootstrap.trades_key)
-                    if data and isinstance(data, bytes):
-                        trades = pickle.loads(gzip.decompress(data))
+                    if data:
+                        # decode_responses=True → str; False → bytes
+                        raw = base64.b64decode(data) if isinstance(data, str) else data
+                        trades = pickle.loads(gzip.decompress(raw))
                         bootstrap.trades = trades  # Cache in memory
                         return trades
+
+        return []
+
+    def store_quotes(
+        self, symbol: str, quotes: list[tuple[int, float, float, int, int]]
+    ) -> str:
+        """Store historical quotes for quote warmup.
+
+        Called by BarsBuilder after quote backfill completes.
+        Stores in memory and Redis for FactorEngine retrieval.
+
+        Args:
+            symbol: Ticker symbol
+            quotes: List of (ts_ms, bid, ask, bid_size, ask_size) tuples
+
+        Returns:
+            Redis key for stored quotes
+        """
+        quotes_key = f"bootstrap:quotes:{symbol}:{uuid.uuid4().hex[:8]}"
+
+        compressed = gzip.compress(pickle.dumps(quotes))
+        self.redis.setex(quotes_key, self.TRADES_TTL_SECONDS, compressed)
+
+        with self._lock:
+            if symbol in self._bootstraps:
+                bootstrap = self._bootstraps[symbol]
+                bootstrap.quotes_key = quotes_key
+                bootstrap.quotes = quotes
+
+        logger.info(
+            f"store_quotes - {symbol}: stored {len(quotes)} quotes at {quotes_key}"
+        )
+        return quotes_key
+
+    def get_quotes(self, symbol: str) -> list[tuple[int, float, float, int, int]]:
+        """Get quotes for quote warmup.
+
+        Called by FactorEngine. First checks memory, then Redis.
+        """
+        with self._lock:
+            if symbol in self._bootstraps:
+                bootstrap = self._bootstraps[symbol]
+                if bootstrap.quotes:
+                    return bootstrap.quotes
+
+                # Fallback to Redis
+                if bootstrap.quotes_key:
+                    data = self.redis.get(bootstrap.quotes_key)
+                    if data and isinstance(data, bytes):
+                        quotes = pickle.loads(gzip.decompress(data))
+                        bootstrap.quotes = quotes
+                        return quotes
 
         return []
 
@@ -612,7 +686,8 @@ class BootstrapCoordinator:
         """Register a consumer for a phase.
 
         Phases:
-        - "tick_warmup": For tick indicators (TradeRate)
+        - "trade_warmup": For trade indicators (TradeRate)
+        - "quote_warmup": For quote indicators (BidAskSpread, OrderImbalance, QuoteRate)
         - "bar_warmup:{timeframe}": For bar indicators per timeframe
         """
         with self._lock:
@@ -622,10 +697,15 @@ class BootstrapCoordinator:
 
             bootstrap = self._bootstraps[symbol]
 
-            if phase == "tick_warmup":
-                bootstrap.tick_consumers[consumer_id] = False
+            if phase == "trade_warmup":
+                bootstrap.trade_consumers[consumer_id] = False
                 logger.debug(
-                    f"register_consumer - {symbol}: {consumer_id} for tick_warmup"
+                    f"register_consumer - {symbol}: {consumer_id} for trade_warmup"
+                )
+            elif phase == "quote_warmup":
+                bootstrap.quote_consumers[consumer_id] = False
+                logger.debug(
+                    f"register_consumer - {symbol}: {consumer_id} for quote_warmup"
                 )
             elif phase.startswith("bar_warmup:"):
                 tf = phase.split(":", 1)[1]
@@ -643,11 +723,17 @@ class BootstrapCoordinator:
 
             bootstrap = self._bootstraps[symbol]
 
-            if phase == "tick_warmup":
-                if consumer_id in bootstrap.tick_consumers:
-                    bootstrap.tick_consumers[consumer_id] = True
+            if phase == "trade_warmup":
+                if consumer_id in bootstrap.trade_consumers:
+                    bootstrap.trade_consumers[consumer_id] = True
                     logger.info(
-                        f"report_done - {symbol}: {consumer_id} completed tick_warmup"
+                        f"report_done - {symbol}: {consumer_id} completed trade_warmup"
+                    )
+            elif phase == "quote_warmup":
+                if consumer_id in bootstrap.quote_consumers:
+                    bootstrap.quote_consumers[consumer_id] = True
+                    logger.info(
+                        f"report_done - {symbol}: {consumer_id} completed quote_warmup"
                     )
             elif phase.startswith("bar_warmup:"):
                 tf = phase.split(":", 1)[1]
@@ -716,9 +802,11 @@ class BootstrapCoordinator:
             if symbol in self._bootstraps:
                 bootstrap = self._bootstraps[symbol]
 
-                # Delete trades from Redis
+                # Delete trades and quotes from Redis
                 if bootstrap.trades_key:
                     self.redis.delete(bootstrap.trades_key)
+                if bootstrap.quotes_key:
+                    self.redis.delete(bootstrap.quotes_key)
 
                 del self._bootstraps[symbol]
 

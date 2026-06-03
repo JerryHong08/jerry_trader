@@ -90,7 +90,7 @@ class SignalStorage:
             rule_id: Rule identifier.
             rule_version: Rule version number.
             symbol: Ticker symbol.
-            timeframe: Factor timeframe (e.g. "trade").
+            timeframe: Factor timeframe (e.g. "tick").
             trigger_time_ns: Trigger timestamp in nanoseconds.
             factors: Factor values at trigger time.
             trigger_price: Optional price at trigger time.

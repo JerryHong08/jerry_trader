@@ -1,0 +1,40 @@
+# FMP (Financial Modeling Prep) API Reference
+# Base URL: https://financialmodelingprep.com/stable
+# Auth: Query param ?apikey=FMP_API_KEY
+# Data provider for US equities fundamentals, float shares, news, and screening.
+
+## Company Profile
+[Company Profile](https://financialmodelingprep.com/stable/profile?symbol=AAPL): Per-symbol company profile. Returns single-object array.
+  Query: symbol (ticker), apikey
+  Fields: symbol, price, beta, marketCap, lastDividend, range (52-week "low-high"), change, changePercentage, companyName, currency, cik, isin, cusip, exchangeFullName, exchange, industry, website, description, ceo, sector, country, fullTimeEmployees, phone, address, city, state, zip, image, ipoDate, defaultImage, isEtf, isActivelyTrading, isAdr, isFund
+  Cache: raw/us_stocks_sip/fundamentals_profiles/profiles_YYYYMMDD.parquet
+
+## Float Shares
+[Shares Float (All)](https://financialmodelingprep.com/stable/shares-float-all): Paginated endpoint returning float shares for all available symbols.
+  Query: page (0-indexed), limit (max 5000), apikey
+  Fields: symbol, date, freeFloat, floatShares, outstandingShares
+  Cache: raw/us_stocks_sip/float_shares/float_shares_YYYYMMDD.parquet
+
+[Shares Float (Single)](https://financialmodelingprep.com/stable/shares-float?symbol=AAPL): Per-symbol float shares.
+  Query: symbol, apikey
+  Fields: symbol, date, freeFloat, floatShares, outstandingShares
+
+## Stock News
+[Stock News](https://financialmodelingprep.com/stable/news/stock): News articles for a set of tickers.
+  Query: symbols (comma-separated), limit, apikey
+  Fields: symbol, publishedDate, title, text, url, publisher (site)
+
+## Stock Screener
+[Stock Screener](https://financialmodelingprep.com/stable/stock-screener): Filter stocks by fundamental criteria.
+  Query: marketCapMoreThan, marketCapLowerThan, priceMoreThan, priceLowerThan, betaMoreThan, betaLowerThan, volumeMoreThan, volumeLowerThan, sector, industry, country, exchange, limit, apikey
+  Fields: symbol, companyName, marketCap, sector, industry, beta, price, lastAnnualDividend, volume, exchange, exchangeShortName, country, isEtf, isFund, isActivelyTrading
+
+## Key Metrics
+[Key Metrics TTM](https://financialmodelingprep.com/stable/key-metrics-ttm?symbol=AAPL): Trailing twelve months key financial metrics.
+  Query: symbol, apikey
+  Fields: revenuePerShareTTM, netIncomePerShareTTM, operatingCashFlowPerShareTTM, freeCashFlowPerShareTTM, cashPerShareTTM, bookValuePerShareTTM, tangibleBookValuePerShareTTM, shareHoldersEquityPerShareTTM, interestDebtPerShareTTM, marketCapTTM, enterpriseValueTTM, peRatioTTM, priceToSalesRatioTTM, pocfratioTTM, pfcfRatioTTM, pbRatioTTM, ptbRatioTTM, evToSalesTTM, enterpriseValueOverEBITDATTM, evToOperatingCashFlowTTM, evToFreeCashFlowTTM, earningsYieldTTM, freeCashFlowYieldTTM, debtToEquityTTM, debtToAssetsTTM, netDebtToEBITDATTM, currentRatioTTM, interestCoverageTTM, incomeQualityTTM, dividendYieldTTM, dividendYieldPercentageTTM, payoutRatioTTM, grossProfitMarginTTM, operatingProfitMarginTTM, pretaxProfitMarginTTM, netProfitMarginTTM, effectiveTaxRateTTM, returnOnAssetsTTM, returnOnEquityTTM, returnOnCapitalEmployedTTM, netIncomePerEBTTTM, ebtPerEbitTTM, ebitPerRevenueTTM, capexPerRevenueTTM
+
+## ETF Holdings
+[ETF Holder](https://financialmodelingprep.com/stable/etf-holder?symbol=AAPL): Institutional ETF holders of a stock.
+  Query: symbol, apikey
+  Fields: asset, shareNumber, weight, marketValuePerShare, change, changePercentage

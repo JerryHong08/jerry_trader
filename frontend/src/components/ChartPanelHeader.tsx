@@ -4,8 +4,8 @@
  * Features:
  * - Collapse button (−) to minimize panel
  * - Close button (×) to remove panel
- * - Title display
- * - Drag handle for reordering (future)
+ * - Title display with optional color dot
+ * - Right content slot for custom content (e.g., last value)
  */
 
 import React from 'react';
@@ -13,6 +13,7 @@ import { ChevronDown, ChevronRight, X } from 'lucide-react';
 
 interface ChartPanelHeaderProps {
   title: string;
+  color?: string; // Color dot for factor panels
   collapsed: boolean;
   canClose?: boolean;
   onToggleCollapse: () => void;
@@ -20,8 +21,9 @@ interface ChartPanelHeaderProps {
   rightContent?: React.ReactNode;
 }
 
-export function ChartPanelHeader({
+export const ChartPanelHeader = React.memo(function ChartPanelHeader({
   title,
+  color,
   collapsed,
   canClose = true,
   onToggleCollapse,
@@ -30,8 +32,11 @@ export function ChartPanelHeader({
 }: ChartPanelHeaderProps) {
   return (
     <div className="flex items-center justify-between px-2 py-1 bg-zinc-800 border-b border-zinc-700 select-none">
-      {/* Left: Collapse toggle + Title */}
+      {/* Left: Color dot + Collapse toggle + Title */}
       <div className="flex items-center gap-1">
+        {color && (
+          <span className="w-2 h-2 rounded-full" style={{ backgroundColor: color }} />
+        )}
         <button
           onClick={onToggleCollapse}
           className="p-0.5 hover:bg-zinc-700 rounded transition-colors"
@@ -61,7 +66,7 @@ export function ChartPanelHeader({
       </div>
     </div>
   );
-}
+});
 
 /**
  * ChartPanelWrapper - Wrapper that adds collapse/close behavior to any panel.
@@ -71,6 +76,7 @@ export function ChartPanelHeader({
 interface ChartPanelWrapperProps {
   id: string;
   title: string;
+  color?: string;
   collapsed: boolean;
   visible: boolean;
   canClose?: boolean;
@@ -81,9 +87,10 @@ interface ChartPanelWrapperProps {
   className?: string;
 }
 
-export function ChartPanelWrapper({
+export const ChartPanelWrapper = React.memo(function ChartPanelWrapper({
   id,
   title,
+  color,
   collapsed,
   visible,
   canClose = true,
@@ -99,6 +106,7 @@ export function ChartPanelWrapper({
     <div className={`flex flex-col ${className}`}>
       <ChartPanelHeader
         title={title}
+        color={color}
         collapsed={collapsed}
         canClose={canClose}
         onToggleCollapse={onToggleCollapse}
@@ -112,4 +120,4 @@ export function ChartPanelWrapper({
       )}
     </div>
   );
-}
+});

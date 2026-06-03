@@ -58,6 +58,14 @@
       port: 4321,
       open: true,
       hmr: false,
+      allowedHosts: true,
+      proxy: {
+        '/api/backtest': {
+          target: 'http://localhost:5005',
+          changeOrigin: true,
+          ws: true,
+        },
+      },
     },
     base: '/jerry_trader/',
   });

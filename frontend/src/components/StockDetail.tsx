@@ -5,162 +5,12 @@ import { SymbolSearch } from './common/SymbolSearch';
 import { useBackendTimestamp } from '../hooks/useBackendTimestamps';
 import { useMarketDataStore } from '../stores/marketDataStore';
 import { getCachedProfile, getCachedNews, setCachedProfile, setCachedNews, setDataStatus, subscribeNewsUpdates } from '../hooks/useWebSocket';
-import { IS_DEMO, MOCK_PROFILES, getMockNews } from '../data/mockData';
+import { fetchStockProfile, fetchStockNews, sortNewsByPublishedAt, type StockFundamentals } from '../services/stockApi';
+import { formatNumber, formatVolume, formatLargeNumber, formatTimestampET } from '../utils/format';
 
 // Get patchStaticData action for updating RankList when profile is fetched
 const patchStaticData = (symbol: string, data: { float?: number; marketCap?: number; hasNews?: boolean }) => {
   useMarketDataStore.getState().patchStaticData(symbol, data);
-};
-
-// Configuration - use Vite env variable or default
-const BFF_HTTP_URL =
-  (typeof import.meta !== 'undefined' && import.meta.env?.VITE_BFF_URL)
-    ? (import.meta.env.VITE_BFF_URL as string)
-    : 'http://localhost:5001';
-// Fallback for empty string from .env.ghpages
-const BFF_URL = BFF_HTTP_URL || 'http://localhost:5001';
-
-interface StockFundamentals {
-  symbol: string;
-  companyName: string;
-  country: string;
-  sector: string;
-  industry: string;
-  float: number | string;
-  marketCap: number | string;
-  range: string;
-  averageVolume: number | string;
-  ipoDate: string;
-  fullTimeEmployees: number | string;
-  ceo: string;
-  website: string;
-  description: string;
-  exchange: string;
-  address: string;
-  city: string;
-  state: string;
-  image: string;
-  lastUpdated: string;
-}
-
-interface BackendNewsArticle {
-  symbol: string;
-  title: string;
-  url: string;
-  sources: string;
-  published_time: string;
-  text?: string;
-}
-
-// Fetch stock profile from backend (or return mock in demo mode)
-const fetchStockProfile = async (symbol: string): Promise<StockFundamentals | null> => {
-  if (IS_DEMO) {
-    return (MOCK_PROFILES[symbol] as StockFundamentals | undefined) ?? null;
-  }
-  try {
-    const response = await fetch(`${BFF_URL}/api/stock/${symbol}/profile`);
-    if (!response.ok) {
-      console.warn(`Failed to fetch profile for ${symbol}: ${response.status}`);
-      return null;
-    }
-    const responseData = await response.json();
-
-    // Backend returns { ticker, profile: {...}, timestamp } or { error: ... }
-    if (responseData.error) {
-      console.warn(`Profile error for ${symbol}: ${responseData.error}`);
-      return null;
-    }
-
-    return responseData.profile as StockFundamentals;
-  } catch (error) {
-    console.error(`Error fetching profile for ${symbol}:`, error);
-    return null;
-  }
-};
-
-// Fetch stock news from backend (or return mock in demo mode)
-const fetchStockNews = async (
-  symbol: string,
-  limit: number = 10,
-  refresh: boolean = false
-): Promise<{ articles: NewsArticle[]; queued: boolean }> => {
-  if (IS_DEMO) {
-    return { articles: getMockNews(symbol).slice(0, limit), queued: false };
-  }
-  try {
-    const url = `${BFF_URL}/api/stock/${symbol}/news?limit=${limit}${refresh ? '&refresh=true' : ''}`;
-    const response = await fetch(url);
-    if (!response.ok) {
-      console.warn(`Failed to fetch news for ${symbol}: ${response.status}`);
-      return { articles: [], queued: false };
-    }
-    const responseData = await response.json();
-
-    // Backend returns { ticker, news: [...], count, queued, timestamp }
-    const articles: BackendNewsArticle[] = responseData.news || [];
-
-    // Transform backend format to frontend NewsArticle format
-    const mapped = articles.map((article, index) => ({
-      id: `${symbol}-news-${index}`,
-      title: article.title,
-      source: article.sources,
-      publishedAt: article.published_time,
-      url: article.url,
-      summary: article.text || '',
-      isNew: false, // Could be determined by comparing with last fetch timestamp
-    }));
-
-    return { articles: mapped, queued: Boolean(responseData.queued) };
-  } catch (error) {
-    console.error(`Error fetching news for ${symbol}:`, error);
-    return { articles: [], queued: false };
-  }
-};
-
-const formatNumber = (num: number, decimals = 2): string => {
-  return num.toFixed(decimals).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-};
-
-const formatLargeNumber = (num: number): string => {
-  if (num >= 1e12) return `$${(num / 1e12).toFixed(2)}T`;
-  if (num >= 1e9) return `$${(num / 1e9).toFixed(2)}B`;
-  if (num >= 1e6) return `$${(num / 1e6).toFixed(2)}M`;
-  if (num >= 1e3) return `$${(num / 1e3).toFixed(2)}K`;
-  return `$${num.toFixed(2)}`;
-};
-
-const formatVolume = (vol: number): string => {
-  if (vol >= 1e9) return `${(vol / 1e9).toFixed(2)}B`;
-  if (vol >= 1e6) return `${(vol / 1e6).toFixed(2)}M`;
-  if (vol >= 1e3) return `${(vol / 1e3).toFixed(2)}K`;
-  return vol.toString();
-};
-
-const formatTimestampET = (isoDate: string): string => {
-  if (!isoDate) return '-';
-  const date = new Date(isoDate);
-  // Check for invalid date
-  if (isNaN(date.getTime())) return isoDate || '-';
-  // Format to America/New_York timezone
-  const formatted = date.toLocaleString('en-US', {
-    timeZone: 'America/New_York',
-    month: '2-digit',
-    day: '2-digit',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  });
-  return `${formatted} ET`;
-};
-
-const sortNewsByPublishedAt = (articles: NewsArticle[]): NewsArticle[] => {
-  return [...articles].sort((a, b) => {
-    const aTime = Date.parse(a.publishedAt || '') || 0;
-    const bTime = Date.parse(b.publishedAt || '') || 0;
-    return bTime - aTime;
-  });
 };
 
 export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChange }: ModuleProps) {
@@ -277,7 +127,7 @@ export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChan
 
 
     // Helper to normalize news format (handle both old and new cache formats)
-    const normalizeNews = (articles: any[]): NewsArticle[] => {
+    const normalizeNews = (articles: Record<string, unknown>[]): NewsArticle[] => {
       const normalized = articles.map((article, index) => ({
         id: article.id || `${symbol}-news-${index}`,
         title: article.title || '',
@@ -372,7 +222,7 @@ export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChan
   // Loading state
   if (isLoadingProfile) {
     return (
-      <div className="h-full flex items-center justify-center bg-zinc-900 text-gray-500">
+      <div className="h-full flex items-center justify-center bg-zinc-900 text-zinc-500">
         <RefreshCw className="w-5 h-5 animate-spin mr-2" />
         Loading {symbol}...
       </div>
@@ -386,7 +236,7 @@ export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChan
         {/* Header with search */}
         <div className="border-b border-zinc-800 p-4">
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 text-gray-400">
+            <div className="flex items-center gap-2 text-zinc-400">
               <AlertCircle className="w-5 h-5 text-yellow-500" />
               <span>{profileError || 'No data available'}</span>
             </div>
@@ -401,7 +251,7 @@ export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChan
             </div>
           </div>
         </div>
-        <div className="flex-1 flex items-center justify-center text-gray-500">
+        <div className="flex-1 flex items-center justify-center text-zinc-500">
           <p>Static data will appear once the ticker is processed by the backend</p>
         </div>
       </div>
@@ -417,8 +267,8 @@ export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChan
           <div className="flex-1 min-w-0">
             <h2 className="text-xl">{fundamentals.companyName}</h2>
             <div className="flex items-center gap-3 mt-1">
-              <div className="text-sm text-gray-400">{fundamentals.symbol}</div>
-              <div className="text-xs text-gray-500">Updated: {backendTimestamp}</div>
+              <div className="text-sm text-zinc-400">{fundamentals.symbol}</div>
+              <div className="text-xs text-zinc-500">Updated: {backendTimestamp}</div>
             </div>
           </div>
           {/* Search Bar - Right side with responsive width */}
@@ -440,33 +290,33 @@ export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChan
           <>
             {/* Company Info */}
             <div className="mb-6">
-              <h3 className="text-sm text-gray-400 mb-3 flex items-center gap-2">
+              <h3 className="text-sm text-zinc-400 mb-3 flex items-center gap-2">
                 <Globe className="w-4 h-4" />
                 Company Information
               </h3>
               <div className="grid grid-cols-2 gap-3 text-sm">
                 <div>
-                  <div className="text-gray-500 text-xs">Country</div>
+                  <div className="text-zinc-500 text-xs">Country</div>
                   <div>{fundamentals.country}</div>
                 </div>
                 <div>
-                  <div className="text-gray-500 text-xs">Sector</div>
+                  <div className="text-zinc-500 text-xs">Sector</div>
                   <div>{fundamentals.sector}</div>
                 </div>
                 <div>
-                  <div className="text-gray-500 text-xs">Industry</div>
+                  <div className="text-zinc-500 text-xs">Industry</div>
                   <div>{fundamentals.industry}</div>
                 </div>
                 <div>
-                  <div className="text-gray-500 text-xs">ipoDate</div>
+                  <div className="text-zinc-500 text-xs">ipoDate</div>
                   <div>{fundamentals.ipoDate || '-'}</div>
                 </div>
                 <div>
-                  <div className="text-gray-500 text-xs">CEO</div>
+                  <div className="text-zinc-500 text-xs">CEO</div>
                   <div>{fundamentals.ceo || '-'}</div>
                 </div>
                 <div>
-                  <div className="text-gray-500 text-xs">Employees</div>
+                  <div className="text-zinc-500 text-xs">Employees</div>
                   <div>{fundamentals.fullTimeEmployees ? formatNumber(Number(fundamentals.fullTimeEmployees), 0) : '-'}</div>
                 </div>
               </div>
@@ -474,33 +324,33 @@ export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChan
 
             {/* Market Data */}
             <div className="mb-6">
-              <h3 className="text-sm text-gray-400 mb-3 flex items-center gap-2">
+              <h3 className="text-sm text-zinc-400 mb-3 flex items-center gap-2">
                 <DollarSign className="w-4 h-4" />
                 Market Data
               </h3>
               <div className="grid grid-cols-2 gap-3 text-sm">
                 <div>
-                  <div className="text-gray-500 text-xs">Market Cap</div>
+                  <div className="text-zinc-500 text-xs">Market Cap</div>
                   <div>{fundamentals.marketCap ? formatLargeNumber(Number(fundamentals.marketCap)) : '-'}</div>
                 </div>
                 <div>
-                  <div className="text-gray-500 text-xs">Exchange</div>
+                  <div className="text-zinc-500 text-xs">Exchange</div>
                   <div>{fundamentals.exchange || '-'}</div>
                 </div>
                 <div>
-                  <div className="text-gray-500 text-xs">Float Shares</div>
+                  <div className="text-zinc-500 text-xs">Float Shares</div>
                   <div>{fundamentals.float ? formatVolume(Number(fundamentals.float)) : '-'}</div>
                 </div>
                 <div>
-                  <div className="text-gray-500 text-xs">Avg Volume</div>
+                  <div className="text-zinc-500 text-xs">Avg Volume</div>
                   <div>{fundamentals.averageVolume ? formatVolume(Number(fundamentals.averageVolume)) : '-'}</div>
                 </div>
                 <div>
-                  <div className="text-gray-500 text-xs">52W Range</div>
+                  <div className="text-zinc-500 text-xs">52W Range</div>
                   <div>{fundamentals.range || '-'}</div>
                 </div>
                 <div>
-                  <div className="text-gray-500 text-xs">Location</div>
+                  <div className="text-zinc-500 text-xs">Location</div>
                   <div>{[fundamentals.city, fundamentals.state].filter(Boolean).join(', ') || '-'}</div>
                 </div>
               </div>
@@ -508,8 +358,8 @@ export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChan
 
             {/* Description */}
             <div>
-              <h3 className="text-sm text-gray-400 mb-2">About</h3>
-              <p className="text-sm text-gray-300 leading-relaxed">
+              <h3 className="text-sm text-zinc-400 mb-2">About</h3>
+              <p className="text-sm text-zinc-300 leading-relaxed">
                 {fundamentals.description}
               </p>
               <div className="mt-2">
@@ -567,7 +417,7 @@ export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChan
             {/* News List */}
             <div className="space-y-3">
               {news.length === 0 && !isLoadingNews && (
-                <div className="text-center text-gray-500 text-sm py-8">
+                <div className="text-center text-zinc-500 text-sm py-8">
                   Click "Request News" to queue a fetch and stream results
                 </div>
               )}
@@ -587,14 +437,14 @@ export function StockDetail({ onRemove, selectedSymbol, settings, onSettingsChan
                     )}
                   </div>
 
-                  <p className="text-xs text-gray-400 mb-2 line-clamp-2">
+                  <p className="text-xs text-zinc-400 mb-2 line-clamp-2">
                     {article.summary}
                   </p>
 
                   <div className="flex items-start justify-between gap-2 text-xs">
-                    <div className="flex flex-col gap-1 text-gray-500">
+                    <div className="flex flex-col gap-1 text-zinc-500">
                       <div className="flex items-center gap-2">
-                        <span className="text-gray-400">{article.source}</span>
+                        <span className="text-zinc-400">{article.source}</span>
                       </div>
                       <div>
                         {formatTimestampET(article.publishedAt)}

@@ -4,6 +4,9 @@ import type { GridItemConfig } from '../types';
 
 export interface GridContainerRef {
   focusToFit: () => void;
+  panBy: (dx: number, dy: number) => void;
+  zoomBy: (delta: number) => void;
+  zoomToward: (screenX: number, screenY: number, newZoom: number) => void;
 }
 
 interface GridContainerProps {
@@ -235,7 +238,27 @@ export const GridContainer = forwardRef<GridContainerRef, GridContainerProps>(fu
       const maxY = Math.max(...items.map(i => i.position.y + i.size.height));
       focusOnBounds(minX, minY, maxX, maxY);
     },
-  }), [items, focusOnBounds]);
+    panBy: (dx: number, dy: number) => {
+      setPanOffset((prev) => ({ x: prev.x + dx, y: prev.y + dy }));
+    },
+    zoomBy: (delta: number) => {
+      onZoomChange(Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom + delta)));
+    },
+    zoomToward: (screenX: number, screenY: number, newZoom: number) => {
+      const curPan = panOffsetRef.current;
+      const curZoom = zoom;
+      if (curZoom <= 0) return;
+      // Canvas point under screen position = (screenPos - pan) / zoom
+      // Keep it fixed after zoom: newPan = screenPos - canvasPoint * newZoom
+      const canvasX = (screenX - curPan.x) / curZoom;
+      const canvasY = (screenY - curPan.y) / curZoom;
+      setPanOffset({
+        x: screenX - canvasX * newZoom,
+        y: screenY - canvasY * newZoom,
+      });
+      onZoomChange(Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, newZoom)));
+    },
+  }), [items, focusOnBounds, zoom, onZoomChange]);
 
   // Left-click drag: selection rectangle on canvas
   useEffect(() => {
@@ -400,6 +423,14 @@ export const GridContainer = forwardRef<GridContainerRef, GridContainerProps>(fu
         />
       )}
 
+      {/* Empty state — no modules on canvas */}
+      {items.length === 0 && (
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
+          <div className="text-center text-zinc-600">
+            <p className="text-sm">Add a module from the sidebar to get started</p>
+          </div>
+        </div>
+      )}
 
     </div>
   );

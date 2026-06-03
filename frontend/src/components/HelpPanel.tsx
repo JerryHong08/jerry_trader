@@ -126,7 +126,7 @@ export function HelpPanel({
                 <button
                   key={tab.id}
                   onClick={() => setActiveTab(tab.id)}
-                  className={`flex items-center gap-2 px-3 py-1.5 text-[13px] font-medium transition-all ${
+                  className={`flex items-center gap-2 px-3 py-1.5 text-sm font-medium transition-all ${
                     isActive
                       ? 'bg-zinc-800 text-zinc-100'
                       : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50'
@@ -166,9 +166,9 @@ export function HelpPanel({
 
         {/* Footer */}
         <div className="px-4 py-2.5 border-t border-zinc-800 flex justify-end bg-zinc-900">
-          <span className="text-[11px] text-zinc-600 flex items-center gap-1">
+          <span className="text-3xs text-zinc-600 flex items-center gap-1">
             Press
-            <kbd className="px-1.5 py-0.5 bg-zinc-800 text-zinc-400 text-[10px] font-mono">Esc</kbd>
+            <kbd className="px-1.5 py-0.5 bg-zinc-800 text-zinc-400 text-2xs font-mono">Esc</kbd>
             to close
           </span>
         </div>
@@ -183,18 +183,18 @@ function ShortcutsTab() {
     <div className="px-4 py-3">
       {shortcuts.map((group, groupIndex) => (
         <div key={group.category} className={`py-3 ${groupIndex !== 0 ? 'border-t border-zinc-800/30' : ''}`}>
-          <div className="text-[10px] font-semibold uppercase tracking-widest text-zinc-600 mb-2">
+          <div className="text-2xs font-semibold uppercase tracking-widest text-zinc-600 mb-2">
             {group.category}
           </div>
           <div className="space-y-0">
             {group.items.map((item, i) => (
               <div key={i} className="flex items-center justify-between py-1.5">
-                <span className="text-[13px] text-zinc-400">{item.description}</span>
+                <span className="text-sm text-zinc-400">{item.description}</span>
                 <div className="flex items-center gap-0.5 shrink-0 ml-3">
                   {item.keys.map((key, j) => (
                     <React.Fragment key={j}>
-                      {j > 0 && <span className="text-zinc-700 text-[10px] mx-0.5">+</span>}
-                      <kbd className="px-1.5 py-[1px] bg-zinc-800 border border-zinc-700 text-[11px] text-zinc-400 font-mono">
+                      {j > 0 && <span className="text-zinc-700 text-2xs mx-0.5">+</span>}
+                      <kbd className="px-1.5 py-[1px] bg-zinc-800 border border-zinc-700 text-3xs text-zinc-400 font-mono">
                         {key}
                       </kbd>
                     </React.Fragment>
@@ -224,7 +224,7 @@ function LayoutTab({ currentTemplateId, onTemplateChange }: LayoutTabProps) {
 
   return (
     <div className="px-4 py-3">
-      <div className="text-[10px] font-semibold uppercase tracking-widest text-zinc-600 mb-2">
+      <div className="text-2xs font-semibold uppercase tracking-widest text-zinc-600 mb-2">
         Available Templates
       </div>
       <div>
@@ -241,11 +241,11 @@ function LayoutTab({ currentTemplateId, onTemplateChange }: LayoutTabProps) {
               } ${index === 0 ? 'rounded-t' : ''} ${index === templates.length - 1 ? 'rounded-b' : ''}`}
             >
               <div className="flex-1 min-w-0">
-                <div className={`text-[13px] font-medium flex items-center gap-2 ${isActive ? 'text-green-400' : 'text-zinc-300'}`}>
+                <div className={`text-sm font-medium flex items-center gap-2 ${isActive ? 'text-green-400' : 'text-zinc-300'}`}>
                   {template.name}
                 </div>
                 <div
-                  className="text-[11px] mt-0.5 leading-relaxed"
+                  className="text-3xs mt-0.5 leading-relaxed"
                   style={{ color: isActive ? '#4ade80' : undefined }}
                 >
                   {template.description}
@@ -318,21 +318,21 @@ function SettingsTab({ items, onImportLayout, onFocusToFit }: SettingsTabProps) 
     <div className="px-4 py-3 space-y-4">
       {/* Layout Section */}
       <div>
-        <div className="text-[10px] font-semibold uppercase tracking-widest text-zinc-600 mb-2">
+        <div className="text-2xs font-semibold uppercase tracking-widest text-zinc-600 mb-2">
           Layout
         </div>
         <div className="divide-y divide-zinc-800/30 border-t border-zinc-800/30">
           {/* Export */}
           <div className="flex items-center justify-between py-2.5 px-3 hover:bg-zinc-800/30 transition-colors">
             <div>
-              <div className="text-[13px] font-medium text-zinc-300">Export Layout</div>
-              <div className="text-[11px] text-zinc-500 mt-1">
+              <div className="text-sm font-medium text-zinc-300">Export Layout</div>
+              <div className="text-3xs text-zinc-500 mt-1">
                 Copy current layout as JSON
               </div>
             </div>
             <button
               onClick={handleExport}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[12px] transition-colors"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs transition-colors"
             >
               {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
               {copied ? 'Copied' : 'Copy'}
@@ -343,14 +343,14 @@ function SettingsTab({ items, onImportLayout, onFocusToFit }: SettingsTabProps) 
           <div className={`transition-colors ${showImport ? 'bg-zinc-800/30' : 'hover:bg-zinc-800/30'}`}>
             <div className="flex items-center justify-between py-2.5 px-3">
               <div>
-                <div className="text-[13px] font-medium text-zinc-300">Import Layout</div>
-                <div className="text-[11px] text-zinc-500 mt-1">
+                <div className="text-sm font-medium text-zinc-300">Import Layout</div>
+                <div className="text-3xs text-zinc-500 mt-1">
                   Restore layout from JSON
                 </div>
               </div>
               <button
                 onClick={() => setShowImport(!showImport)}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[12px] transition-colors"
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs transition-colors"
               >
                 <Upload className="w-3.5 h-3.5" />
                 {showImport ? 'Hide' : 'Show'}
@@ -363,21 +363,21 @@ function SettingsTab({ items, onImportLayout, onFocusToFit }: SettingsTabProps) 
                   value={importText}
                   onChange={(e) => setImportText(e.target.value)}
                   placeholder="Paste JSON here..."
-                  className="w-full bg-zinc-800/50 border border-zinc-700 p-2.5 text-[12px] font-mono text-zinc-300 placeholder:text-zinc-600 resize-none focus:outline-none focus:border-zinc-600"
+                  className="w-full bg-zinc-800/50 border border-zinc-700 p-2.5 text-xs font-mono text-zinc-300 placeholder:text-zinc-600 resize-none focus:outline-none focus:border-zinc-600"
                   style={{ height: '120px' }}
                 />
                 <div className="flex gap-2">
                   <button
                     onClick={handleImport}
                     disabled={!importText.trim()}
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600/20 hover:bg-green-600/30 disabled:opacity-50 disabled:hover:bg-green-600/20 text-green-400 text-[12px] transition-colors border border-green-600/30"
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600/20 hover:bg-green-600/30 disabled:opacity-50 disabled:hover:bg-green-600/20 text-green-400 text-xs transition-colors border border-green-600/30"
                   >
                     <Upload className="w-3.5 h-3.5" />
                     Import
                   </button>
                   <button
                     onClick={() => setImportText('')}
-                    className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 text-[12px] transition-colors"
+                    className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 text-xs transition-colors"
                   >
                     Clear
                   </button>
@@ -390,21 +390,21 @@ function SettingsTab({ items, onImportLayout, onFocusToFit }: SettingsTabProps) 
 
       {/* Storage Section */}
       <div className="mt-6 pt-4 border-t border-zinc-800">
-        <div className="text-[10px] font-semibold uppercase tracking-widest text-zinc-600 mb-2">
+        <div className="text-2xs font-semibold uppercase tracking-widest text-zinc-600 mb-2">
           Storage & Cache
         </div>
         <div className="divide-y divide-zinc-800/30 border-t border-zinc-800/30">
           {/* Data Cache */}
           <div className="flex items-center justify-between py-2.5 px-3 hover:bg-zinc-800/30 transition-colors">
             <div>
-              <div className="text-[13px] font-medium text-zinc-300">Data Cache</div>
-              <div className="text-[11px] text-zinc-500 mt-1">
+              <div className="text-sm font-medium text-zinc-300">Data Cache</div>
+              <div className="text-3xs text-zinc-500 mt-1">
                 {stats.profiles} profiles, {stats.news} articles
               </div>
             </div>
             <button
               onClick={handleClearDataCache}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-300 text-[12px] transition-colors"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-300 text-xs transition-colors"
             >
               <Trash2 className="w-3.5 h-3.5" />
               Clear
@@ -414,14 +414,14 @@ function SettingsTab({ items, onImportLayout, onFocusToFit }: SettingsTabProps) 
           {/* Local Storage */}
           <div className="flex items-center justify-between py-2.5 px-3 hover:bg-zinc-800/30 transition-colors">
             <div>
-              <div className="text-[13px] font-medium text-zinc-300">Saved Layout</div>
-              <div className="text-[11px] text-zinc-500 mt-1">
+              <div className="text-sm font-medium text-zinc-300">Saved Layout</div>
+              <div className="text-3xs text-zinc-500 mt-1">
                 Clear browser storage
               </div>
             </div>
             <button
               onClick={handleClearStorage}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-red-600/10 hover:bg-red-600/20 text-red-400 text-[12px] transition-colors"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-red-600/10 hover:bg-red-600/20 text-red-400 text-xs transition-colors"
             >
               <AlertCircle className="w-3.5 h-3.5" />
               Clear

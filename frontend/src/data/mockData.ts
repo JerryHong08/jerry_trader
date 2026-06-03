@@ -10,6 +10,7 @@ import type { LWSeriesData, RankEntity } from '../stores/marketDataStore';
 import type { OrderStatusEventData, PortfolioSummaryResponse } from '../types/ibbot';
 import type { PositionRow } from '../stores/ibbotStore';
 import type { Quote, Trade } from '../stores/tickDataStore';
+import type { OHLCVBar } from '../stores/chartDataStore';
 
 // ============================================================================
 // Helpers
@@ -109,11 +110,9 @@ const MOCK_TICKERS: MockTicker[] = [
 export function getMockRankEntities(): Map<string, RankEntity> {
   const map = new Map<string, RankEntity>();
   MOCK_TICKERS.forEach((t, i) => {
-    const prevClose = t.price / (1 + t.changePercent / 100);
     const entity: RankEntity = {
       symbol: t.symbol,
       price: t.price,
-      change: t.price - prevClose,
       changePercent: t.changePercent,
       volume: t.volume,
       vwap: t.price * (1 + (Math.random() - 0.5) * 0.005),
@@ -228,6 +227,60 @@ export function getMockTrade(symbol: string, price: number): Trade {
     size: Math.floor(rand(1, 20)) * 100,
     timestamp: Date.now(),
   };
+}
+
+// ============================================================================
+// Candlestick Chart Data
+// ============================================================================
+
+/** Generate 390 1-minute OHLCV bars for demo mode (9:30→16:00 ET). */
+export function getMockCandlestickData(symbol: string): OHLCVBar[] {
+  const ticker = MOCK_TICKERS.find((t) => t.symbol === symbol);
+  if (!ticker) return [];
+
+  const now = new Date();
+  const openET = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 9, 30, 0);
+  const openTs = Math.floor(openET.getTime() / 1000);
+
+  // Yesterday close = today close / (1 + change%)
+  const changeRatio = ticker.changePercent / 100;
+  const yesterdayClose = ticker.price / (1 + changeRatio);
+  const targetClose = ticker.price;
+
+  const bars: OHLCVBar[] = [];
+  let prevClose = yesterdayClose;
+  const N = 390;
+
+  for (let i = 0; i < N; i++) {
+    // Progress 0→1 across the session
+    const t = i / (N - 1);
+    // Drift from yesterday close toward target close (with some noise)
+    const drift = yesterdayClose + (targetClose - yesterdayClose) * t;
+    const noise = (Math.random() - 0.5) * ticker.price * 0.002;
+    const open = prevClose;
+    const close = drift + noise;
+    const range = Math.abs(close - open) + ticker.price * 0.001 * Math.random();
+    const high = Math.max(open, close) + range * Math.random() * 0.5;
+    const low = Math.min(open, close) - range * Math.random() * 0.5;
+
+    // Volume U-shape: higher at open (t≈0) and close (t≈1), lower midday
+    const uShape = 1 - 4 * (t - 0.5) * (t - 0.5); // parabola peaking at 0,1
+    const baseVol = ticker.volume / N;
+    const volume = baseVol * (0.5 + 1.5 * uShape + Math.random() * 0.5);
+
+    bars.push({
+      time: openTs + i * 60,
+      open: Math.round(open * 100) / 100,
+      high: Math.round(high * 100) / 100,
+      low: Math.round(low * 100) / 100,
+      close: Math.round(close * 100) / 100,
+      volume: Math.round(volume),
+    });
+
+    prevClose = close;
+  }
+
+  return bars;
 }
 
 // ============================================================================

@@ -51,7 +51,7 @@ export function DataTable<T>({
           <tr>
             {showIndex && (
               <th
-                className="px-3 py-2 text-left text-xs text-gray-400"
+                className="px-3 py-2 text-left text-xs text-zinc-400"
                 style={{ width: indexWidth }}
               >
                 #
@@ -60,7 +60,7 @@ export function DataTable<T>({
             {columns.map((column) => (
               <th
                 key={column.key}
-                className={`px-3 py-2 text-xs text-gray-400 ${
+                className={`px-3 py-2 text-xs text-zinc-400 ${
                   column.align === 'center' ? 'text-center' :
                   column.align === 'right' ? 'text-right' :
                   'text-left'
@@ -99,7 +99,7 @@ export function DataTable<T>({
                 }`}
               >
                 {showIndex && (
-                  <td className="px-3 py-2 text-gray-500">{index + 1}</td>
+                  <td className="px-3 py-2 text-zinc-500">{index + 1}</td>
                 )}
                 {columns.map((column) => (
                   <td

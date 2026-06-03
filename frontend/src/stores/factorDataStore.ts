@@ -47,7 +47,7 @@ export interface SymbolFactorState {
 }
 
 /** Build the composite store key: "moduleId::TICKER::TIMEFRAME" */
-export function factorStoreKey(moduleId: string, ticker: string, timeframe: string = 'trade'): string {
+export function factorStoreKey(moduleId: string, ticker: string, timeframe: string = 'tick'): string {
   return `${moduleId}::${ticker.toUpperCase()}::${timeframe}`;
 }
 
@@ -111,7 +111,7 @@ export const useFactorDataStore = create<FactorDataState>((set, get) => ({
     fromMs?: number,
     toMs?: number,
     factorNames?: string[],
-    timeframe: string = 'trade'
+    timeframe: string = 'tick'
   ) => {
     const key = factorStoreKey(moduleId, ticker, timeframe);
     const tickerUpper = ticker.toUpperCase();
@@ -168,7 +168,12 @@ export const useFactorDataStore = create<FactorDataState>((set, get) => ({
         },
       }));
 
-      console.log(`[FactorStore] Fetched ${data.count} factor points for ${tickerUpper}/${timeframe}`);
+      const received = Object.keys(data.factors);
+      console.log(
+        `[FactorStore] Fetched ${data.count} pts for ${tickerUpper}/${timeframe}` +
+        ` | factors=[${received.join(', ')}]` +
+        ` | samples=${received.map((k) => `${k}:${data.factors[k]?.length ?? 0}`).join(', ')}`
+      );
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : 'Unknown error';
       console.error(`[FactorStore] fetchFactors error for ${tickerUpper}:`, errorMsg);
@@ -188,7 +193,7 @@ export const useFactorDataStore = create<FactorDataState>((set, get) => ({
     }
   },
 
-  updateFactor: (moduleId: string, ticker: string, factorName: string, point: FactorPoint, timeframe: string = 'trade') => {
+  updateFactor: (moduleId: string, ticker: string, factorName: string, point: FactorPoint, timeframe: string = 'tick') => {
     const key = factorStoreKey(moduleId, ticker, timeframe);
 
     set((state) => {
@@ -231,7 +236,7 @@ export const useFactorDataStore = create<FactorDataState>((set, get) => ({
     ticker: string,
     timestamp_ns: number,
     factors: Record<string, number>,
-    timeframe: string = 'trade'
+    timeframe: string = 'tick'
   ) => {
     const time = Math.floor(timestamp_ns / 1_000_000_000); // ns to seconds
     const key = factorStoreKey(moduleId, ticker, timeframe);
@@ -262,7 +267,7 @@ export const useFactorDataStore = create<FactorDataState>((set, get) => ({
     });
   },
 
-  clearFactors: (moduleId: string, ticker: string, timeframe: string = 'trade') => {
+  clearFactors: (moduleId: string, ticker: string, timeframe: string = 'tick') => {
     const key = factorStoreKey(moduleId, ticker, timeframe);
     set((state) => {
       const { [key]: _, ...rest } = state.symbolFactors;

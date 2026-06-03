@@ -116,7 +116,7 @@ export default function NewsRoom({ moduleId }: ModuleProps) {
     }
   };
 
-  const getExplanationText = (explanation: any) => {
+  const getExplanationText = (explanation: unknown) => {
     if (typeof explanation === 'string') {
       return explanation;
     }
@@ -134,7 +134,7 @@ export default function NewsRoom({ moduleId }: ModuleProps) {
           <div className="flex items-center gap-2">
             <Newspaper className="w-5 h-5 text-blue-400" />
             <h2 className="text-lg font-semibold">News Room</h2>
-            <span className="text-sm text-gray-400">
+            <span className="text-sm text-zinc-400">
               ({stats.total} results, {stats.catalysts} catalysts)
             </span>
           </div>
@@ -144,11 +144,11 @@ export default function NewsRoom({ moduleId }: ModuleProps) {
               className="p-1 hover:bg-zinc-700 transition-colors rounded"
               title="Reconnect WebSocket"
             >
-              <RefreshCw className="w-4 h-4 text-gray-400" />
+              <RefreshCw className="w-4 h-4 text-zinc-400" />
             </button>
             <button
               onClick={() => setShowFilters(!showFilters)}
-              className="flex items-center gap-1 px-2.5 py-1.5 text-xs bg-zinc-800 hover:bg-zinc-700 rounded transition-colors text-gray-400 hover:text-white"
+              className="flex items-center gap-1 px-2.5 py-1.5 text-xs bg-zinc-800 hover:bg-zinc-700 rounded transition-colors text-zinc-400 hover:text-white"
             >
               <Filter className="w-3.5 h-3.5" />
               {showFilters ? 'Hide' : 'Filters'}
@@ -163,11 +163,11 @@ export default function NewsRoom({ moduleId }: ModuleProps) {
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2">
             {/* Model filter */}
             <div>
-              <label className="block text-xs text-gray-500 mb-1">Model</label>
+              <label className="block text-xs text-zinc-500 mb-1">Model</label>
               <select
                 value={filters.model}
                 onChange={(e) => setFilters({ ...filters, model: e.target.value })}
-                className="w-full px-3 py-1.5 text-xs bg-zinc-800 border border-zinc-700 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 text-gray-300"
+                className="w-full px-3 py-1.5 text-xs bg-zinc-800 border border-zinc-700 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 text-zinc-300"
               >
                 <option value="all">All Models</option>
                 {availableModels.map((model) => (
@@ -178,14 +178,14 @@ export default function NewsRoom({ moduleId }: ModuleProps) {
 
             {/* Symbol filter */}
             <div>
-              <label className="block text-xs text-gray-500 mb-1">Symbol</label>
+              <label className="block text-xs text-zinc-500 mb-1">Symbol</label>
               <div className="relative">
                 <input
                   type="text"
                   value={filters.symbol}
                   onChange={(e) => setFilters({ ...filters, symbol: e.target.value })}
                   placeholder="Filter..."
-                  className="w-full px-3 py-1.5 text-xs bg-zinc-800 border border-zinc-700 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 pr-8 text-gray-300 placeholder:text-gray-600"
+                  className="w-full px-3 py-1.5 text-xs bg-zinc-800 border border-zinc-700 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 pr-8 text-zinc-300 placeholder:text-zinc-600"
                 />
                 {filters.symbol && (
                   <button
@@ -200,11 +200,11 @@ export default function NewsRoom({ moduleId }: ModuleProps) {
 
             {/* Catalyst filter */}
             <div>
-              <label className="block text-xs text-gray-500 mb-1">Catalyst</label>
+              <label className="block text-xs text-zinc-500 mb-1">Catalyst</label>
               <select
                 value={filters.is_catalyst}
-                onChange={(e) => setFilters({ ...filters, is_catalyst: e.target.value as any })}
-                className="w-full px-3 py-1.5 text-xs bg-zinc-800 border border-zinc-700 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 text-gray-300"
+                onChange={(e) => setFilters({ ...filters, is_catalyst: e.target.value as 'all' | 'true' | 'false' })}
+                className="w-full px-3 py-1.5 text-xs bg-zinc-800 border border-zinc-700 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 text-zinc-300"
               >
                 <option value="all">All</option>
                 <option value="true">✅ Catalysts Only</option>
@@ -214,15 +214,15 @@ export default function NewsRoom({ moduleId }: ModuleProps) {
 
             {/* Search text */}
             <div>
-              <label className="block text-xs text-gray-500 mb-1">Search</label>
+              <label className="block text-xs text-zinc-500 mb-1">Search</label>
               <div className="relative">
-                <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-600" />
+                <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-600" />
                 <input
                   type="text"
                   value={filters.searchText}
                   onChange={(e) => setFilters({ ...filters, searchText: e.target.value })}
                   placeholder="Search..."
-                  className="w-full pl-8 pr-8 py-1.5 text-xs bg-zinc-800 border border-zinc-700 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 text-gray-300 placeholder:text-gray-600"
+                  className="w-full pl-8 pr-8 py-1.5 text-xs bg-zinc-800 border border-zinc-700 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 text-zinc-300 placeholder:text-zinc-600"
                 />
                 {filters.searchText && (
                   <button
@@ -241,7 +241,7 @@ export default function NewsRoom({ moduleId }: ModuleProps) {
       {/* Results grid */}
       <div className="flex-1 overflow-y-auto p-3">
         {filteredResults.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full text-gray-500">
+          <div className="flex flex-col items-center justify-center h-full text-zinc-500">
             <Newspaper className="w-12 h-12 mb-2 opacity-50" />
             <p>No news results yet</p>
             <p className="text-sm">Results will appear here in real-time as news is processed</p>
@@ -264,13 +264,13 @@ export default function NewsRoom({ moduleId }: ModuleProps) {
                     {result.is_catalyst ? (
                       <TrendingUp className="w-5 h-5 text-green-400" />
                     ) : (
-                      <TrendingDown className="w-5 h-5 text-gray-500" />
+                      <TrendingDown className="w-5 h-5 text-zinc-500" />
                     )}
-                    <span className={`text-sm font-semibold ${result.is_catalyst ? 'text-green-400' : 'text-gray-400'}`}>
+                    <span className={`text-sm font-semibold ${result.is_catalyst ? 'text-green-400' : 'text-zinc-400'}`}>
                       {result.score}
                     </span>
                   </div>
-                  <span className="text-xs text-gray-500">{result.model}</span>
+                  <span className="text-xs text-zinc-500">{result.model}</span>
                 </div>
 
                 {/* Title */}
@@ -278,20 +278,20 @@ export default function NewsRoom({ moduleId }: ModuleProps) {
 
                 {/* Explanation */}
                 <div className="mb-2">
-                  <p className="text-xs text-gray-400 line-clamp-3">
+                  <p className="text-xs text-zinc-400 line-clamp-3">
                     {getExplanationText(result.explanation)}
                   </p>
                 </div>
 
                 {/* Content preview */}
                 {result.content_preview && (
-                  <p className="text-xs text-gray-500 mb-2 line-clamp-2">
+                  <p className="text-xs text-zinc-500 mb-2 line-clamp-2">
                     {result.content_preview}
                   </p>
                 )}
 
                 {/* Footer with time and link */}
-                <div className="flex items-center justify-between text-xs text-gray-500 pt-2 border-t border-zinc-700">
+                <div className="flex items-center justify-between text-xs text-zinc-500 pt-2 border-t border-zinc-700">
                   <span title={`Published: ${formatTime(result.published_time)}`}>
                     {formatTime(result.published_time).split(',')[0]}
                   </span>

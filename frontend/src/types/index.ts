@@ -1,4 +1,4 @@
-export type ModuleType = 'order-management' | 'rank-list' | 'chart' | 'overview-chart' | 'stock-detail' | 'portfolio' | 'news-room';
+export type ModuleType = 'order-management' | 'rank-list' | 'chart' | 'overview-chart' | 'stock-detail' | 'portfolio' | 'news-room' | 'backtest-chart' | 'backtest-config' | 'backtest-results' | 'labeling';
 
 export type ChartTimeframe = '10s' | '1m' | '5m' | '15m' | '30m' | '1h' | '4h' | '1D' | '1W' | '1M';
 
@@ -71,7 +71,7 @@ export interface OverviewChartModuleSettings {
   topN?: number; // Number of top tickers to request from backend
 }
 
-export type RankListSortColumn = 'symbol' | 'state' | 'price' | 'change' | 'changePercent' | 'volume' | 'marketCap' | 'float' | 'relativeVolumeDaily' | 'relativeVolume5min' | 'news' | 'vwap';
+export type RankListSortColumn = 'symbol' | 'state' | 'price' | 'changePercent' | 'volume' | 'marketCap' | 'float' | 'relativeVolumeDaily' | 'relativeVolume5min' | 'news' | 'vwap';
 export type RankListSortDirection = 'asc' | 'desc';
 
 export interface RankListModuleSettings {
@@ -94,6 +94,19 @@ export interface OrderManagementModuleSettings {
   view: OrderManagementView;
 }
 
+export interface LabelingPanelConfig {
+  id: string;          // 'price' or factor id (e.g., 'trade_rate')
+  type: 'price' | 'panel';
+  collapsed: boolean;
+  visible: boolean;
+  overlays?: string[]; // For price panel: factor ids overlaid (e.g., ['ema_20', 'vwap'])
+}
+
+export interface LabelingModuleSettings {
+  panels?: LabelingPanelConfig[];
+  columnVis?: Record<string, boolean>;
+}
+
 export interface GridItemConfig {
   id: string;
   moduleType: ModuleType;
@@ -106,6 +119,7 @@ export interface GridItemConfig {
     rankList?: RankListModuleSettings;
     stockDetail?: StockDetailModuleSettings;
     orderManagement?: OrderManagementModuleSettings;
+    labeling?: LabelingModuleSettings;
   };
 }
 
@@ -132,8 +146,9 @@ export interface ModuleProps {
     rankList?: RankListModuleSettings;
     stockDetail?: StockDetailModuleSettings;
     orderManagement?: OrderManagementModuleSettings;
+    labeling?: LabelingModuleSettings;
   };
-  onSettingsChange?: (settings: any) => void;
+  onSettingsChange?: (settings: Record<string, unknown>) => void;
   zoom?: number; // Canvas zoom level for coordinate fix
 }
 
@@ -168,7 +183,6 @@ export type TickerState = 'Best' | 'Good' | 'OnWatch' | 'NotGood' | 'Bad';
 export interface RankItem {
   symbol: string;
   price: number;
-  change: number;
   changePercent: number;
   volume: number;
   vwap: number;
@@ -217,7 +231,7 @@ export interface NewsProcessorResult {
   current_time: string;
   explanation: {
     raw?: string;
-    [key: string]: any;
+    [key: string]: unknown;
   };
   url: string;
   content_preview: string;

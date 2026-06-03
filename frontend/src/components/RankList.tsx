@@ -5,6 +5,7 @@ import type { ModuleProps, RankItem, TickerState, RankListSortColumn, RankListSo
 import { useBackendTimestamp, timestampStore, parseTimestamp } from '../hooks/useBackendTimestamps';
 import { useRankListData, useWebSocketConnection, useTickerVisibility, reconnectMainWebSocket } from '../hooks/useWebSocket';
 import { useTickDataStore } from '../stores/tickDataStore';
+import { formatNumber, formatVolume } from '../utils/format';
 
 // Default column configuration
 const DEFAULT_COLUMNS: RankListSortColumn[] = [
@@ -96,8 +97,8 @@ const getStateColor = (state: TickerState): string => {
     case 'Good': return 'bg-emerald-500';
     case 'OnWatch': return 'bg-blue-600';
     case 'NotGood': return 'bg-yellow-600';
-    case 'Bad': return 'bg-gray-600';
-    default: return 'bg-gray-600';
+    case 'Bad': return 'bg-zinc-600';
+    default: return 'bg-zinc-600';
   }
 };
 
@@ -118,7 +119,7 @@ const getDataStatusInfo = (hasNews?: boolean, hasProfile?: boolean): { color: st
   if (hasNews === true) {
     return { color: 'bg-green-500', tooltip: 'Has recent news' };
   }
-  return { color: 'bg-gray-500', tooltip: 'No recent news' };
+  return { color: 'bg-zinc-500', tooltip: 'No recent news' };
 };
 
 export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, onSettingsChange }: ModuleProps) {
@@ -201,19 +202,6 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
     // If not using mock and either not connected or no data, keep existing state
     // This prevents auto-switching to mock data when connection is temporarily lost
   }, [liveData, liveTimestamp, isConnected, useMockData]);
-
-  const formatNumber = useCallback((num: number | undefined | null, decimals = 2) => {
-    if (num === undefined || num === null) return '-';
-    return num.toFixed(decimals).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-  }, []);
-
-  const formatVolume = useCallback((vol: number | undefined | null) => {
-    if (vol === undefined || vol === null) return '-';
-    if (vol >= 1e9) return `${(vol / 1e9).toFixed(2)}B`;
-    if (vol >= 1e6) return `${(vol / 1e6).toFixed(2)}M`;
-    if (vol >= 1e3) return `${(vol / 1e3).toFixed(2)}K`;
-    return vol.toString();
-  }, []);
 
   const handleRowClick = useCallback((symbol: string) => {
     // Single click: no action (reserved for future use)
@@ -401,8 +389,8 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
   // Memoize sorted data to avoid re-sorting on every render
   const sortedData = useMemo(() => {
     return [...data].sort((a, b) => {
-      let aVal: any = a[sortColumn as keyof RankItem];
-      let bVal: any = b[sortColumn as keyof RankItem];
+      let aVal: unknown = a[sortColumn as keyof RankItem];
+      let bVal: unknown = b[sortColumn as keyof RankItem];
 
       // Handle news sorting - use hasNews boolean (true=1, false=0, undefined=-1)
       if (sortColumn === 'news') {
@@ -457,14 +445,14 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
           // Data still loading - show loading indicator
           return (
             <div className="flex items-center justify-center" title="Loading static data...">
-              <div className="w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />
+              <div className="w-3 h-3 border-2 border-zinc-400 border-t-transparent rounded-full animate-spin" />
             </div>
           );
         }
         if (!item.hasNews) {
           return (
             <div className="flex items-center justify-center" title="No recent news">
-              <Newspaper className="w-4 h-4 text-gray-600" />
+              <Newspaper className="w-4 h-4 text-zinc-600" />
             </div>
           );
         }
@@ -496,33 +484,33 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
         );
 
       case 'volume':
-        return <span className="text-gray-400">{formatVolume(item.volume)}</span>;
+        return <span className="text-zinc-400">{formatVolume(item.volume)}</span>;
 
       case 'float':
         // Static field - undefined = loading, null = no data, number = data
         if (item.float === undefined) {
-          return <span className="text-gray-500"><Loader2 className="w-3 h-3 animate-spin inline" /></span>;
+          return <span className="text-zinc-500"><Loader2 className="w-3 h-3 animate-spin inline" /></span>;
         }
         if (item.float === null || item.float === 0) {
-          return <span className="text-gray-600" title="No float data available">N/A</span>;
+          return <span className="text-zinc-600" title="No float data available">N/A</span>;
         }
-        return <span className="text-gray-400">{formatVolume(item.float)}</span>;
+        return <span className="text-zinc-400">{formatVolume(item.float)}</span>;
 
       case 'relativeVolumeDaily':
-        return <span className="text-gray-400">{item.relativeVolumeDaily?.toFixed(2) ?? '-'}x</span>;
+        return <span className="text-zinc-400">{item.relativeVolumeDaily?.toFixed(2) ?? '-'}x</span>;
 
       case 'relativeVolume5min':
-        return <span className="text-gray-400">{item.relativeVolume5min?.toFixed(2) ?? '-'}x</span>;
+        return <span className="text-zinc-400">{item.relativeVolume5min?.toFixed(2) ?? '-'}x</span>;
 
       case 'marketCap':
         // Static field - undefined = loading, null = no data, number = data
         if (item.marketCap === undefined) {
-          return <span className="text-gray-500"><Loader2 className="w-3 h-3 animate-spin inline" /></span>;
+          return <span className="text-zinc-500"><Loader2 className="w-3 h-3 animate-spin inline" /></span>;
         }
         if (item.marketCap === null || item.marketCap === 0) {
-          return <span className="text-gray-600" title="No market cap data available">N/A</span>;
+          return <span className="text-zinc-600" title="No market cap data available">N/A</span>;
         }
-        return <span className="text-gray-400">${formatVolume(item.marketCap)}</span>;
+        return <span className="text-zinc-400">${formatVolume(item.marketCap)}</span>;
 
       case 'vwap':
         return <span>${formatNumber(item.vwap)}</span>;
@@ -544,7 +532,7 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
       case 'connected': return 'text-green-500';
       case 'connecting': return 'text-yellow-500';
       case 'error': return 'text-red-500';
-      default: return 'text-gray-500';
+      default: return 'text-zinc-500';
     }
   };
 
@@ -568,10 +556,10 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
           <div className={`flex items-center gap-1 ${getConnectionStatusColor()}`} title={`Status: ${connectionStatus}`}>
             {isConnected ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
           </div>
-          <div className="text-sm text-gray-400">
+          <div className="text-sm text-zinc-400">
             {data.length} symbols
           </div>
-          <div className="text-xs text-gray-500">
+          <div className="text-xs text-zinc-500">
             Updated: {backendTimestamp}
           </div>
           {/* Mock/Live toggle */}
@@ -588,7 +576,7 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
             <>
               <button
                 onClick={refresh}
-                className="p-1 hover:bg-zinc-800 transition-colors rounded text-xs text-gray-400"
+                className="p-1 hover:bg-zinc-800 transition-colors rounded text-xs text-zinc-400"
                 title="Refresh data"
               >
                 ↻
@@ -598,7 +586,7 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
                 className="p-1 hover:bg-zinc-800 transition-colors rounded"
                 title="Reconnect WebSocket"
               >
-                <RefreshCw className="w-4 h-4 text-gray-400" />
+                <RefreshCw className="w-4 h-4 text-zinc-400" />
               </button>
             </>
           )}
@@ -644,10 +632,10 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
       <div className="flex-1 overflow-auto" ref={parentRef}>
         {/* Header — rendered outside scroll as a plain grid row */}
         <div className="sticky top-0 bg-zinc-800 border-b border-zinc-700 z-10 flex text-sm">
-          <div className="p-2 text-center text-gray-400 shrink-0" style={{ width: 40 }}>
+          <div className="p-2 text-center text-zinc-400 shrink-0" style={{ width: 40 }}>
             <Eye className="w-3 h-3 mx-auto" />
           </div>
-          <div className="p-2 text-left text-gray-400 shrink-0" style={{ width: columnWidths['#'] || DEFAULT_COLUMN_WIDTHS['#'] }}>
+          <div className="p-2 text-left text-zinc-400 shrink-0" style={{ width: columnWidths['#'] || DEFAULT_COLUMN_WIDTHS['#'] }}>
             #
           </div>
           {orderedVisibleColumns.map(column => (
@@ -658,7 +646,7 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
               onDragStart={(e) => handleDragStart(e, column)}
               onDragOver={(e) => handleDragOver(e, column)}
               onDrop={(e) => handleDrop(e, column)}
-              className={`p-2 text-gray-400 hover:text-white transition-colors select-none relative shrink-0 ${getColumnAlignment(column)} ${
+              className={`p-2 text-zinc-400 hover:text-white transition-colors select-none relative shrink-0 ${getColumnAlignment(column)} ${
                 dragOverColumn === column && draggedColumn !== column ? 'bg-blue-600/20' : ''
               }`}
               style={{ width: columnWidths[column] || DEFAULT_COLUMN_WIDTHS[column] }}
@@ -718,7 +706,7 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
                     className={`p-1 rounded transition-colors ${
                       isVisible(item.symbol)
                         ? 'text-green-500 hover:text-green-400'
-                        : 'text-gray-600 hover:text-gray-400'
+                        : 'text-zinc-600 hover:text-zinc-400'
                     }`}
                     title={isVisible(item.symbol) ? 'Hide from chart' : 'Show in chart'}
                   >
@@ -729,7 +717,7 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
                     )}
                   </button>
                 </div>
-                <div className="p-2 text-gray-500 shrink-0" style={{ width: columnWidths['#'] || DEFAULT_COLUMN_WIDTHS['#'] }}>
+                <div className="p-2 text-zinc-500 shrink-0" style={{ width: columnWidths['#'] || DEFAULT_COLUMN_WIDTHS['#'] }}>
                   {virtualRow.index + 1}
                 </div>
                 {orderedVisibleColumns.map(column => (

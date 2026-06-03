@@ -13,6 +13,9 @@
  */
 
 import { create } from 'zustand';
+
+/** Throttle counter for factor update logging: key="SYMBOL/tf" → count */
+const _factorUpdateCount: Record<string, number> = {};
 import { IS_DEMO } from '../data/mockData';
 import { useFactorDataStore } from './factorDataStore';
 import { useChartDataStore } from './chartDataStore';
@@ -123,7 +126,7 @@ function loadPerSymbolEvents(): Record<string, string[]> {
 
 function loadFactorSubscriptions(): Record<string, string[]> {
   // Key: symbol, Value: list of timeframes subscribed
-  // e.g., {"AAPL": ["trade", "1m"], "TSLA": ["trade"]}
+  // e.g., {"AAPL": ["tick", "1m"], "TSLA": ["tick"]}
   try {
     const saved = localStorage.getItem('tickdata-factorSubscriptions');
     return saved ? JSON.parse(saved) : {};
@@ -222,30 +225,33 @@ export const useTickDataStore = create<TickDataState>()((set, get) => ({
         const clock_now_ns = data.clock_now_ns;  // Replay clock time from backend
 
         if (symbol && timestamp_ns && factors) {
-          // timeframe from backend (e.g., 'trade', '1m', '5m')
-          const tf = timeframe || 'trade';
+          // timeframe from backend (e.g., 'tick', '1m', '5m')
+          const tf = timeframe || 'tick';
 
           // Calculate delay using replay clock (not wall-clock time)
           if (clock_now_ns) {
             let wsDelayMs: number;
 
-            if (tf === 'trade') {
+            if (tf === 'tick') {
               // Tick-based: delay = clock_now - timestamp
               wsDelayMs = Math.floor((clock_now_ns - timestamp_ns) / 1_000_000);
             } else {
               // Bar-based: delay = clock_now - (bar_start + bar_duration)
-              // Parse timeframe to get bar duration in seconds (e.g., '10s' -> 10, '1m' -> 60, '5m' -> 300)
               const barDurationSec = parseTimeframeToSeconds(tf);
               const barCloseNs = timestamp_ns + barDurationSec * 1_000_000_000;
               wsDelayMs = Math.floor((clock_now_ns - barCloseNs) / 1_000_000);
             }
 
-            // Only log if delay is significant (> 500ms in replay time)
-            if (wsDelayMs > 500) {
+            // Throttle: log every 30th update, plus every delayed update
+            const factorNames = Object.keys(factors);
+            const logKey = `${symbol}/${tf}`;
+            const count = (_factorUpdateCount[logKey] || 0) + 1;
+            _factorUpdateCount[logKey] = count;
+            if (count % 30 === 1 || wsDelayMs > 500) {
               const factorTime = new Date(timestamp_ns / 1_000_000);
               console.log(
-                `[FactorUpdate] ${symbol}/${tf} ts=${factorTime.toISOString()} ` +
-                `delay=${wsDelayMs}ms factors=${Object.keys(factors).join(',')}`
+                `[FactorUpdate] #${count} ${symbol}/${tf} ts=${factorTime.toISOString()} ` +
+                `delay=${wsDelayMs}ms factors=[${factorNames.join(', ')}]`
               );
             }
           }
@@ -382,7 +388,7 @@ export const useTickDataStore = create<TickDataState>()((set, get) => ({
   // Factor Subscriptions (for ChartPanelSystem factor panels)
   // ========================================================================
 
-  subscribeFactors: (symbols: string | string[], timeframe: string = 'trade') => {
+  subscribeFactors: (symbols: string | string[], timeframe: string = 'tick') => {
     const symbolArray = Array.isArray(symbols) ? symbols : [symbols];
     const symbolUpper = symbolArray.map(s => s.toUpperCase());
 
@@ -416,7 +422,7 @@ export const useTickDataStore = create<TickDataState>()((set, get) => ({
     }
   },
 
-  unsubscribeFactors: (symbols: string | string[], timeframe: string = 'trade') => {
+  unsubscribeFactors: (symbols: string | string[], timeframe: string = 'tick') => {
     const symbolArray = Array.isArray(symbols) ? symbols : [symbols];
     const symbolUpper = symbolArray.map(s => s.toUpperCase());
 

@@ -11,8 +11,9 @@
  */
 
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { createChart, IChartApi, ISeriesApi, LineSeries, LineData, Time, ColorType, CrosshairMode, LineStyle, PriceScaleMode } from 'lightweight-charts';
-import { Filter, Focus, TrendingUp, Wifi, WifiOff, ZoomIn, ZoomOut, Maximize2, RotateCcw, RefreshCw } from 'lucide-react';
+import { ISeriesApi, LineSeries, LineData, Time, CrosshairMode, LineStyle, PriceScaleMode } from 'lightweight-charts';
+import { useLightweightChart } from '../hooks/useLightweightChart';
+import { Filter, Focus, TrendingUp, Wifi, WifiOff, ZoomIn, ZoomOut, Maximize2, RotateCcw, RefreshCw, Loader2 } from 'lucide-react';
 import type { ModuleProps, RankItem, TickerState } from '../types';
 import { useBackendTimestamp, timestampStore, parseTimestamp } from '../hooks/useBackendTimestamps';
 import { useOverviewChartData, useWebSocketConnection, useTickerVisibility, setTopN as sendSetTopN, reconnectMainWebSocket, type TickerDataWithHistory } from '../hooks/useWebSocket';
@@ -77,34 +78,11 @@ const formatDateTimeNY = (timestamp: number): string => {
   });
 };
 
-// Chart theme matching dark mode
-const CHART_THEME = {
-  layout: {
-    background: { type: ColorType.Solid, color: '#18181b' }, // zinc-900
-    textColor: '#a1a1aa', // zinc-400
-  },
-  grid: {
-    vertLines: { color: '#27272a' }, // zinc-800
-    horzLines: { color: '#27272a' }, // zinc-800
-  },
-  crosshair: {
-    mode: CrosshairMode.Magnet,
-    vertLine: {
-      color: '#52525b', // zinc-600
-      width: 1 as const,
-      style: 2, // Dashed
-      labelBackgroundColor: '#3f3f46', // zinc-700
-    },
-    horzLine: {
-      color: '#52525b',
-      width: 1 as const,
-      style: 2,
-      labelBackgroundColor: '#3f3f46',
-    },
-  },
+// Overview-specific chart options that differ from shared CHART_THEME
+const OVERVIEW_CHART_OPTIONS = {
+  crosshair: { mode: CrosshairMode.Magnet },
   localization: {
     timeFormatter: (time: number) => {
-      // This controls the crosshair label on the time scale
       const date = new Date(time * 1000);
       return date.toLocaleTimeString('en-US', {
         timeZone: 'America/New_York',
@@ -116,14 +94,20 @@ const CHART_THEME = {
     },
   },
   timeScale: {
-    borderColor: '#27272a',
-    timeVisible: true,
-    secondsVisible: false,
     tickMarkFormatter: (time: number) => formatTimeNY(time),
-    rightOffset: 60, // Add space so lines end in middle of chart
+    rightOffset: 60,
   },
-  rightPriceScale: {
-    borderColor: '#27272a',
+  rightPriceScale: { mode: PriceScaleMode.Logarithmic },
+  handleScroll: {
+    mouseWheel: true,
+    pressedMouseMove: true,
+    horzTouchDrag: true,
+    vertTouchDrag: true,
+  },
+  handleScale: {
+    axisPressedMouseMove: true,
+    mouseWheel: true,
+    pinch: true,
   },
 };
 
@@ -167,13 +151,13 @@ const ChartTooltip: React.FC<TooltipProps> = ({ data, position, visible }) => {
         />
         <span className="font-semibold text-white">{data.symbol}</span>
       </div>
-      <div className="text-gray-400">{data.time}</div>
+      <div className="text-zinc-400">{data.time}</div>
       <div className="flex items-center gap-2 mt-1">
         <span className={data.value >= 0 ? 'text-green-400' : 'text-red-400'}>
           {data.value >= 0 ? '+' : ''}{data.value.toFixed(2)}%
         </span>
         <span
-          className="px-1.5 py-0.5 rounded text-[10px] font-medium"
+          className="px-1.5 py-0.5 rounded text-2xs font-medium"
           style={{ backgroundColor: STATE_COLORS[data.state] + '40', color: STATE_COLORS[data.state] }}
         >
           {data.state}
@@ -244,9 +228,11 @@ export function OverviewChartModule({
 }: ModuleProps) {
   // Refs
   const chartContainerRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<IChartApi | null>(null);
+  const { chartRef, chartReady } = useLightweightChart({
+    container: chartContainerRef,
+    options: OVERVIEW_CHART_OPTIONS,
+  });
   const seriesMapRef = useRef<Map<string, SegmentedSeries>>(new Map());
-  const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const hasInitialFitRef = useRef(false); // Track if we've done the initial fitContent
   const lastDataTimestampRef = useRef<Map<string, number>>(new Map()); // Track last data point time per symbol (for change detection)
   const lastAppliedTimeRef = useRef<Map<string, number>>(new Map()); // Track last time actually applied to chart series (for incremental updates)
@@ -258,9 +244,6 @@ export function OverviewChartModule({
   // State
   const [rankData, setRankData] = useState<LocalTickerDataWithHistory[]>([]);
   const [chartSeriesData, setChartSeriesData] = useState<Map<string, { data: LineData<Time>[]; states: { time: Time; state: TickerState }[] }>>(new Map());
-  const [chartReady, setChartReady] = useState(false);
-  const [containerReady, setContainerReady] = useState(false);
-
   // UI State
   const [tooltip, setTooltip] = useState<{ data: TooltipData | null; position: { x: number; y: number }; visible: boolean }>({
     data: null,
@@ -319,66 +302,23 @@ export function OverviewChartModule({
   // Chart Initialization
   // ============================================================================
 
-  // Use callback ref to detect when container is mounted
-  const chartContainerCallback = useCallback((node: HTMLDivElement | null) => {
-    if (node) {
-      chartContainerRef.current = node;
-      setContainerReady(true);
-    }
-  }, []);
-
+  // Set up chart event handlers (crosshair, DPR, scroll, mouse)
   useEffect(() => {
-    if (!containerReady || !chartContainerRef.current) {
-      return;
-    }
+    if (!chartRef.current) return;
 
-    // Don't recreate if already exists
-    if (chartRef.current) {
-      return;
-    }
+    const chart = chartRef.current;
 
-    // Create chart
-    const chart = createChart(chartContainerRef.current, {
-      width: chartContainerRef.current.clientWidth,
-      height: chartContainerRef.current.clientHeight,
-      layout: CHART_THEME.layout,
-      grid: CHART_THEME.grid,
-      crosshair: CHART_THEME.crosshair,
-      timeScale: CHART_THEME.timeScale,
-      rightPriceScale: {
-        ...CHART_THEME.rightPriceScale,
-        mode: PriceScaleMode.Logarithmic, // Start with log scale
-      },
-      handleScroll: {
-        mouseWheel: true,
-        pressedMouseMove: true,
-        horzTouchDrag: true,
-        vertTouchDrag: true,
-      },
-      handleScale: {
-        axisPressedMouseMove: true,
-        mouseWheel: true,
-        pinch: true,
-      },
-    });
-
-    chartRef.current = chart;
-
-    // Handle crosshair move for tooltip
-    const crosshairHandler = (param: any) => {
+    const crosshairHandler = (param: import('lightweight-charts').MouseEventParams) => {
       if (!param.time || !param.point) {
         setTooltip(prev => ({ ...prev, visible: false }));
         return;
       }
 
-      // Find the series being hovered
       let foundData: TooltipData | null = null;
 
       seriesMapRef.current.forEach((segSeries, symbol) => {
-        // Check main series
         let data = param.seriesData.get(segSeries.mainSeries);
 
-        // If not found in main, check segment series
         if (!data || !('value' in data)) {
           segSeries.segmentSeries.forEach((segmentSeries) => {
             const segData = param.seriesData.get(segmentSeries);
@@ -415,19 +355,6 @@ export function OverviewChartModule({
     };
     chart.subscribeCrosshairMove(crosshairHandler);
 
-    // Setup resize observer
-    resizeObserverRef.current = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        if (entry.target === chartContainerRef.current && chartRef.current) {
-          chartRef.current.applyOptions({
-            width: entry.contentRect.width,
-            height: entry.contentRect.height,
-          });
-        }
-      }
-    });
-    resizeObserverRef.current.observe(chartContainerRef.current);
-
     // Fix for browser zoom: redraw chart when devicePixelRatio changes
     const mq = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
     const handleDprChange = () => {
@@ -440,8 +367,6 @@ export function OverviewChartModule({
     };
     mq.addEventListener('change', handleDprChange);
 
-    // Listen for user scroll/drag interactions on the time scale
-    // When user manually scrolls, disable "follow latest" mode
     const logicalRangeHandler = () => {
       if (isUserInteractingRef.current) {
         setIsFollowingLatest(false);
@@ -450,7 +375,7 @@ export function OverviewChartModule({
     chart.timeScale().subscribeVisibleLogicalRangeChange(logicalRangeHandler);
 
     // Track mouse interactions to detect user-initiated changes
-    const container = chartContainerRef.current;
+    const container = chartContainerRef.current!;
     const handleMouseDown = () => { isUserInteractingRef.current = true; };
     const handleMouseUp = () => { setTimeout(() => { isUserInteractingRef.current = false; }, 100); };
     const handleWheel = () => {
@@ -464,27 +389,16 @@ export function OverviewChartModule({
     container.addEventListener('mouseleave', handleMouseUp);
     container.addEventListener('wheel', handleWheel);
 
-    // Mark chart as ready
-    setChartReady(true);
-
     return () => {
-      resizeObserverRef.current?.disconnect();
-      // Unsubscribe TradingView handlers
       chart.unsubscribeCrosshairMove(crosshairHandler);
       chart.timeScale().unsubscribeVisibleLogicalRangeChange(logicalRangeHandler);
-      // Remove DOM event listeners
       container.removeEventListener('mousedown', handleMouseDown);
       container.removeEventListener('mouseup', handleMouseUp);
       container.removeEventListener('mouseleave', handleMouseUp);
       container.removeEventListener('wheel', handleWheel);
       mq.removeEventListener('change', handleDprChange);
-      // Cleanup chart
-      chart.remove();
-      chartRef.current = null;
-      seriesMapRef.current.clear();
-      setChartReady(false);
     };
-  }, [containerReady]);
+  }, [chartReady]);
 
   // ============================================================================
   // Data Loading
@@ -801,7 +715,7 @@ export function OverviewChartModule({
   }, [chartSeriesData]);
 
   useEffect(() => {
-    if (!chartRef.current || !chartSeriesData.size) return;
+    if (!chartReady || !chartRef.current || !chartSeriesData.size) return;
 
     // Only apply time range constraints when following latest data
     // When user has manually scrolled, don't reset the view
@@ -822,7 +736,7 @@ export function OverviewChartModule({
 
     // Use global time range (from all tickers) to keep focus mode synced with overview
     const globalRange = globalTimeRangeRef.current;
-    if (!globalRange) return;
+    if (!globalRange || globalRange.min === null || globalRange.max === null) return;
 
     // Mark as applied BEFORE making changes to prevent re-entry
     timeRangeAppliedRef.current = currentKey;
@@ -849,7 +763,7 @@ export function OverviewChartModule({
       // Add some right padding synchronously
       chart.timeScale().scrollToPosition(10, false);
     }
-  }, [timeRange, chartSeriesData, isFollowingLatest, focusMode]);
+  }, [timeRange, chartSeriesData, isFollowingLatest, focusMode, chartReady]);
 
   // ============================================================================
   // Event Handlers
@@ -908,7 +822,7 @@ export function OverviewChartModule({
   // This syncs legend toggles with RankList eye icons and backend
 
   const resetZoom = useCallback(() => {
-    if (!chartRef.current || !chartSeriesData.size) return;
+    if (!chartReady || !chartRef.current || !chartSeriesData.size) return;
 
     const chart = chartRef.current;
     const selectedOption = timeRangeOptions.find(opt => opt.value === timeRange);
@@ -919,7 +833,7 @@ export function OverviewChartModule({
 
     // Use global time range to keep consistent with overview
     const globalRange = globalTimeRangeRef.current;
-    if (!globalRange) return;
+    if (!globalRange || globalRange.min === null || globalRange.max === null) return;
 
     if (selectedOption && selectedOption.minutes !== null) {
       const rangeSeconds = selectedOption.minutes * 60;
@@ -941,14 +855,14 @@ export function OverviewChartModule({
 
       chart.timeScale().scrollToPosition(10, false);
     }
-  }, [timeRange, chartSeriesData]);
+  }, [timeRange, chartSeriesData, chartReady]);
 
   const getConnectionStatusColor = useCallback(() => {
     switch (connectionStatus) {
       case 'connected': return 'text-green-500';
       case 'connecting': return 'text-yellow-500';
       case 'error': return 'text-red-500';
-      default: return 'text-gray-500';
+      default: return 'text-zinc-500';
     }
   }, [connectionStatus]);
 
@@ -958,8 +872,8 @@ export function OverviewChartModule({
       case 'Good': return 'bg-emerald-500';
       case 'OnWatch': return 'bg-blue-600';
       case 'NotGood': return 'bg-yellow-600';
-      case 'Bad': return 'bg-gray-600';
-      default: return 'bg-gray-600';
+      case 'Bad': return 'bg-zinc-600';
+      default: return 'bg-zinc-600';
     }
   }, []);
 
@@ -989,7 +903,7 @@ export function OverviewChartModule({
               <TrendingUp size={14} className="inline mr-1" />
               Overview
             </span>
-            <span className="text-xs text-gray-500">
+            <span className="text-xs text-zinc-500">
               ({displayedRankData.length} tickers)
             </span>
             {enableSegmentation && (
@@ -997,7 +911,7 @@ export function OverviewChartModule({
                 Segmentation
               </span>
             )}
-            <span className="text-xs text-gray-500">
+            <span className="text-xs text-zinc-500">
               Updated: {backendTimestamp}
             </span>
           </div>
@@ -1084,7 +998,7 @@ export function OverviewChartModule({
               className={`p-1.5 rounded flex items-center gap-1 ${
                 !isFollowingLatest
                   ? 'bg-yellow-600 text-white animate-pulse'
-                  : 'text-gray-400 hover:text-white hover:bg-zinc-700'
+                  : 'text-zinc-400 hover:text-white hover:bg-zinc-700'
               }`}
               title={isFollowingLatest ? 'Reset Zoom' : 'Back to Latest (currently in free scroll mode)'}
             >
@@ -1095,7 +1009,7 @@ export function OverviewChartModule({
             {/* Focus Mode Toggle */}
             <button
               onClick={toggleFocusMode}
-              className={`p-1.5 rounded ${focusMode ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white hover:bg-zinc-700'}`}
+              className={`p-1.5 rounded ${focusMode ? 'bg-blue-600 text-white' : 'text-zinc-400 hover:text-white hover:bg-zinc-700'}`}
               title={focusMode ? 'Focus Mode ON' : 'Focus Mode OFF'}
             >
               <Focus size={14} />
@@ -1105,14 +1019,14 @@ export function OverviewChartModule({
             <div className="relative">
               <button
                 onClick={() => setShowFilter(!showFilter)}
-                className="p-1.5 text-gray-400 hover:text-white hover:bg-zinc-700 rounded"
+                className="p-1.5 text-zinc-400 hover:text-white hover:bg-zinc-700 rounded"
                 title="Filter States"
               >
                 <Filter size={14} />
               </button>
               {showFilter && (
                 <div className="absolute right-0 top-full mt-1 bg-zinc-800 border border-zinc-700 rounded-md p-2 shadow-lg z-50">
-                  <div className="text-xs text-gray-400 mb-2">Filter by State</div>
+                  <div className="text-xs text-zinc-400 mb-2">Filter by State</div>
                   {['Best', 'Good', 'OnWatch', 'NotGood', 'Bad'].map((state) => (
                     <label
                       key={state}
@@ -1150,7 +1064,7 @@ export function OverviewChartModule({
               className="p-1 hover:bg-zinc-700 transition-colors rounded"
               title="Reconnect WebSocket"
             >
-              <RefreshCw className="w-4 h-4 text-gray-400" />
+              <RefreshCw className="w-4 h-4 text-zinc-400" />
             </button>
           </div>
         </div>
@@ -1160,7 +1074,7 @@ export function OverviewChartModule({
       <div className="flex-1 relative overflow-hidden" style={{ minHeight: 0 }}>
         {/* Always render chart container, but show empty state overlay when no data */}
         <div
-          ref={chartContainerCallback}
+          ref={chartContainerRef}
           className="w-full h-full"
           style={{
             transform: zoom !== 1 ? `scale(${1 / zoom})` : undefined,
@@ -1170,11 +1084,20 @@ export function OverviewChartModule({
           }}
         />
         {displayedRankData.length === 0 && (
-          <div className="absolute inset-0 flex items-center justify-center text-gray-500 bg-zinc-900/80">
+          <div className="absolute inset-0 flex items-center justify-center text-zinc-500 bg-zinc-900/80">
             <div className="text-center">
-              <TrendingUp size={48} className="mx-auto mb-2 opacity-50" />
-              <p>No tickers to display</p>
-              <p className="text-xs mt-1">Adjust filters or subscribe to tickers</p>
+              {!isConnected ? (
+                <>
+                  <Loader2 size={48} className="mx-auto mb-2 animate-spin text-zinc-600" />
+                  <p>Connecting to market data...</p>
+                </>
+              ) : (
+                <>
+                  <TrendingUp size={48} className="mx-auto mb-2 opacity-50" />
+                  <p>No tickers to display</p>
+                  <p className="text-xs mt-1">Adjust filters or subscribe to tickers</p>
+                </>
+              )}
             </div>
           </div>
         )}

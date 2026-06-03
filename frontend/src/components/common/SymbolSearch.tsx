@@ -11,7 +11,7 @@ interface SymbolSearchProps {
   useConfirmButton?: boolean;
 }
 
-export function SymbolSearch({
+export const SymbolSearch = React.memo(function SymbolSearch({
   value,
   onChange,
   availableSymbols = [],
@@ -95,7 +95,7 @@ export function SymbolSearch({
             placeholder={placeholder}
             className="w-full px-3 py-1.5 pl-9 bg-zinc-800 border border-zinc-700 focus:border-zinc-600 focus:outline-none text-sm"
           />
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
         </div>
       </div>
 
@@ -115,4 +115,4 @@ export function SymbolSearch({
       )}
     </div>
   );
-}
+});

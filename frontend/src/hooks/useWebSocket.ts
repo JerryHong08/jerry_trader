@@ -130,7 +130,7 @@ function flushPendingSaves() {
                   key === NEWS_CACHE_KEY ? staticNewsCache :
                   key === DATA_STATUS_KEY ? dataStatusMap : null;
       if (map) {
-        saveMapToStorage(key, map as Map<string, any>);
+        saveMapToStorage(key, map as Map<string, unknown>);
       }
     });
     pendingSaveKeys.clear();
@@ -215,11 +215,11 @@ function pruneAllCaches(): void {
 // Static profile cache - populated by static_update messages from BFF
 // Used by StockDetail to avoid re-fetching profile data
 // Persisted to localStorage across page refreshes
-const staticProfileCache = loadMapFromStorage<Record<string, any>>(PROFILE_CACHE_KEY);
+const staticProfileCache = loadMapFromStorage<Record<string, unknown>>(PROFILE_CACHE_KEY);
 
 // Static news cache - populated by news_article messages from BFF
 // Persisted to localStorage across page refreshes
-const staticNewsCache = loadMapFromStorage<any[]>(NEWS_CACHE_KEY);
+const staticNewsCache = loadMapFromStorage<unknown[]>(NEWS_CACHE_KEY);
 
 // Data status tracking - which symbols have been loaded
 // 'pending' = queued for fetch, 'loading' = being fetched, 'ready' = data available
@@ -232,7 +232,7 @@ let versionCache: VersionCache = loadVersionCacheFromStorage();
 /**
  * Get cached profile data for a symbol (from static_update stream or API fetch)
  */
-export function getCachedProfile(symbol: string): Record<string, any> | undefined {
+export function getCachedProfile(symbol: string): Record<string, unknown> | undefined {
   return staticProfileCache.get(symbol);
 }
 
@@ -240,7 +240,7 @@ export function getCachedProfile(symbol: string): Record<string, any> | undefine
  * Set cached profile data for a symbol (from API fetch)
  * Also persists to localStorage with throttling and size limit
  */
-export function setCachedProfile(symbol: string, profile: Record<string, any>) {
+export function setCachedProfile(symbol: string, profile: Record<string, unknown>) {
   staticProfileCache.set(symbol, profile);
   pruneMapCache(staticProfileCache, MAX_PROFILE_CACHE_SIZE);
   saveMapToStorageThrottled(PROFILE_CACHE_KEY, staticProfileCache);
@@ -250,7 +250,7 @@ export function setCachedProfile(symbol: string, profile: Record<string, any>) {
 /**
  * Get cached news data for a symbol (from static_update stream or API fetch)
  */
-export function getCachedNews(symbol: string): any[] | undefined {
+export function getCachedNews(symbol: string): unknown[] | undefined {
   return staticNewsCache.get(symbol);
 }
 
@@ -258,7 +258,7 @@ export function getCachedNews(symbol: string): any[] | undefined {
  * Set cached news data for a symbol (from API fetch)
  * Also persists to localStorage with throttling and size limit
  */
-export function setCachedNews(symbol: string, news: any[]) {
+export function setCachedNews(symbol: string, news: unknown[]) {
   staticNewsCache.set(symbol, news);
   pruneMapCache(staticNewsCache, MAX_NEWS_CACHE_SIZE);
   saveMapToStorageThrottled(NEWS_CACHE_KEY, staticNewsCache);
@@ -352,6 +352,10 @@ export function clearAllCaches() {
   localStorage.removeItem(NEWS_CACHE_KEY);
   localStorage.removeItem(DATA_STATUS_KEY);
   localStorage.removeItem(VERSION_CACHE_KEY);
+  // Also clear tickdata store caches (symbols, events, subscriptions)
+  // localStorage.removeItem('tickdata-symbols');
+  // localStorage.removeItem('tickdata-perSymbolEvents');
+  // localStorage.removeItem('tickdata-factorSubscriptions');
   // Reset the reload flag so cache can be reloaded on next page load
   cacheReloadedToStore = false;
   console.log('[WebSocket] All caches cleared');
@@ -380,7 +384,7 @@ export function reloadCachedStaticDataToStore() {
 
   // Iterate over cached profiles and patch static data into store
   staticProfileCache.forEach((profile, symbol) => {
-    const staticData: Record<string, any> = {};
+    const staticData: Record<string, unknown> = {};
 
     // Extract static fields from profile
     if (profile.float !== undefined) {
@@ -453,7 +457,7 @@ export interface StateChangeEvent {
 // WebSocket message types
 interface WebSocketMessage {
   type: string;
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 // Singleton WebSocket instance
@@ -470,8 +474,8 @@ let messageQueue: WebSocketMessage[] = [];
 const stockDetailHandlers = new Map<
   string,
   {
-    onDetail: (data: any) => void;
-    onError: (data: any) => void;
+    onDetail: (data: unknown) => void;
+    onError: (data: unknown) => void;
   }
 >();
 
@@ -488,7 +492,7 @@ export type NewsProcessorResultPayload = {
   title: string;
   published_time: string;
   current_time: string;
-  explanation: any;
+  explanation: unknown;
   url: string;
   content_preview: string;
   sources: string;
@@ -563,7 +567,7 @@ export function unsubscribeFactorUpdates(symbols: string | string[]) {
 
 function registerStockDetailHandler(
   ticker: string,
-  handlers: { onDetail: (data: any) => void; onError: (data: any) => void }
+  handlers: { onDetail: (data: unknown) => void; onError: (data: unknown) => void }
 ) {
   stockDetailHandlers.set(ticker, handlers);
 }
@@ -696,7 +700,7 @@ function handleMessage(message: WebSocketMessage) {
       if (message.symbols) {
         console.log('[WebSocket] Received bootstrap data for', Object.keys(message.symbols).length, 'symbols');
 
-        Object.entries(message.symbols).forEach(([symbol, data]: [string, any]) => {
+        Object.entries(message.symbols).forEach(([symbol, data]: [string, unknown]) => {
           // Process summary data (fundamentals)
           if (data.summary) {
             store.patchStaticData(symbol, data.summary);
@@ -710,7 +714,7 @@ function handleMessage(message: WebSocketMessage) {
 
           // Process news data
           if (data.news && Array.isArray(data.news)) {
-            const newsArticles = data.news.map((item: any) => ({
+            const newsArticles = data.news.map((item: Record<string, unknown>) => ({
               id: item.id || `${symbol}-news-${Date.now()}`,
               title: item.title || '',
               source: item.source || '',
@@ -742,7 +746,7 @@ function handleMessage(message: WebSocketMessage) {
     case 'news_article':
       if (message.symbol && message.article) {
         const symbol = message.symbol as string;
-        const incoming = message.article as Record<string, any>;
+        const incoming = message.article as Record<string, unknown>;
 
         const article: NewsArticle = {
           id: incoming.id || `${symbol}-news-${Date.now()}`,
@@ -897,6 +901,11 @@ function getWebSocket(): WebSocket | null {
     wsInstance.onmessage = (event) => {
       try {
         const message: WebSocketMessage = JSON.parse(event.data);
+        // Application-level heartbeat — BFF sends ping, client replies pong
+        if (message.type === 'ping') {
+          wsInstance.send(JSON.stringify({ type: 'pong' }));
+          return;
+        }
         handleMessage(message);
       } catch (e) {
         console.error('[WebSocket] Failed to parse message:', e);
@@ -1216,6 +1225,10 @@ function getAgentWebSocket(): WebSocket | null {
     agentWsInstance.onmessage = (event) => {
       try {
         const message: WebSocketMessage = JSON.parse(event.data);
+        if (message.type === 'ping') {
+          agentWsInstance.send(JSON.stringify({ type: 'pong' }));
+          return;
+        }
         handleAgentMessage(message);
       } catch (e) {
         console.error('[AgentBFF WebSocket] Failed to parse message:', e);

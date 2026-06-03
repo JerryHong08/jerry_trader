@@ -23,7 +23,6 @@ const SNAPSHOT_FIELDS = [
   'symbol',
   'rank',
   'price',
-  'change',
   'changePercent',
   'volume',
   'relativeVolume5min',
@@ -205,12 +204,12 @@ export const useMarketDataStore = create<MarketDataState>()(
             // Check if any snapshot fields actually changed
             let fieldChanged = false;
             SNAPSHOT_FIELDS.forEach((field) => {
-              if (field in item && (item as any)[field] !== (existing as any)[field]) {
+              if (field in item && (item as Record<string, unknown>)[field] !== (existing as Record<string, unknown>)[field]) {
                 fieldChanged = true;
               }
             });
             STATIC_FIELDS.forEach((field) => {
-              if (field in item && (item as any)[field] !== undefined && (item as any)[field] !== (existing as any)[field]) {
+              if (field in item && (item as Record<string, unknown>)[field] !== undefined && (item as Record<string, unknown>)[field] !== (existing as Record<string, unknown>)[field]) {
                 fieldChanged = true;
               }
             });
@@ -224,12 +223,12 @@ export const useMarketDataStore = create<MarketDataState>()(
               const patched: RankEntity = { ...existing };
               SNAPSHOT_FIELDS.forEach((field) => {
                 if (field in item) {
-                  (patched as any)[field] = (item as any)[field];
+                  (patched as Record<string, unknown>)[field] = (item as Record<string, unknown>)[field];
                 }
               });
               STATIC_FIELDS.forEach((field) => {
-                if (field in item && (item as any)[field] !== undefined) {
-                  (patched as any)[field] = (item as any)[field];
+                if (field in item && (item as Record<string, unknown>)[field] !== undefined) {
+                  (patched as Record<string, unknown>)[field] = (item as Record<string, unknown>)[field];
                 }
               });
               newEntities.set(item.symbol, patched);
@@ -250,11 +249,11 @@ export const useMarketDataStore = create<MarketDataState>()(
               relativeVolumeDaily: item.relativeVolumeDaily ?? 0,
               relativeVolume5min: item.relativeVolume5min ?? 0,
               rank: item.rank,
-              marketCap: (item as any).marketCap,
-              float: (item as any).float,
-              hasNews: (item as any).hasNews,
-              country: (item as any).country,
-              sector: (item as any).sector,
+              marketCap: (item as Record<string, unknown>).marketCap,
+              float: (item as Record<string, unknown>).float,
+              hasNews: (item as Record<string, unknown>).hasNews,
+              country: (item as Record<string, unknown>).country,
+              sector: (item as Record<string, unknown>).sector,
             };
             newEntities.set(item.symbol, newEntity);
             hasChanges = true;
@@ -321,7 +320,7 @@ export const useMarketDataStore = create<MarketDataState>()(
           const patched: RankEntity = { ...existing };
           STATIC_FIELDS.forEach((field) => {
             if (field in data && data[field as keyof typeof data] !== undefined) {
-              (patched as any)[field] = data[field as keyof typeof data];
+              (patched as Record<string, unknown>)[field] = data[field as keyof typeof data];
             }
           });
           // Track version if provided

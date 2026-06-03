@@ -1,0 +1,36 @@
+{
+  "id": "08",
+  "name": "data-labeling",
+  "description": "layout for data labeling",
+  "layout": [
+  {
+    "id": "labeling-1779708792771",
+    "moduleType": "labeling",
+    "position": {
+      "x": 400,
+      "y": 1100
+    },
+    "size": {
+      "width": 1670,
+      "height": 920
+    },
+    "syncGroup": null,
+    "settings": {
+      "labeling": {
+        "panels": [
+          {
+            "id": "price",
+            "type": "price",
+            "collapsed": false,
+            "visible": true,
+            "overlays": [
+              "ema_20",
+              "vwap"
+            ]
+          }
+        ]
+      }
+    }
+  }
+]
+}

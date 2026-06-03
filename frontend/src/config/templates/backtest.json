@@ -1,0 +1,46 @@
+{
+  "id": "07",
+  "name": "Backtest",
+  "description": "layout for backtest",
+  "layout": [
+  {
+    "id": "backtest-config-1777038411531",
+    "moduleType": "backtest-config",
+    "position": {
+      "x": 1290,
+      "y": -220
+    },
+    "size": {
+      "width": 390,
+      "height": 890
+    },
+    "syncGroup": null
+  },
+  {
+    "id": "backtest-chart-1777038424223",
+    "moduleType": "backtest-chart",
+    "position": {
+      "x": 2080,
+      "y": -220
+    },
+    "size": {
+      "width": 870,
+      "height": 890
+    },
+    "syncGroup": null
+  },
+  {
+    "id": "backtest-results-1777103473794",
+    "moduleType": "backtest-results",
+    "position": {
+      "x": 1690,
+      "y": -220
+    },
+    "size": {
+      "width": 380,
+      "height": 890
+    },
+    "syncGroup": null
+  }
+]
+}

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
+import { getChartBffBaseUrl } from "../config/chartBff";
 
 interface ClockState {
   mode: "live" | "replay";
@@ -9,22 +10,10 @@ interface ClockState {
   session_id: string;
 }
 
-/**
- * Get the Chart BFF base URL (same logic as chartDataStore).
- */
-function getChartBffBaseUrl(): string {
-  const defaultHost =
-    typeof window !== "undefined" ? window.location.hostname : "localhost";
-  const url =
-    typeof import.meta !== "undefined" && import.meta.env?.VITE_CHART_BFF_URL
-      ? (import.meta.env.VITE_CHART_BFF_URL as string)
-      : `http://${defaultHost}:5002`;
-  return url || `http://${defaultHost}:5002`;
-}
 
 const POLL_INTERVAL_MS = 1_000; // poll /api/clock every 1s
 
-export function TimelineClock() {
+export function TimelineClock({ compact }: { compact?: boolean }) {
   const [displayTime, setDisplayTime] = useState<Date>(new Date());
   const [clockState, setClockState] = useState<ClockState | null>(null);
   const [connected, setConnected] = useState(false);
@@ -66,11 +55,19 @@ export function TimelineClock() {
     return () => clearInterval(id);
   }, [fetchClock]);
 
-  // RAF loop: interpolate between polls for smooth display
+  // RAF loop: interpolate between polls for smooth display.
+  // Pauses when the tab is backgrounded to avoid wasted CPU.
   useEffect(() => {
     let rafId: number;
+    let running = true;
 
     const tick = () => {
+      if (!running) return;
+      // Skip state updates when tab is hidden; browser throttles RAF anyway
+      if (document.hidden) {
+        rafId = requestAnimationFrame(tick);
+        return;
+      }
       const anchor = anchorRef.current;
       if (anchor && connected) {
         if (anchor.paused) {
@@ -81,14 +78,25 @@ export function TimelineClock() {
           setDisplayTime(new Date(anchor.serverMs + dataElapsed));
         }
       } else {
-        // Fallback: local wall clock
         setDisplayTime(new Date());
       }
       rafId = requestAnimationFrame(tick);
     };
 
+    const onVisibility = () => {
+      running = !document.hidden;
+      if (running && !rafId) {
+        tick();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+
     tick();
-    return () => cancelAnimationFrame(rafId);
+    return () => {
+      running = false;
+      cancelAnimationFrame(rafId);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
   }, [connected]);
 
   // Format to ET
@@ -113,11 +121,11 @@ export function TimelineClock() {
   const isPaused = clockState?.paused ?? false;
 
   return (
-    <div className="flex items-center gap-2 px-4 py-2 bg-zinc-900 border border-zinc-700 text-sm font-mono">
+    <div className={`flex items-center gap-1.5 bg-zinc-900 border border-zinc-700 font-mono whitespace-nowrap ${compact ? 'px-2 py-1 text-xs' : 'px-4 py-2 text-sm'}`}>
       {isReplay ? (
         <>
           <span
-            className={`inline-block w-2 h-2 rounded-full ${isPaused ? "bg-yellow-400" : "bg-orange-400 animate-pulse"}`}
+            className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${isPaused ? "bg-yellow-400" : "bg-orange-400 animate-pulse"}`}
             title={isPaused ? "Replay paused" : "Replay running"}
           />
           <span className="text-orange-400 font-semibold">REPLAY</span>
@@ -135,14 +143,14 @@ export function TimelineClock() {
         </>
       ) : (
         <>
-          <span className="text-gray-400">Market Time:</span>
+          {!compact && <span className="text-zinc-400">Market Time:</span>}
           <span className="text-green-400">
             {formatTimeET(displayTime)}
           </span>
         </>
       )}
       {!connected && (
-        <span className="text-red-400 text-xs ml-1" title="Cannot reach BFF /api/clock">
+        <span className="text-red-400 text-xs ml-0.5 flex-shrink-0" title="Cannot reach BFF /api/clock">
           ●
         </span>
       )}

@@ -4,6 +4,7 @@ import { GridContainer, type GridContainerRef } from './components/GridContainer
 import { ModuleSidebar } from './components/ModuleSidebar';
 import { HelpPanel, type TabType } from './components/HelpPanel';
 import { TimelineClock } from './components/TimelineClock';
+import { TouchGamepad } from './components/TouchGamepad';
 import { moduleRegistry } from './config/moduleRegistry';
 import { LAYOUT_TEMPLATES, DEFAULT_TEMPLATE_ID } from './config/layoutTemplates';
 import { useIbbotStore } from './stores/ibbotStore';
@@ -21,22 +22,10 @@ import {
   getMockPortfolioSummary,
 } from './data/mockData';
 import type { ModuleType, GridItemConfig } from './types';
+import { checkCollision } from './utils/layoutUtils';
 
 // Default values
 const DEFAULT_GRID_GAP = 10;
-
-// Check if two rectangles collide
-const checkCollision = (
-  rect1: { x: number; y: number; width: number; height: number },
-  rect2: { x: number; y: number; width: number; height: number }
-): boolean => {
-  return (
-    rect1.x < rect2.x + rect2.width &&
-    rect1.x + rect1.width > rect2.x &&
-    rect1.y < rect2.y + rect2.height &&
-    rect1.y + rect1.height > rect2.y
-  );
-};
 
 // Find automatic position for new module
 const findAutoPosition = (
@@ -165,37 +154,34 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [helpInitialTab, setHelpInitialTab] = useState<TabType>('shortcuts');
-  const [isLocked, setIsLocked] = useState(false);
+  const [isLocked, setIsLocked] = useState(() => {
+    try { return localStorage.getItem('trading-system-locked') === 'true'; } catch { return false; }
+  });
   const [currentTemplateId, setCurrentTemplateId] = useState<string>(() => {
     return localStorage.getItem('trading-system-template') || '';
   });
   const [selectedSymbols, setSelectedSymbols] = useState<Record<string, string>>({});
   const gridContainerRef = useRef<GridContainerRef>(null);
-  const initialFocusDoneRef = useRef(false);
 
   // Load initial layout from localStorage on mount
   useEffect(() => {
     loadFromStorage();
 
-    // If no saved layout, load default template
-    if (items.length === 0) {
+    // Only apply default template + auto-focus on very first visit (no saved layout).
+    // `items` may be stale here — check localStorage directly instead.
+    const hasSavedLayout = !!localStorage.getItem('trading-system-layout');
+    if (!hasSavedLayout) {
       const defaultTemplate = LAYOUT_TEMPLATES[DEFAULT_TEMPLATE_ID];
       if (defaultTemplate) {
         setItems(defaultTemplate.layout);
+        setTimeout(() => {
+          gridContainerRef.current?.focusToFit();
+        }, 100);
       }
     }
+    // On subsequent visits, saved zoom & pan restore from their own
+    // localStorage keys — don't auto-focus, let the user's view persist.
   }, []);
-
-  // Auto focus-to-fit on initial load
-  useEffect(() => {
-    if (items.length > 0 && !initialFocusDoneRef.current) {
-      initialFocusDoneRef.current = true;
-      // Delay to ensure GridContainer has rendered
-      setTimeout(() => {
-        gridContainerRef.current?.focusToFit();
-      }, 100);
-    }
-  }, [items]);
 
   // Auto-save gap to localStorage
   useEffect(() => {
@@ -206,6 +192,11 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('trading-system-zoom', String(zoom));
   }, [zoom]);
+
+  // Auto-save lock state to localStorage
+  useEffect(() => {
+    try { localStorage.setItem('trading-system-locked', String(isLocked)); } catch {}
+  }, [isLocked]);
 
   // Keyboard shortcuts for undo/redo
   useEffect(() => {
@@ -405,65 +396,72 @@ export default function App() {
 
       {/* Main Grid Area */}
       <div className="flex-1 flex flex-col overflow-hidden">
-        <div className="p-4 border-b border-zinc-800 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <h1 className="text-xl">Trading System</h1>
-            {/* Undo/Redo Buttons */}
-            <div className="flex items-center gap-1 ml-2">
+        <div className="relative px-2 py-1 lg:px-4 lg:py-2 border-b border-zinc-800 flex items-center justify-between gap-1 lg:gap-3">
+          {/* Left: title + undo/redo */}
+          <div className="flex items-center gap-1 lg:gap-3">
+            <h1 className="text-xs lg:text-xl font-semibold whitespace-nowrap">Trading System</h1>
+            <div className="flex items-center gap-0.5">
               <button
                 onClick={undo}
                 disabled={!canUndo()}
-                className={`p-2 transition-colors ${
+                className={`p-1 lg:p-2 transition-colors ${
                   canUndo()
                     ? 'hover:bg-zinc-800 text-white'
                     : 'text-zinc-600 cursor-not-allowed'
                 }`}
                 title="Undo (Ctrl+Z)"
               >
-                <Undo2 className="w-4 h-4" />
+                <Undo2 className="w-3.5 h-3.5 lg:w-4 lg:h-4" />
               </button>
               <button
                 onClick={redo}
                 disabled={!canRedo()}
-                className={`p-2 transition-colors ${
+                className={`p-1 lg:p-2 transition-colors ${
                   canRedo()
                     ? 'hover:bg-zinc-800 text-white'
                     : 'text-zinc-600 cursor-not-allowed'
                 }`}
                 title="Redo (Ctrl+Y)"
               >
-                <Redo2 className="w-4 h-4" />
+                <Redo2 className="w-3.5 h-3.5 lg:w-4 lg:h-4" />
               </button>
             </div>
           </div>
-          <div className="absolute left-1/2 -translate-x-1/2">
-            <TimelineClock />
+
+          {/* Center — clock, absolute centered regardless of side widths */}
+          <div className="absolute left-1/2 -translate-x-1/2 pointer-events-none">
+            <TimelineClock compact />
           </div>
-          <div className="flex items-center gap-4">
+
+          {/* Spacer to balance left/right for absolute clock */}
+          <div />
+
+          {/* Right: zoom + help/layout/settings + add */}
+          <div className="flex items-center gap-1 lg:gap-3 flex-shrink-0">
             {/* Zoom Controls */}
-            <div className="flex items-center gap-2 px-3 py-1 bg-zinc-800 rounded">
+            <div className="flex items-center gap-0.5 lg:gap-1.5 px-1 lg:px-2.5 py-0.5 lg:py-1 bg-zinc-800 rounded">
               <button
                 onClick={() => setIsLocked(v => !v)}
-                className={`p-1 transition-colors rounded ${
+                className={`p-0.5 lg:p-1 transition-colors rounded ${
                   isLocked ? 'text-amber-400 hover:bg-zinc-700' : 'text-zinc-500 hover:bg-zinc-700 hover:text-zinc-300'
                 }`}
                 title={isLocked ? 'Zoom Locked (L to toggle)' : 'Zoom Unlocked (L to toggle)'}
               >
-                {isLocked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
+                {isLocked ? <Lock className="w-3 h-3 lg:w-3.5 lg:h-3.5" /> : <Unlock className="w-3 h-3 lg:w-3.5 lg:h-3.5" />}
               </button>
               <button
                 onClick={() => setZoom(Math.max(0.25, +(zoom - 0.1).toFixed(2)))}
                 disabled={zoom <= 0.25}
-                className={`p-1 transition-colors ${
+                className={`p-0.5 lg:p-1 transition-colors ${
                   zoom > 0.25 ? 'hover:bg-zinc-700 text-white' : 'text-zinc-600 cursor-not-allowed'
                 }`}
                 title="Zoom Out"
               >
-                <ZoomOut className="w-4 h-4" />
+                <ZoomOut className="w-3.5 h-3.5 lg:w-4 lg:h-4" />
               </button>
               <button
                 onClick={() => setZoom(1.0)}
-                className="text-sm text-zinc-400 min-w-[3rem] text-center hover:text-white transition-colors"
+                className="text-2xs lg:text-sm text-zinc-400 min-w-[2rem] lg:min-w-[3rem] text-center hover:text-white transition-colors"
                 title="Reset to 100%"
               >
                 {Math.round(zoom * 100)}%
@@ -471,48 +469,46 @@ export default function App() {
               <button
                 onClick={() => setZoom(Math.min(3.0, +(zoom + 0.1).toFixed(2)))}
                 disabled={zoom >= 3.0}
-                className={`p-1 transition-colors ${
+                className={`p-0.5 lg:p-1 transition-colors ${
                   zoom < 3.0 ? 'hover:bg-zinc-700 text-white' : 'text-zinc-600 cursor-not-allowed'
                 }`}
                 title="Zoom In"
               >
-                <ZoomIn className="w-4 h-4" />
+                <ZoomIn className="w-3.5 h-3.5 lg:w-4 lg:h-4" />
               </button>
             </div>
 
-            {/* Help Button - opens help panel with shortcuts tab */}
-            <button
-              onClick={() => openHelpTab('shortcuts')}
-              className="p-2 hover:bg-zinc-700 transition-colors rounded"
-              title="Help (Ctrl+/)"
-            >
-              <HelpCircle className="w-5 h-5" />
-            </button>
-
-            {/* Layout Button - opens help panel with layout tab */}
-            <button
-              onClick={() => openHelpTab('layout')}
-              className="p-2 hover:bg-zinc-700 transition-colors rounded"
-              title="Layout Templates (Shift+L)"
-            >
-              <Layout className="w-5 h-5" />
-            </button>
-
-            {/* Settings Button - opens help panel with settings tab */}
-            <button
-              onClick={() => openHelpTab('settings')}
-              className="p-2 hover:bg-zinc-700 transition-colors rounded"
-              title="Settings (,)"
-            >
-              <Settings className="w-5 h-5" />
-            </button>
+            <div className="flex items-center gap-0.5 lg:gap-1.5">
+              <button
+                onClick={() => openHelpTab('shortcuts')}
+                className="p-1 lg:p-2 hover:bg-zinc-700 transition-colors rounded"
+                title="Help (Ctrl+/)"
+              >
+                <HelpCircle className="w-4 h-4 lg:w-5 lg:h-5" />
+              </button>
+              <button
+                onClick={() => openHelpTab('layout')}
+                className="p-1 lg:p-2 hover:bg-zinc-700 transition-colors rounded"
+                title="Layout Templates (Shift+L)"
+              >
+                <Layout className="w-4 h-4 lg:w-5 lg:h-5" />
+              </button>
+              <button
+                onClick={() => openHelpTab('settings')}
+                className="p-1 lg:p-2 hover:bg-zinc-700 transition-colors rounded"
+                title="Settings (,)"
+              >
+                <Settings className="w-4 h-4 lg:w-5 lg:h-5" />
+              </button>
+            </div>
 
             <button
               onClick={() => setSidebarOpen(true)}
-              className="flex items-center gap-2 px-4 py-2 bg-white text-black hover:bg-gray-200 transition-colors"
+              className="flex items-center gap-1 lg:gap-2 px-2 py-1 lg:px-4 lg:py-2 bg-white text-black hover:bg-zinc-200 transition-colors text-2xs lg:text-sm"
             >
-              <Plus className="w-4 h-4" />
-              Add Module
+              <Plus className="w-3 h-3 lg:w-4 lg:h-4" />
+              <span className="hidden sm:inline">Add Module</span>
+              <span className="sm:hidden">Add</span>
             </button>
           </div>
         </div>
@@ -531,6 +527,22 @@ export default function App() {
           isLocked={isLocked}
           onLockChange={setIsLocked}
         />
+
+        {/* Floating touch gamepad — only on touch devices */}
+        {'ontouchstart' in window && (
+          <TouchGamepad
+            onPan={(dx, dy) => gridContainerRef.current?.panBy(dx, dy)}
+            onZoomIn={() => {
+              const z = Math.min(3.0, +(zoom + 0.05).toFixed(2));
+              gridContainerRef.current?.zoomToward(window.innerWidth / 2, window.innerHeight / 2, z);
+            }}
+            onZoomOut={() => {
+              const z = Math.max(0.25, +(zoom - 0.05).toFixed(2));
+              gridContainerRef.current?.zoomToward(window.innerWidth / 2, window.innerHeight / 2, z);
+            }}
+            onFit={() => gridContainerRef.current?.focusToFit()}
+          />
+        )}
       </div>
     </div>
   );

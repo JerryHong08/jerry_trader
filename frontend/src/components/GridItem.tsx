@@ -3,7 +3,8 @@ import { Resizable } from 're-resizable';
 import { GripVertical, X, Link, Unlink } from 'lucide-react';
 import { moduleRegistry } from '../config/moduleRegistry';
 import { SpatialHashGrid, hasCollisions as checkHasCollisions } from '../utils/layoutUtils';
-import type { GridItemConfig } from '../types';
+import { ErrorBoundary } from './common/ErrorBoundary';
+import type { GridItemConfig, StockDetailView, OrderManagementView } from '../types';
 
 interface GridItemProps {
   item: GridItemConfig;
@@ -24,19 +25,6 @@ const SNAP_THRESHOLD = 20; // Distance to trigger magnetic snap
 
 const snapToGrid = (value: number): number => {
   return Math.round(value / GRID_SIZE) * GRID_SIZE;
-};
-
-// Check if two rectangles collide
-const checkCollision = (
-  rect1: { x: number; y: number; width: number; height: number },
-  rect2: { x: number; y: number; width: number; height: number }
-): boolean => {
-  return (
-    rect1.x < rect2.x + rect2.width &&
-    rect1.x + rect1.width > rect2.x &&
-    rect1.y < rect2.y + rect2.height &&
-    rect1.y + rect1.height > rect2.y
-  );
 };
 
 // Find magnetic snap position near other grids
@@ -130,7 +118,7 @@ const SYNC_GROUP_COLORS: Record<string, string> = {
   'group-5': '#ec4899', // pink
 };
 
-export function GridItem({
+export const GridItem = React.memo(function GridItem({
   item,
   onRemove,
   onUpdate,
@@ -190,7 +178,7 @@ export function GridItem({
         className="bg-red-900 border border-red-600 p-4 text-white"
       >
         <p className="text-sm">Error: Module type "{item.moduleType}" not found</p>
-        <p className="text-xs text-gray-400 mt-2">Please remove this module</p>
+        <p className="text-xs text-zinc-400 mt-2">Please remove this module</p>
         <button
           onClick={onRemove}
           className="mt-2 px-3 py-1 bg-red-600 hover:bg-red-700 text-sm"
@@ -372,9 +360,9 @@ export function GridItem({
     const nextValue = viewModeConfig.options[nextIndex].value;
 
     if (item.moduleType === 'stock-detail') {
-      onUpdate({ settings: { ...item.settings, stockDetail: { view: nextValue as any } } });
+      onUpdate({ settings: { ...item.settings, stockDetail: { view: nextValue as StockDetailView } } });
     } else if (item.moduleType === 'order-management') {
-      onUpdate({ settings: { ...item.settings, orderManagement: { view: nextValue as any } } });
+      onUpdate({ settings: { ...item.settings, orderManagement: { view: nextValue as OrderManagementView } } });
     } else if (item.moduleType === 'overview-chart') {
       const focusMode = nextValue === 'focus';
       const currentSettings = item.settings?.overviewChart;
@@ -465,6 +453,11 @@ export function GridItem({
         topLeft: false,
       }}
       grid={[GRID_SIZE, GRID_SIZE]}
+      handleStyles={{
+        right: { width: '8px', right: '-4px' },
+        bottom: { height: '8px', bottom: '-4px' },
+        bottomRight: { width: '16px', height: '16px', right: '-2px', bottom: '-2px' },
+      }}
     >
       <div
         ref={itemRef}
@@ -484,7 +477,7 @@ export function GridItem({
           className="flex items-center justify-between p-3 border-b border-zinc-800 cursor-move bg-zinc-800/50 select-none"
         >
           <div className="flex items-center gap-2">
-            <GripVertical className="w-4 h-4 text-gray-500" />
+            <GripVertical className="w-4 h-4 text-zinc-500" />
             {/* Sync Group Indicator Dot */}
             {item.syncGroup && (
               <div
@@ -561,19 +554,28 @@ export function GridItem({
 
         {/* Content */}
         <div className="flex-1 overflow-hidden no-drag">
-          <ModuleComponent
-            moduleId={item.id}
-            onRemove={onRemove}
-            syncGroup={item.syncGroup}
-            selectedSymbol={selectedSymbol}
-            onSymbolSelect={onSymbolSelect}
-            settings={item.settings}
-            onSettingsChange={(settings) => onUpdate({ settings: { ...item.settings, ...settings } })}
-            zoom={zoom}
-          />
+          <ErrorBoundary moduleName={moduleConfig.name}>
+            <ModuleComponent
+              moduleId={item.id}
+              onRemove={onRemove}
+              syncGroup={item.syncGroup}
+              selectedSymbol={selectedSymbol}
+              onSymbolSelect={onSymbolSelect}
+              settings={item.settings}
+              onSettingsChange={(settings) => onUpdate({ settings: { ...item.settings, ...settings } })}
+              zoom={zoom}
+            />
+          </ErrorBoundary>
+        </div>
+
+        {/* Resize indicator (bottom-right corner) */}
+        <div className="absolute bottom-1 right-1 no-drag pointer-events-none">
+          <svg width="12" height="12" viewBox="0 0 12 12" className="text-zinc-600 opacity-50">
+            <path d="M10 2L10 10L2 10" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" />
+          </svg>
         </div>
       </div>
     </Resizable>
     </>
   );
-}
+});

@@ -14,33 +14,21 @@
  */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { createChart, IChartApi, ISeriesApi, LineSeries, ColorType, CrosshairMode, CandlestickSeries, HistogramSeries } from 'lightweight-charts';
+import { ISeriesApi, LineSeries, CandlestickSeries, HistogramSeries } from 'lightweight-charts';
 import { Wifi, WifiOff, RefreshCw, Plus, Loader2 } from 'lucide-react';
 import type { Time } from 'lightweight-charts';
 import type { ModuleProps, ChartTimeframe, ChartPanel } from '../types';
 import { DEFAULT_PANELS } from '../types';
 import { useTickDataStore, type Trade, type Quote } from '../stores/tickDataStore';
-import { useChartDataStore, chartStoreKey } from '../stores/chartDataStore';
+import { useChartDataStore, chartStoreKey, type SymbolChartState, type OHLCVBar } from '../stores/chartDataStore';
 import { useFactorDataStore, factorStoreKey } from '../stores/factorDataStore';
 import { ChartPanelWrapper } from './ChartPanelHeader';
+import { useLightweightChart } from '../hooks/useLightweightChart';
+import { TIMEFRAME_DURATION } from '../constants/timeframes';
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
 const TIMEFRAMES: ChartTimeframe[] = ['10s', '1m', '5m', '15m', '30m', '1h', '4h', '1D', '1W', '1M'];
-
-// Timeframe to duration in seconds
-const TIMEFRAME_DURATION: Record<ChartTimeframe, number> = {
-  '10s': 10,
-  '1m': 60,
-  '5m': 300,
-  '15m': 900,
-  '30m': 1800,
-  '1h': 3600,
-  '4h': 14400,
-  '1D': 86400,
-  '1W': 604800,
-  '1M': 2592000, // 30 days approximation
-};
 
 const BFF_URL =
   typeof import.meta !== 'undefined' && import.meta.env?.VITE_CHART_BFF_URL
@@ -90,7 +78,13 @@ export function ChartPanelSystem({
   const addSymbols = useTickDataStore((s) => s.addSymbols);
   const removeSymbolFromStore = useTickDataStore((s) => s.removeSymbol);
   const reconnect = useTickDataStore((s) => s.reconnect);
-  const symbolData = useTickDataStore((s) => s.symbolData);
+  // Tick data — subscribe only to this chart's symbol
+  const latestTrade = useTickDataStore((s) =>
+    symbol ? (s.symbolData[symbol]?.T as Trade | undefined) : null
+  );
+  const quote = useTickDataStore((s) =>
+    symbol ? (s.symbolData[symbol]?.Q as Quote | undefined) : undefined
+  );
 
   // Chart data store (OHLCV bars)
   const fetchBars = useChartDataStore((s) => s.fetchBars);
@@ -112,10 +106,20 @@ export function ChartPanelSystem({
         setAvailableFactors(data.factors || []);
       } catch (err) {
         console.error('[ChartPanelSystem] Failed to load factor specs:', err);
-        // Fallback
+        // Fallback mirrors config/factors.yaml — keep in sync
         setAvailableFactors([
-          { id: 'ema_20', type: 'bar', display: { name: 'EMA(20)', color: '#3b82f6', priceScale: 'left', mode: 'overlay' }, timeframes: [] },
-          { id: 'trade_rate', type: 'trade', display: { name: 'TradeRate', color: '#f97316', priceScale: 'right', mode: 'panel' }, timeframes: ['trade'] },
+          { id: 'ema_20', type: 'bar', display: { name: 'EMA(20)', color: '#3b82f6', priceScale: 'left', mode: 'overlay' }, timeframes: ['10s','1m','5m','15m','30m','1h','4h','1D','1W','1M'] },
+          { id: 'trade_rate', type: 'trade', display: { name: 'TradeRate', color: '#f97316', priceScale: 'right', mode: 'panel' }, timeframes: ['tick'] },
+          { id: 'quote_rate', type: 'quote', display: { name: 'QuoteRate', color: '#22c55e', priceScale: 'right', mode: 'panel' }, timeframes: ['tick'] },
+          { id: 'bid_ask_spread', type: 'quote', display: { name: 'SpreadBPS', color: '#ec4899', priceScale: 'right', mode: 'panel' }, timeframes: ['tick'] },
+          { id: 'order_imbalance', type: 'quote', display: { name: 'OrderImb', color: '#6366f1', priceScale: 'right', mode: 'panel' }, timeframes: ['tick'] },
+          { id: 'relative_volume', type: 'bar', display: { name: 'RelVol', color: '#f59e0b', priceScale: 'right', mode: 'panel' }, timeframes: ['1m','5m','15m'] },
+          { id: 'price_direction', type: 'bar', display: { name: 'PriceDir', color: '#8b5cf6', priceScale: 'right', mode: 'panel' }, timeframes: ['1m','5m','15m'] },
+          { id: 'gap_percent', type: 'bar', display: { name: 'GapPct', color: '#ef4444', priceScale: 'right', mode: 'panel' }, timeframes: ['1m','5m','15m'] },
+          { id: 'vol_accel_5_15', type: 'bar', display: { name: 'VolAccel', color: '#06b6d4', priceScale: 'right', mode: 'panel' }, timeframes: ['1m','5m','15m'] },
+          { id: 'large_trade_ratio', type: 'trade', display: { name: 'LargeTradeRatio', color: '#dc2626', priceScale: 'right', mode: 'panel' }, timeframes: ['tick'] },
+          { id: 'aggressor_ratio', type: 'trade', display: { name: 'AggressorRatio', color: '#8b5cf6', priceScale: 'right', mode: 'panel' }, timeframes: ['tick'] },
+          { id: 'vwap_deviation', type: 'bar', display: { name: 'VWAPDev', color: '#10b981', priceScale: 'right', mode: 'panel' }, timeframes: ['1m','5m','15m','30m','1h'] },
         ]);
       }
     };
@@ -150,12 +154,12 @@ export function ChartPanelSystem({
     fetchBars(moduleId, symbolUpper, timeframe);
 
     // Fetch factors for overlays and panels
-    fetchFactors(moduleId, symbolUpper, undefined, undefined, undefined, 'trade');
+    fetchFactors(moduleId, symbolUpper, undefined, undefined, undefined, 'tick');
     fetchFactors(moduleId, symbolUpper, undefined, undefined, undefined, timeframe);
 
     // Subscribe to real-time factor updates
     const tickStore = useTickDataStore.getState();
-    tickStore.subscribeFactors(symbolUpper, 'trade');
+    tickStore.subscribeFactors(symbolUpper, 'tick');
     tickStore.subscribeFactors(symbolUpper, timeframe);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbol, timeframe, moduleId, fetchTrigger]);
@@ -247,10 +251,6 @@ export function ChartPanelSystem({
     onSettingsChange?.({ chart: { timeframe, panels } });
   }, [panels]);
 
-  // ── Quote data ───────────────────────────────────────────────────────────────
-  const quote = symbol ? (symbolData[symbol]?.Q as Quote | undefined) : undefined;
-  const latestTrade = symbol ? (symbolData[symbol]?.T as Trade | undefined) : null;
-
   // ── Render ───────────────────────────────────────────────────────────────────
   return (
     <div className="h-full flex flex-col bg-zinc-900">
@@ -269,7 +269,7 @@ export function ChartPanelSystem({
             className="p-0.5 hover:bg-zinc-800 transition-colors rounded"
             title="Reconnect WebSocket"
           >
-            <RefreshCw className="w-3.5 h-3.5 text-gray-400" />
+            <RefreshCw className="w-3.5 h-3.5 text-zinc-400" />
           </button>
 
           {symbols.map((s) => (
@@ -279,7 +279,7 @@ export function ChartPanelSystem({
               className={`px-2 py-0.5 text-xs transition-colors ${
                 s === symbol
                   ? 'bg-white text-black'
-                  : 'bg-zinc-800 hover:bg-zinc-700 text-gray-300'
+                  : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300'
               }`}
             >
               {s}
@@ -315,7 +315,7 @@ export function ChartPanelSystem({
               <button
                 key={tf}
                 onClick={() => handleTimeframeChange(tf)}
-                className={`px-2 py-0.5 text-[10px] font-mono rounded transition-all ${
+                className={`px-2 py-0.5 text-2xs font-mono rounded transition-all ${
                   tf === timeframe
                     ? 'bg-zinc-700 text-zinc-100 shadow-sm'
                     : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50'
@@ -330,7 +330,7 @@ export function ChartPanelSystem({
           <div className="relative">
             <button
               onClick={() => setShowAddPanel(!showAddPanel)}
-              className="px-2 py-0.5 text-xs bg-zinc-800 hover:bg-zinc-700 text-gray-300 flex items-center gap-1"
+              className="px-2 py-0.5 text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-300 flex items-center gap-1"
             >
               <Plus className="w-3 h-3" />
               Add Panel
@@ -338,7 +338,7 @@ export function ChartPanelSystem({
 
             {showAddPanel && (
               <div className="absolute top-full left-0 mt-1 bg-zinc-800 border border-zinc-700 rounded shadow-lg z-50 min-w-[160px]">
-                <div className="px-2 py-1 text-[10px] text-zinc-500 border-b border-zinc-700">
+                <div className="px-2 py-1 text-2xs text-zinc-500 border-b border-zinc-700">
                   Overlays (on Price)
                 </div>
                 {availableFactors
@@ -351,7 +351,7 @@ export function ChartPanelSystem({
                         key={factor.id}
                         onClick={() => isActive ? removeOverlay(factor.id) : addPanel(factor.id)}
                         className={`w-full px-2 py-1 text-xs text-left flex items-center gap-2 ${
-                          isActive ? 'bg-zinc-700 text-white' : 'text-gray-300 hover:bg-zinc-700'
+                          isActive ? 'bg-zinc-700 text-white' : 'text-zinc-300 hover:bg-zinc-700'
                         }`}
                       >
                         <span
@@ -364,7 +364,7 @@ export function ChartPanelSystem({
                     );
                   })}
 
-                <div className="px-2 py-1 text-[10px] text-zinc-500 border-b border-zinc-700 border-t">
+                <div className="px-2 py-1 text-2xs text-zinc-500 border-b border-zinc-700 border-t">
                   Panels
                 </div>
                 {availableFactors
@@ -376,7 +376,7 @@ export function ChartPanelSystem({
                         key={factor.id}
                         onClick={() => addPanel(factor.id)}
                         className={`w-full px-2 py-1 text-xs text-left flex items-center gap-2 ${
-                          isActive ? 'bg-zinc-700 text-white' : 'text-gray-300 hover:bg-zinc-700'
+                          isActive ? 'bg-zinc-700 text-white' : 'text-zinc-300 hover:bg-zinc-700'
                         }`}
                       >
                         <span
@@ -401,13 +401,13 @@ export function ChartPanelSystem({
           {/* Price info */}
           {symbol && latestTrade && (
             <div className="flex items-center gap-3 text-xs ml-auto">
-              <span className="text-gray-400">
+              <span className="text-zinc-400">
                 {symbol} — Last:{' '}
                 <span className="text-white">${latestTrade.price.toFixed(2)}</span>
-                <span className="text-gray-500 ml-1">({latestTrade.size})</span>
+                <span className="text-zinc-500 ml-1">({latestTrade.size})</span>
               </span>
               {quote && (
-                <span className="text-gray-500">
+                <span className="text-zinc-500">
                   Bid: <span className="text-green-400">{quote.bid}</span>
                   {' '}Ask: <span className="text-red-400">{quote.ask}</span>
                 </span>
@@ -425,7 +425,7 @@ export function ChartPanelSystem({
           if (panel.id !== 'price' && symbol) {
             const factorSpec = availableFactors.find((f) => f.id === panel.id);
             const factorType = factorSpec?.type || 'bar';
-            const factorTimeframe = factorType === 'trade' ? 'trade' : timeframe;
+            const factorTimeframe = factorType === 'tick' ? 'tick' : timeframe;
             const factorKey = factorStoreKey(moduleId, symbol, factorTimeframe);
             const factorData = symbolFactors[factorKey]?.factors?.[panel.id];
             const lastPoint = factorData?.[factorData.length - 1];
@@ -447,7 +447,7 @@ export function ChartPanelSystem({
               className={panel.collapsed ? '' : 'flex-1 min-h-[100px]'}
               headerRight={factorLastValue ? (
                 <span
-                  className="text-[11px] font-mono font-semibold px-1.5 py-0.5 rounded"
+                  className="text-3xs font-mono font-semibold px-1.5 py-0.5 rounded"
                   style={{ color: factorLastValue.color, backgroundColor: factorLastValue.color + '15' }}
                 >
                   {factorLastValue.value.toFixed(2)}
@@ -482,7 +482,7 @@ export function ChartPanelSystem({
       {/* Empty state */}
       {!symbol && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-          <span className="text-gray-600 text-sm">Add a symbol to see chart data</span>
+          <span className="text-zinc-600 text-sm">Add a symbol to see chart data</span>
         </div>
       )}
     </div>
@@ -495,7 +495,7 @@ interface PricePanelProps {
   moduleId: string;
   symbol: string;
   timeframe: ChartTimeframe;
-  chartState: any;
+  chartState: SymbolChartState | undefined;
   overlays: string[];
   availableFactors: FactorSpec[];
   zoom: number;
@@ -511,53 +511,37 @@ function PricePanel({
   zoom,
 }: PricePanelProps) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<IChartApi | null>(null);
+  const { chartRef, chartReady } = useLightweightChart({
+    container: chartContainerRef,
+    options: {
+      timeScale: { secondsVisible: timeframe === '10s' },
+      leftPriceScale: { visible: false },
+    },
+  });
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const overlaySeriesRef = useRef<Record<string, ISeriesApi<'Line'>>>({});
   const overlayDataLengthRef = useRef<Record<string, number>>({});
+  const overlayVersionRef = useRef<Record<string, number>>({});  // Track lastFetchTime per factorId for re-fetch detection
+  const overlayLastRenderedRef = useRef<Record<string, number>>({});  // Track last rendered time per factorId
   const currentBarRef = useRef<{ time: number; open: number; high: number; low: number; close: number; volume: number } | null>(null);
   const lastHistoricalBarTimeRef = useRef<number>(0);
   const barsLoadedRef = useRef<boolean>(false);
-  const [chartReady, setChartReady] = useState(false);
 
   // Factor data for overlays
   const symbolFactors = useFactorDataStore((s) => s.symbolFactors);
 
-  // Real-time trade data
-  const symbolData = useTickDataStore((s) => s.symbolData);
-  const latestTrade = symbol ? (symbolData[symbol]?.T as Trade | undefined) : null;
+  // Real-time trade data — subscribe only to this panel's symbol
+  const latestTrade = useTickDataStore((s) =>
+    symbol ? (s.symbolData[symbol]?.T as Trade | undefined) : null
+  );
   const prevTradeRef = useRef<Trade | null>(null);
 
-  // Initialize chart
+  // Create series when chart is ready
   useEffect(() => {
-    if (!chartContainerRef.current) return;
+    if (!chartRef.current) return;
 
-    const chart = createChart(chartContainerRef.current, {
-      width: chartContainerRef.current.clientWidth,
-      height: chartContainerRef.current.clientHeight,
-      layout: {
-        background: { type: ColorType.Solid, color: '#18181b' },
-        textColor: '#a1a1aa',
-      },
-      grid: {
-        vertLines: { color: '#27272a' },
-        horzLines: { color: '#27272a' },
-      },
-      timeScale: {
-        borderColor: '#3f3f46',
-        timeVisible: true,
-        secondsVisible: timeframe === '10s',
-      },
-      rightPriceScale: { borderColor: '#3f3f46' },
-      leftPriceScale: { borderColor: '#3f3f46', visible: false },
-      crosshair: { mode: CrosshairMode.Normal },
-    });
-
-    chartRef.current = chart;
-
-    // Candlestick series
-    const candleSeries = chart.addSeries(CandlestickSeries, {
+    const candleSeries = chartRef.current.addSeries(CandlestickSeries, {
       upColor: '#22c55e',
       downColor: '#ef4444',
       borderUpColor: '#22c55e',
@@ -567,39 +551,13 @@ function PricePanel({
     });
     candleSeriesRef.current = candleSeries;
 
-    // Volume series (pane below)
-    const volumeSeries = chart.addSeries(HistogramSeries, {
+    const volumeSeries = chartRef.current.addSeries(HistogramSeries, {
       priceFormat: { type: 'volume' },
-      priceScaleId: '', // Separate scale
+      priceScaleId: '',
     });
-    chart.priceScale('').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
+    chartRef.current.priceScale('').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
     volumeSeriesRef.current = volumeSeries;
-
-    // Mark chart as ready
-    setChartReady(true);
-
-    const ro = new ResizeObserver(() => {
-      if (chartContainerRef.current && chartRef.current) {
-        chartRef.current.applyOptions({
-          width: chartContainerRef.current.clientWidth,
-          height: chartContainerRef.current.clientHeight,
-        });
-      }
-    });
-    ro.observe(chartContainerRef.current);
-
-    return () => {
-      ro.disconnect();
-      chart.remove();
-      chartRef.current = null;
-      candleSeriesRef.current = null;
-      volumeSeriesRef.current = null;
-      overlaySeriesRef.current = {};
-      setChartReady(false);
-      barsLoadedRef.current = false;
-      currentBarRef.current = null;
-    };
-  }, []);
+  }, [chartReady]);
 
   // Reset bars loaded state when symbol/timeframe changes
   useEffect(() => {
@@ -607,6 +565,8 @@ function PricePanel({
     currentBarRef.current = null;
     prevTradeRef.current = null;
     overlayDataLengthRef.current = {};
+    overlayVersionRef.current = {};
+    overlayLastRenderedRef.current = {};
   }, [symbol, timeframe]);
 
   // Render bars
@@ -615,24 +575,24 @@ function PricePanel({
     if (!chartState?.bars?.length) return;
 
     const candleData = chartState.bars
-      .map((bar: any) => ({
+      .map((bar: OHLCVBar) => ({
         time: Number(bar.time) as Time,
         open: Number(bar.open),
         high: Number(bar.high),
         low: Number(bar.low),
         close: Number(bar.close),
       }))
-      .filter((bar: any) => Number.isFinite(bar.time));
+      .filter((bar: OHLCVBar) => Number.isFinite(bar.time));
 
     candleSeriesRef.current.setData(candleData);
 
     const volumeData = chartState.bars
-      .map((bar: any) => ({
+      .map((bar: OHLCVBar) => ({
         time: Number(bar.time) as Time,
         value: Number(bar.volume),
         color: Number(bar.close) >= Number(bar.open) ? '#22c55e40' : '#ef444440',
       }))
-      .filter((bar: any) => Number.isFinite(bar.time));
+      .filter((bar: OHLCVBar) => Number.isFinite(bar.time));
 
     volumeSeriesRef.current?.setData(volumeData);
 
@@ -739,6 +699,8 @@ function PricePanel({
         if (overlaySeriesRef.current[factorId]) {
           overlaySeriesRef.current[factorId].setData([]);
           overlayDataLengthRef.current[factorId] = 0;
+          overlayVersionRef.current[factorId] = 0;
+          overlayLastRenderedRef.current[factorId] = 0;
         }
         continue;
       }
@@ -752,14 +714,16 @@ function PricePanel({
         });
         overlaySeriesRef.current[factorId] = series;
         overlayDataLengthRef.current[factorId] = 0;
+        overlayVersionRef.current[factorId] = 0;
+        overlayLastRenderedRef.current[factorId] = 0;
       }
 
-      const currentLength = factorData.length;
-      const previousLength = overlayDataLengthRef.current[factorId] || 0;
+      // Detect re-fetch via lastFetchTime version counter (same pattern as FactorPanel)
+      const currentVersion = factorState?.lastFetchTime || 0;
+      const isReset = currentVersion !== (overlayVersionRef.current[factorId] || 0);
 
-      // Initial load or reset - use setData
-      if (previousLength === 0 || currentLength <= previousLength) {
-        // Deduplicate by time (keep last value per timestamp)
+      if (isReset) {
+        // Full reset — data was re-fetched
         const seen = new Map<number, number>();
         for (const point of factorData) {
           const t = typeof point.time === 'number' ? point.time : parseInt(String(point.time));
@@ -769,26 +733,26 @@ function PricePanel({
           .sort((a, b) => a[0] - b[0])
           .map(([time, value]) => ({ time: time as Time, value }));
         overlaySeriesRef.current[factorId].setData(lineData);
+
+        const lastPoint = factorData[factorData.length - 1];
+        const lastTime = typeof lastPoint.time === 'number' ? lastPoint.time : parseInt(String(lastPoint.time));
+        overlayLastRenderedRef.current[factorId] = lastTime;
+        overlayVersionRef.current[factorId] = currentVersion;
       } else {
-        // Incremental update - ensure time is strictly increasing
-        // Track the last time we actually added to the series
-        let lastAddedTime = factorData[previousLength - 1]?.time;
-        for (let i = previousLength; i < currentLength; i++) {
-          const point = factorData[i];
-          // Skip if time is not greater than the last added time
-          if (lastAddedTime !== undefined && point.time <= lastAddedTime) {
-            console.warn(`[PricePanel] Skipping duplicate/out-of-order factor point: ${factorId} time=${point.time}, lastAdded=${lastAddedTime}`);
-            continue;
+        // Incremental update — only add points newer than last rendered
+        for (const point of factorData) {
+          const pointTime = typeof point.time === 'number' ? point.time : parseInt(String(point.time));
+          if (pointTime > (overlayLastRenderedRef.current[factorId] || 0)) {
+            overlaySeriesRef.current[factorId].update({
+              time: pointTime as Time,
+              value: point.value,
+            });
+            overlayLastRenderedRef.current[factorId] = pointTime;
           }
-          overlaySeriesRef.current[factorId].update({
-            time: point.time as Time,
-            value: point.value,
-          });
-          lastAddedTime = point.time;
         }
       }
 
-      overlayDataLengthRef.current[factorId] = currentLength;
+      overlayDataLengthRef.current[factorId] = factorData.length;
     }
 
     // Remove unused overlay series
@@ -797,6 +761,8 @@ function PricePanel({
         chartRef.current.removeSeries(overlaySeriesRef.current[factorId]);
         delete overlaySeriesRef.current[factorId];
         delete overlayDataLengthRef.current[factorId];
+        delete overlayVersionRef.current[factorId];
+        delete overlayLastRenderedRef.current[factorId];
       }
     }
   }, [overlays, symbolFactors, symbol, timeframe, moduleId, availableFactors, chartReady]);
@@ -835,15 +801,17 @@ function FactorPanel({
   zoom,
 }: FactorPanelProps) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<IChartApi | null>(null);
+  const { chartRef, chartReady } = useLightweightChart({ container: chartContainerRef });
   const seriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const hasFitContentRef = useRef<boolean>(false);
   const lastRenderedTimeRef = useRef<number>(0);  // Track last rendered timestamp
   const dataVersionRef = useRef<number>(0);  // Track data version for reset detection
 
   // Determine factor type for data fetching
+  // Trade and quote factors are both tick-level — stored under timeframe='tick'.
+  // Only bar factors use the chart's bar timeframe.
   const factorType = factorSpec?.type || 'bar';
-  const factorTimeframe = factorType === 'trade' ? 'trade' : timeframe;
+  const factorTimeframe = factorType === 'bar' ? timeframe : 'tick';
 
   // Get factor data
   const fetchFactors = useFactorDataStore((s) => s.fetchFactors);
@@ -857,52 +825,6 @@ function FactorPanel({
     if (!symbol) return;
     fetchFactors(moduleId, symbol.toUpperCase(), undefined, undefined, undefined, factorTimeframe);
   }, [symbol, factorTimeframe, moduleId, fetchFactors]);
-
-  // Initialize chart
-  useEffect(() => {
-    if (!chartContainerRef.current) return;
-
-    const chart = createChart(chartContainerRef.current, {
-      width: chartContainerRef.current.clientWidth,
-      height: chartContainerRef.current.clientHeight,
-      layout: {
-        background: { type: ColorType.Solid, color: '#18181b' },
-        textColor: '#a1a1aa',
-      },
-      grid: {
-        vertLines: { color: '#27272a' },
-        horzLines: { color: '#27272a' },
-      },
-      timeScale: {
-        borderColor: '#3f3f46',
-        timeVisible: true,
-      },
-      rightPriceScale: { borderColor: '#3f3f46' },
-      crosshair: { mode: CrosshairMode.Normal },
-    });
-
-    chartRef.current = chart;
-
-    const ro = new ResizeObserver(() => {
-      if (chartContainerRef.current && chartRef.current) {
-        chartRef.current.applyOptions({
-          width: chartContainerRef.current.clientWidth,
-          height: chartContainerRef.current.clientHeight,
-        });
-      }
-    });
-    ro.observe(chartContainerRef.current);
-
-    return () => {
-      ro.disconnect();
-      chart.remove();
-      chartRef.current = null;
-      seriesRef.current = null;
-      hasFitContentRef.current = false;
-      lastRenderedTimeRef.current = 0;
-      dataVersionRef.current = 0;
-    };
-  }, []);
 
   // Reset state when symbol/timeframe changes
   useEffect(() => {

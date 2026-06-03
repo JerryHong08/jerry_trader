@@ -35,7 +35,7 @@
         "cmdk": "^1.1.1",
         "embla-carousel-react": "^8.6.0",
         "input-otp": "^1.4.2",
-        "lightweight-charts": "^5.1.0",
+        "lightweight-charts": "^5.2.0",
         "lucide-react": "^0.487.0",
         "next-themes": "^0.4.6",
         "re-resizable": "*",
@@ -59,12 +59,15 @@
         "@vitejs/plugin-react-swc": "^3.10.2",
         "gh-pages": "^6.3.0",
         "typescript": "^5.9.3",
-        "vite": "6.3.5"
+        "vite": "6.3.5",
+        "vitest": "^4.1.7"
     },
     "homepage": "https://JerryHong08.github.io/jerryib_trader",
     "scripts": {
         "dev": "vite",
         "build": "vite build",
+        "test": "vitest run",
+        "test:watch": "vitest",
         "deploy": "bash deploy.sh",
         "deploy:skip-build": "bash deploy.sh --skip-build"
     }

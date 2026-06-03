@@ -51,19 +51,24 @@ function PriceInput({
   // preventDefault + stopPropagation without React's synthetic-event
   // limitations. This prevents the parent grid from scrolling while
   // the user adjusts the price.
+  const valueRef = useRef(value);
+  valueRef.current = value;
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+
   useEffect(() => {
     const el = inputRef.current;
     if (!el || disabled) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       e.stopPropagation();
-      const step = (value ?? 0) * 0.001;
+      const step = (valueRef.current ?? 0) * 0.001;
       const delta = e.deltaY < 0 ? step : -step;
-      onChange(Math.max(0.01, Math.round(((value ?? 0) + delta) * 100) / 100));
+      onChangeRef.current(Math.max(0.01, Math.round(((valueRef.current ?? 0) + delta) * 100) / 100));
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
-  });
+  }, [disabled]);
 
   const adjustByPercent = (percent: number) => {
     if (disabled) return;
@@ -78,7 +83,7 @@ function PriceInput({
           type="button"
           disabled={disabled}
           onClick={() => adjustByPercent(p)}
-          className="px-1.5 py-0.5 text-[10px] bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40"
+          className="px-1.5 py-0.5 text-2xs bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40"
         >
           {p}%
         </button>
@@ -99,7 +104,7 @@ function PriceInput({
           type="button"
           disabled={disabled}
           onClick={() => adjustByPercent(p)}
-          className="px-1.5 py-0.5 text-[10px] bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40"
+          className="px-1.5 py-0.5 text-2xs bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40"
         >
           +{p}%
         </button>
@@ -130,23 +135,7 @@ export function OrderManagement({
   const loadInitial = useIbbotStore((s) => s.loadInitial);
   const restBaseUrl = useIbbotStore((s) => s.restBaseUrl);
 
-  // TickData for price sync
-  const symbolData = useTickDataStore((s) => s.symbolData);
-
-  // Privacy
-  const privacyMode = usePrivacyStore((s) => s.privacyMode);
-  const togglePrivacy = usePrivacyStore((s) => s.toggle);
-
   // ── Local form state ───────────────────────────────────────────────────
-  const [activeView, setActiveView] = useState<OrderManagementView>(
-    settings?.orderManagement?.view || 'placement',
-  );
-
-  const [orderMode, setOrderMode] = useState<'quantity' | 'pct'>('pct');
-  const [cancelReason, setCancelReason] = useState('');
-  const [cancellingIds, setCancellingIds] = useState<Set<number>>(new Set());
-  const [showBuyingPower, setShowBuyingPower] = useState(false);
-
   const [form, setForm] = useState<PlaceOrderRequest>({
     symbol: selectedSymbol || 'AAPL',
     action: 'BUY',
@@ -160,6 +149,24 @@ export function OrderManagement({
     pct: 60,
     price: null,
   });
+
+  // TickData for price sync — subscribe only to this form's symbol
+  const latestTradeForPrice = useTickDataStore((s) =>
+    form.symbol ? (s.symbolData[form.symbol]?.T as Trade | undefined) ?? null : null
+  );
+
+  // Privacy
+  const privacyMode = usePrivacyStore((s) => s.privacyMode);
+  const togglePrivacy = usePrivacyStore((s) => s.toggle);
+
+  const [activeView, setActiveView] = useState<OrderManagementView>(
+    settings?.orderManagement?.view || 'placement',
+  );
+
+  const [orderMode, setOrderMode] = useState<'quantity' | 'pct'>('pct');
+  const [cancelReason, setCancelReason] = useState('');
+  const [cancellingIds, setCancellingIds] = useState<Set<number>>(new Set());
+  const [showBuyingPower, setShowBuyingPower] = useState(false);
 
   const priceInitializedRef = useRef(false);
 
@@ -179,10 +186,7 @@ export function OrderManagement({
   }, [settings?.orderManagement?.view]);
 
   // ── Price from latest trade ────────────────────────────────────────────
-  const latestTrade = form.symbol
-    ? (symbolData[form.symbol]?.T as Trade | undefined) ?? null
-    : null;
-  const lastTradePrice = latestTrade?.price ?? null;
+  const lastTradePrice = latestTradeForPrice?.price ?? null;
 
   // Auto-sync price on first load
   useEffect(() => {
@@ -233,7 +237,7 @@ export function OrderManagement({
   return (
     <div className="h-full flex flex-col bg-zinc-900">
       {/* Connection header */}
-      <div className="px-3 py-1.5 border-b border-zinc-800 flex items-center justify-between text-xs text-gray-400">
+      <div className="px-3 py-1.5 border-b border-zinc-800 flex items-center justify-between text-xs text-zinc-400">
         <div className="flex items-center gap-2">
           {wsConnected ? (
             <Wifi className="w-3 h-3 text-green-500" />
@@ -270,7 +274,7 @@ export function OrderManagement({
           <form onSubmit={handleSubmit} className="space-y-3">
             {/* Buying power */}
             {bp !== null && (
-              <div className="text-xs text-gray-400 flex items-center gap-2">
+              <div className="text-xs text-zinc-400 flex items-center gap-2">
                 Buying Power:{' '}
                 <span className="cursor-pointer" onClick={() => setShowBuyingPower((v) => !v)}>
                   {privacyMode
@@ -285,7 +289,7 @@ export function OrderManagement({
             {/* Row 1: Symbol + Action */}
             <div className="grid grid-cols-3 gap-2">
               <div className="col-span-2">
-                <label className="block text-xs text-gray-400 mb-0.5">Symbol</label>
+                <label className="block text-xs text-zinc-400 mb-0.5">Symbol</label>
                 <input
                   className="w-full bg-black border border-zinc-700 px-2 py-1.5 text-sm focus:outline-none focus:border-white"
                   value={form.symbol}
@@ -293,19 +297,19 @@ export function OrderManagement({
                 />
               </div>
               <div>
-                <label className="block text-xs text-gray-400 mb-0.5">Action</label>
+                <label className="block text-xs text-zinc-400 mb-0.5">Action</label>
                 <div className="grid grid-cols-2 gap-1">
                   <button
                     type="button"
                     onClick={() => { setOrderMode('pct'); setForm((p) => ({ ...p, action: 'BUY', pct: 60 })); }}
-                    className={`py-1.5 text-xs ${form.action === 'BUY' ? 'bg-green-600' : 'bg-zinc-800 hover:bg-zinc-700 text-gray-400'}`}
+                    className={`py-1.5 text-xs ${form.action === 'BUY' ? 'bg-green-600' : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-400'}`}
                   >
                     BUY
                   </button>
                   <button
                     type="button"
                     onClick={() => { setOrderMode('pct'); setForm((p) => ({ ...p, action: 'SELL', pct: 100 })); }}
-                    className={`py-1.5 text-xs ${form.action === 'SELL' ? 'bg-red-600' : 'bg-zinc-800 hover:bg-zinc-700 text-gray-400'}`}
+                    className={`py-1.5 text-xs ${form.action === 'SELL' ? 'bg-red-600' : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-400'}`}
                   >
                     SELL
                   </button>
@@ -316,7 +320,7 @@ export function OrderManagement({
             {/* Row 2: Mode + Qty/Pct + Type + TIF */}
             <div className="grid grid-cols-4 gap-2">
               <div>
-                <label className="block text-xs text-gray-400 mb-0.5">Mode</label>
+                <label className="block text-xs text-zinc-400 mb-0.5">Mode</label>
                 <select
                   className="w-full bg-black border border-zinc-700 px-2 py-1.5 text-sm focus:outline-none"
                   value={orderMode}
@@ -328,7 +332,7 @@ export function OrderManagement({
               </div>
 
               <div>
-                <label className="block text-xs text-gray-400 mb-0.5">
+                <label className="block text-xs text-zinc-400 mb-0.5">
                   {orderMode === 'quantity' ? 'Qty' : 'Pct %'}
                 </label>
                 {orderMode === 'quantity' ? (
@@ -354,7 +358,7 @@ export function OrderManagement({
               </div>
 
               <div>
-                <label className="block text-xs text-gray-400 mb-0.5">Type</label>
+                <label className="block text-xs text-zinc-400 mb-0.5">Type</label>
                 <select
                   className="w-full bg-black border border-zinc-700 px-2 py-1.5 text-sm focus:outline-none"
                   value={form.order_type}
@@ -372,7 +376,7 @@ export function OrderManagement({
               </div>
 
               <div>
-                <label className="block text-xs text-gray-400 mb-0.5">TIF</label>
+                <label className="block text-xs text-zinc-400 mb-0.5">TIF</label>
                 <select
                   className="w-full bg-black border border-zinc-700 px-2 py-1.5 text-sm focus:outline-none"
                   value={form.tif}
@@ -388,17 +392,17 @@ export function OrderManagement({
             {form.order_type === 'LMT' && (
               <div>
                 <div className="flex items-center gap-2 mb-1">
-                  <label className="text-xs text-gray-400">Limit Price</label>
+                  <label className="text-xs text-zinc-400">Limit Price</label>
                   <button
                     type="button"
                     disabled={loading || !lastTradePrice}
                     onClick={syncPriceFromTrade}
-                    className="px-2 py-0.5 text-[10px] bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40"
+                    className="px-2 py-0.5 text-2xs bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40"
                   >
                     ↻ Sync
                   </button>
                   {lastTradePrice && (
-                    <span className="text-[10px] text-gray-500">
+                    <span className="text-2xs text-zinc-500">
                       (Last: ${lastTradePrice.toFixed(2)})
                     </span>
                   )}
@@ -419,12 +423,12 @@ export function OrderManagement({
                 onChange={(e) => setForm((p) => ({ ...p, OutsideRth: e.target.checked }))}
                 className="w-3.5 h-3.5"
               />
-              <span className="text-xs text-gray-400">Outside Regular Trading Hours</span>
+              <span className="text-xs text-zinc-400">Outside Regular Trading Hours</span>
             </label>
 
             {/* Reason */}
             <div>
-              <label className="block text-xs text-gray-400 mb-0.5">Reason (optional)</label>
+              <label className="block text-xs text-zinc-400 mb-0.5">Reason (optional)</label>
               <input
                 className="w-full bg-black border border-zinc-700 px-2 py-1.5 text-sm focus:outline-none focus:border-zinc-500"
                 value={String(form.reason ?? '')}
@@ -462,7 +466,7 @@ export function OrderManagement({
           <div>
             {/* Cancel reason input */}
             <div className="mb-3">
-              <label className="block text-xs text-gray-400 mb-0.5">Cancel reason (optional)</label>
+              <label className="block text-xs text-zinc-400 mb-0.5">Cancel reason (optional)</label>
               <input
                 className="w-full bg-black border border-zinc-700 px-2 py-1.5 text-sm focus:outline-none focus:border-zinc-500"
                 value={cancelReason}
@@ -473,7 +477,7 @@ export function OrderManagement({
 
             {/* Refresh button */}
             <div className="flex justify-between items-center mb-2">
-              <span className="text-xs text-gray-500">Orders: {orders.length}</span>
+              <span className="text-xs text-zinc-500">Orders: {orders.length}</span>
               <button
                 onClick={() => loadInitial()}
                 disabled={loading}
@@ -491,7 +495,7 @@ export function OrderManagement({
                   <tr>
                     {['ID', 'Symbol', 'Action', 'Type', 'LmtPx', 'Status', 'Filled', 'Rem', 'AvgPx', 'Comm', ''].map(
                       (h) => (
-                        <th key={h} className="text-left p-1.5 text-gray-400 whitespace-nowrap">
+                        <th key={h} className="text-left p-1.5 text-zinc-400 whitespace-nowrap">
                           {h}
                         </th>
                       ),
@@ -510,7 +514,7 @@ export function OrderManagement({
                             {o.action ?? '—'}
                           </span>
                         </td>
-                        <td className="p-1.5 text-gray-400">{o.order_type ?? '—'}</td>
+                        <td className="p-1.5 text-zinc-400">{o.order_type ?? '—'}</td>
                         <td className="p-1.5">
                           {privacyMode
                             ? '••••'
@@ -529,7 +533,7 @@ export function OrderManagement({
                             const isPending = o.status?.toLowerCase() === 'pendingcancel';
                             if (isCancelling || isPending) {
                               return (
-                                <span className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-gray-500">
+                                <span className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-zinc-500">
                                   <RefreshCw className="w-3 h-3 animate-spin" />
                                   Cancelling…
                                 </span>
@@ -556,7 +560,7 @@ export function OrderManagement({
                   })}
                   {orders.length === 0 && (
                     <tr>
-                      <td colSpan={11} className="text-center text-gray-500 py-6">
+                      <td colSpan={11} className="text-center text-zinc-500 py-6">
                         No orders yet
                       </td>
                     </tr>

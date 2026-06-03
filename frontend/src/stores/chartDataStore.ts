@@ -20,6 +20,8 @@
 
 import { create } from 'zustand';
 import type { ChartTimeframe } from '../types';
+import { TIMEFRAME_DURATION } from '../constants/timeframes';
+import { getChartBffBaseUrl } from '../config/chartBff';
 
 // ============================================================================
 // Types
@@ -94,29 +96,6 @@ type ChartDataState = {
 // Config
 // ============================================================================
 
-function getChartBffBaseUrl(): string {
-  const defaultHost =
-    typeof window !== 'undefined' ? window.location.hostname : 'localhost';
-  const url =
-    typeof import.meta !== 'undefined' && import.meta.env?.VITE_CHART_BFF_URL
-      ? (import.meta.env.VITE_CHART_BFF_URL as string)
-      : `http://${defaultHost}:5002`;
-  return url || `http://${defaultHost}:5002`;
-}
-
-/** Bar duration in seconds for each timeframe */
-const TIMEFRAME_DURATION_SEC: Record<ChartTimeframe, number> = {
-  '10s': 10,
-  '1m': 60,
-  '5m': 300,
-  '15m': 900,
-  '30m': 1800,
-  '1h': 3600,
-  '4h': 14400,
-  '1D': 86400,
-  '1W': 604800,
-  '1M': 2592000,
-};
 
 /** Minimum refetch interval per timeframe (ms) — prevents hammering API */
 const MIN_REFETCH_INTERVAL: Record<ChartTimeframe, number> = {
@@ -148,9 +127,6 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
     const key = chartStoreKey(moduleId, tickerUpper);
     const existing = get().symbolBars[key];
 
-    // Skip if already loading
-    if (existing?.loading) return;
-
     // Skip if recently fetched for the same timeframe (unless previous fetch errored)
     if (
       existing &&
@@ -172,7 +148,7 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
         [key]: {
           bars: existing?.timeframe === timeframe ? existing.bars : [],
           timeframe,
-          barDurationSec: TIMEFRAME_DURATION_SEC[timeframe],
+          barDurationSec: TIMEFRAME_DURATION[timeframe],
           loading: true,
           error: null,
           source: existing?.source ?? null,
@@ -223,7 +199,7 @@ export const useChartDataStore = create<ChartDataState>()((set, get) => ({
           [key]: {
             bars: data.bars,
             timeframe,
-            barDurationSec: data.barDurationSec || TIMEFRAME_DURATION_SEC[timeframe],
+            barDurationSec: data.barDurationSec || TIMEFRAME_DURATION[timeframe],
             loading: false,
             error: null,
             source: data.source,

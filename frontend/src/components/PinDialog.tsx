@@ -49,13 +49,13 @@ export function PinDialog() {
       >
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-800">
-          <div className="flex items-center gap-2 text-sm text-gray-300">
+          <div className="flex items-center gap-2 text-sm text-zinc-300">
             <Lock className="w-4 h-4 text-yellow-500" />
             Unlock Privacy
           </div>
           <button
             onClick={closePinDialog}
-            className="p-0.5 hover:bg-zinc-700 rounded transition-colors text-gray-500 hover:text-gray-300"
+            className="p-0.5 hover:bg-zinc-700 rounded transition-colors text-zinc-500 hover:text-zinc-300"
           >
             <X className="w-4 h-4" />
           </button>
@@ -64,7 +64,7 @@ export function PinDialog() {
         {/* Body */}
         <form onSubmit={handleSubmit} className="p-4 space-y-3">
           <div>
-            <label className="block text-xs text-gray-400 mb-1">Enter PIN to reveal numbers</label>
+            <label className="block text-xs text-zinc-400 mb-1">Enter PIN to reveal numbers</label>
             <input
               ref={inputRef}
               type="password"
@@ -85,7 +85,7 @@ export function PinDialog() {
             <button
               type="button"
               onClick={closePinDialog}
-              className="flex-1 py-2 text-xs bg-zinc-800 hover:bg-zinc-700 text-gray-400 transition-colors rounded"
+              className="flex-1 py-2 text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-400 transition-colors rounded"
             >
               Cancel
             </button>

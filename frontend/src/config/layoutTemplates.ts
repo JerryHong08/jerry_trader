@@ -34,6 +34,13 @@ const FALLBACK_DEFAULT_TEMPLATE_ID = "04";
 const envDefaultTemplateId = import.meta.env.VITE_DEFAULT_TEMPLATE_ID?.trim();
 
 const resolveDefaultTemplateId = (): string => {
+  // 1. User's saved preference (localStorage) — survives refreshes and orientation switches
+  try {
+    const saved = localStorage.getItem('trading-system-template');
+    if (saved && LAYOUT_TEMPLATES[saved]) return saved;
+  } catch {}
+
+  // 2. Environment variable (build-time default)
   if (envDefaultTemplateId && LAYOUT_TEMPLATES[envDefaultTemplateId]) {
     return envDefaultTemplateId;
   }
@@ -44,10 +51,12 @@ const resolveDefaultTemplateId = (): string => {
     );
   }
 
+  // 3. Hardcoded fallback
   if (LAYOUT_TEMPLATES[FALLBACK_DEFAULT_TEMPLATE_ID]) {
     return FALLBACK_DEFAULT_TEMPLATE_ID;
   }
 
+  // 4. First available
   return Object.keys(LAYOUT_TEMPLATES)[0] ?? FALLBACK_DEFAULT_TEMPLATE_ID;
 };
 

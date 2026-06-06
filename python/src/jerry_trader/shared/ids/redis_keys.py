@@ -178,6 +178,25 @@ def news_ticker_zset(session_id: str, symbol: str) -> str:
     return f"news:ticker:{session_id}:{symbol}"
 
 
+def catalyst_publish_channel(session_id: str, symbol: str) -> str:
+    """Pub/sub channel for catalyst notifications.
+
+    NewsProcessor publishes to catalyst:{session}:{symbol} when a ticker
+    gets positive catalyst news. SignalEngine subscribes to catalyst:*
+    and fires CATALYST-trigger events without factor evaluation.
+    """
+    return f"catalyst:{session_id}:{symbol}"
+
+
+def news_catalyst_flag(session_id: str, symbol: str) -> str:
+    """STRING – "1" when NewsProcessor classifies at least one article
+    as a positive catalyst for this symbol.
+
+    Set with a 12h TTL by NewsProcessor. Checked by NotificationManager.
+    """
+    return f"news:catalyst:{session_id}:{symbol}"
+
+
 def news_ticker_prefix(session_id: str) -> str:
     return f"news:ticker:{session_id}"
 

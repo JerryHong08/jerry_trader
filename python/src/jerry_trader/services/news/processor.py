@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import socket
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +26,7 @@ from jerry_trader.domain.news.article import NewsArticle
 from jerry_trader.platform.config.config import load_prompt
 from jerry_trader.platform.config.session import make_session_id
 from jerry_trader.shared.ids.redis_keys import (
+    catalyst_publish_channel,
     news_article_stream,
     news_item_prefix,
     news_processor_results_stream,
@@ -338,6 +340,31 @@ class NewsProcessor:
 
             # Publish to stream
             self.r.xadd(self.NEWS_PROCESSOR_RESULTS_STREAM, stream_data)
+            # Set catalyst flag so SignalEngine notification rules can check it
+            if result.is_catalyst:
+                from jerry_trader.shared.ids.redis_keys import news_catalyst_flag
+
+                self.r.set(news_catalyst_flag(self.session_id, symbol), "1", ex=43200)
+                # Publish to pub/sub so SignalEngine can react in real-time
+                channel = catalyst_publish_channel(self.session_id, symbol)
+                self.r.publish(
+                    channel,
+                    json.dumps(
+                        {
+                            "symbol": symbol,
+                            "timestamp_ms": int(time.time() * 1000),
+                            "classification": result.classification,
+                            "score": result.score,
+                            "title": article.title,
+                            "url": article.url or "",
+                            "content_preview": (
+                                article.text[:500] if article.text else ""
+                            ),
+                            "source_from": article.source_from or "",
+                            "published_time": str(article.published_time),
+                        }
+                    ),
+                )
             logger.debug(
                 f"Published news processor result to stream: {symbol} - "
                 f"{'✅' if result.is_catalyst else '❌'} {result.score}"

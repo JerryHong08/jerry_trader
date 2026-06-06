@@ -664,6 +664,26 @@ class JerryTraderBackendStarter:
                     clickhouse_config=ch_cfg,
                 )
 
+            # ── Per-source Redis clients for pub/sub subscriptions ──────
+            # Each trigger source subscribes to {source}:* on its own Redis.
+            # Falls back to signal_redis when a source has no explicit redis.
+            source_redis_clients: dict[str, "redis_lib.Redis"] = {}
+            subscriptions_cfg = role_cfg.get("subscriptions", {})
+            for source_name, sub_cfg in subscriptions_cfg.items():
+                if not isinstance(sub_cfg, dict):
+                    continue
+                redis_cfg = sub_cfg.get("redis")
+                if redis_cfg and isinstance(redis_cfg, dict):
+                    source_redis_clients[source_name] = redis_lib.Redis(
+                        host=redis_cfg.get("host", "127.0.0.1"),
+                        port=redis_cfg.get("port", 6379),
+                        db=redis_cfg.get("db", 0),
+                    )
+                    logger.info(
+                        f"SignalEngine: {source_name} pub/sub → "
+                        f"{redis_cfg.get('host')}:{redis_cfg.get('port')}"
+                    )
+
             self.signal_engine = SignalEngine(
                 redis_client=signal_redis,
                 events_config_path=role_cfg.get(
@@ -673,7 +693,70 @@ class JerryTraderBackendStarter:
                 timeframes=role_cfg.get("timeframes"),
                 storage=signal_storage,
                 clickhouse_config=ch_cfg,
+                session_id=self.session_id,
+                event_names=role_cfg.get("event_names"),
+                source_redis_clients=source_redis_clients or None,
             )
+
+            # ── NotificationManager ─────────────────────────────────────
+            # notifications.enabled defaults to True when the block exists.
+            notifications_cfg = role_cfg.get("notifications", {})
+            if notifications_cfg.get("enabled", True):
+                from jerry_trader.services.signal.notification import (
+                    NotificationManager,
+                    SMTPConfig,
+                )
+
+                smtp_raw = notifications_cfg.get("smtp", {})
+                smtp = SMTPConfig(
+                    host=smtp_raw.get("host", "smtp.gmail.com"),
+                    port=smtp_raw.get("port", 587),
+                    username_env=smtp_raw.get("username_env", "GMAIL_USERNAME"),
+                    password_env=smtp_raw.get("password_env", "GMAIL_APP_PASSWORD"),
+                )
+
+                # Data Redis for NotificationManager (fundamentals, catalyst flags).
+                # Separate from pub/sub — use notifications.data_redis if set,
+                # otherwise fall back to signal_redis.
+                data_redis_cfg = notifications_cfg.get("data_redis")
+                if data_redis_cfg and isinstance(data_redis_cfg, dict):
+                    notif_redis = redis_lib.Redis(
+                        host=data_redis_cfg.get("host", "127.0.0.1"),
+                        port=data_redis_cfg.get("port", 6379),
+                        db=data_redis_cfg.get("db", 0),
+                    )
+                    logger.info(
+                        f"NotificationManager: data Redis → "
+                        f"{data_redis_cfg.get('host')}:{data_redis_cfg.get('port')}"
+                    )
+                else:
+                    notif_redis = signal_redis
+
+                # Market data Redis (price, change%, volume from snapshots).
+                # Optional — when set, NotificationManager does XREVRANGE on
+                # the market_snapshot_processed stream to enrich emails.
+                market_redis = None
+                market_redis_cfg = notifications_cfg.get("market_data_redis")
+                if market_redis_cfg and isinstance(market_redis_cfg, dict):
+                    market_redis = redis_lib.Redis(
+                        host=market_redis_cfg.get("host", "127.0.0.1"),
+                        port=market_redis_cfg.get("port", 6379),
+                        db=market_redis_cfg.get("db", 0),
+                        decode_responses=True,
+                    )
+                    logger.info(
+                        f"NotificationManager: market data Redis → "
+                        f"{market_redis_cfg.get('host')}:{market_redis_cfg.get('port')}"
+                    )
+
+                notif_manager = NotificationManager(
+                    redis_client=notif_redis,
+                    session_id=self.session_id,
+                    smtp_config=smtp,
+                    market_redis=market_redis,
+                )
+                self.signal_engine._notification_manager = notif_manager
+                logger.info(f"NotificationManager wired: smtp={smtp.host}:{smtp.port}")
             self._services.append(("SignalEngine", self.signal_engine))
         else:
             self.signal_engine = None

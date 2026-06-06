@@ -26,7 +26,7 @@ from typing import Any
 
 import redis
 
-from jerry_trader.domain.event import Event
+from jerry_trader.domain.event import Event, TriggerType
 from jerry_trader.services.backtest.event_evaluator import (
     EventEvaluator,
     MLEvaluationResult,
@@ -62,6 +62,10 @@ class SignalEngine:
         storage: Any | None = None,
         clickhouse_config: dict | None = None,
         return_fill_interval_sec: float = 120.0,
+        session_id: str = "",
+        notification_manager: Any | None = None,
+        event_names: list[str] | None = None,
+        source_redis_clients: dict[str, redis.Redis] | None = None,
     ):
         self.redis_client = redis_client
         self.events_config_path = events_config_path
@@ -70,6 +74,16 @@ class SignalEngine:
         self._storage = storage
         self._clickhouse_config = clickhouse_config
         self._return_fill_interval_sec = return_fill_interval_sec
+        self._session_id = session_id
+        self._notification_manager = notification_manager
+
+        # Event whitelist — if set, only these event names are active
+        self._event_names: list[str] | None = event_names
+
+        # Per-source Redis clients for pub/sub.
+        # Maps source type ("factors", "catalyst") → Redis client.
+        # Sources not in this dict fall back to self.redis_client.
+        self._source_redis_clients = source_redis_clients or {}
 
         # Event evaluator (shared logic with backtest)
         self._evaluator: EventEvaluator | None = None
@@ -78,8 +92,8 @@ class SignalEngine:
         self._ticker_states: dict[str, TickerState] = {}
         self._states_lock = threading.Lock()
 
-        # Subscription state
-        self._pubsub: redis.client.PubSub | None = None
+        # Subscription state — one pubsub per unique Redis client
+        self._pubsubs: list[redis.client.PubSub] = []
         self._thread: threading.Thread | None = None
         self._running = threading.Event()
 
@@ -118,10 +132,25 @@ class SignalEngine:
     def load_events(self) -> int:
         """Load events from events.yaml config file.
 
+        If _event_names is set, only those events are kept active.
+        Anti-patterns are always loaded (not affected by event filter).
+
         Returns:
             Number of events loaded.
         """
         self._evaluator = EventEvaluator(config_path=self.events_config_path)
+
+        # Filter events by whitelist if configured
+        if self._event_names:
+            whitelist = set(self._event_names)
+            self._evaluator.events = [
+                e for e in self._evaluator.events if e.name in whitelist
+            ]
+            missing = whitelist - {e.name for e in self._evaluator.events}
+            if missing:
+                logger.warning(
+                    f"SignalEngine: event_names not found in config: {missing}"
+                )
 
         event_count = len(self._evaluator.events)
         anti_count = len(self._evaluator.anti_patterns)
@@ -175,13 +204,13 @@ class SignalEngine:
     def stop(self) -> None:
         """Stop the signal engine."""
         self._running.clear()
-        if self._pubsub:
+        for ps in self._pubsubs:
             try:
-                self._pubsub.punsubscribe()
-                self._pubsub.unsubscribe()
-                self._pubsub.close()
+                ps.punsubscribe()
+                ps.close()
             except Exception:
                 pass
+        self._pubsubs.clear()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5.0)
         if self._return_fill_thread and self._return_fill_thread.is_alive():
@@ -193,61 +222,89 @@ class SignalEngine:
     # ─────────────────────────────────────────────────────────────────────────
 
     def _run_loop(self) -> None:
-        """Background thread: subscribe to Redis channels and process messages."""
-        self._pubsub = self.redis_client.pubsub()
+        """Background thread: subscribe to configured sources and process messages.
 
-        # Subscribe to factor channels for configured symbols and timeframes
-        channels: list[str] = []
-        use_pattern = False
-        if self.symbols:
-            for sym in self.symbols:
-                for tf in self.timeframes:
-                    channels.append(f"factors:{sym}:{tf}")
+        Each trigger source ("factors", "catalyst") subscribes to
+        ``{source}:*`` on its own Redis client (from source_redis_clients,
+        falling back to self.redis_client). Pub/sub connections are
+        grouped by Redis client to minimise connections.
+        """
+        # Resolve which sources to subscribe to.
+        # When subscriptions are explicitly configured, only subscribe to
+        # those sources. Otherwise subscribe to all on the main Redis.
+        if self._source_redis_clients:
+            source_types = list(self._source_redis_clients.keys())
         else:
-            # Subscribe to all factor channels via pattern
-            channels.append("factors:*")
-            use_pattern = True
+            source_types = ["factors", "catalyst"]  # backward compat
 
-        try:
-            if channels:
-                if use_pattern:
-                    self._pubsub.psubscribe(*channels)
-                else:
-                    self._pubsub.subscribe(*channels)
-                logger.info(f"SignalEngine: subscribed to {len(channels)} channels")
-            else:
-                logger.warning("SignalEngine: no channels to subscribe to")
-                return
-        except Exception as e:
-            logger.error(f"SignalEngine: subscribe failed - {e}")
+        # Group patterns by Redis client (dedup connections to the same Redis)
+        # redis_client → list of (source_type, pattern)
+        groups: dict[int, list[tuple[str, str]]] = {}
+        for src in source_types:
+            rc = self._source_redis_clients.get(src, self.redis_client)
+            key = id(rc)
+            if key not in groups:
+                groups[key] = []
+            groups[key].append((src, f"{src}:*"))
+
+        # Create one pubsub per unique Redis client
+        self._pubsubs = []
+        for rc_key, patterns in groups.items():
+            # Get the Redis client (any pattern's client works — same key = same rc)
+            rc = self._source_redis_clients.get(patterns[0][0], self.redis_client)
+            ps = rc.pubsub()
+            ps.psubscribe(*[p for _, p in patterns])
+            self._pubsubs.append(ps)
+            host = (
+                rc.get_connection_kwargs().get("host", "?")
+                if hasattr(rc, "get_connection_kwargs")
+                else "?"
+            )
+            src_names = [s for s, _ in patterns]
+            logger.info(f"SignalEngine: subscribed to {src_names} on Redis {host}")
+
+        if not self._pubsubs:
+            logger.warning("SignalEngine: no subscriptions configured")
             return
 
         while self._running.is_set():
-            try:
-                message = self._pubsub.get_message(timeout=0.1)
-                if message and message["type"] in ("message", "pmessage"):
-                    self._process_message(message)
-            except redis.ConnectionError:
-                logger.warning("SignalEngine: Redis connection lost, reconnecting...")
-                time.sleep(1.0)
-            except Exception as e:
-                logger.error(f"SignalEngine: error in message loop - {e}")
+            for ps in self._pubsubs:
+                try:
+                    message = ps.get_message(timeout=0.05)
+                    if message and message["type"] == "pmessage":
+                        self._route_message(message)
+                except redis.ConnectionError:
+                    logger.warning("SignalEngine: Redis connection lost")
+                    time.sleep(1.0)
+                except Exception as e:
+                    logger.error(f"SignalEngine: error in message loop - {e}")
 
         # Cleanup
-        try:
-            if use_pattern:
-                self._pubsub.punsubscribe()
-            else:
-                self._pubsub.unsubscribe()
-            self._pubsub.close()
-        except Exception:
-            pass
+        for ps in self._pubsubs:
+            try:
+                ps.punsubscribe()
+                ps.close()
+            except Exception:
+                pass
+        self._pubsubs.clear()
+
+    def _route_message(self, message: dict[str, Any]) -> None:
+        """Route a pmessage to the correct handler based on channel prefix."""
+        channel = message.get("channel", b"")
+        if isinstance(channel, bytes):
+            channel = channel.decode()
+        if channel.startswith("catalyst:"):
+            self._handle_catalyst_message(message)
+        else:
+            self._process_message(message)
 
     def _return_fill_loop(self) -> None:
         """Background thread: periodically run ReturnFiller to backfill returns."""
         from jerry_trader.services.signal.return_fill import ReturnFiller
 
-        filler = ReturnFiller(clickhouse_config=self._clickhouse_config)
+        filler = ReturnFiller(
+            clickhouse_config=self._clickhouse_config, session_id=self._session_id
+        )
 
         # Initial delay — wait for bars to accumulate before first run
         self._running.wait(timeout=60.0)
@@ -286,6 +343,73 @@ class SignalEngine:
             price = float(price)
 
         self._evaluate_events(symbol, timeframe, factors, timestamp_ms, price)
+
+    def _handle_catalyst_message(self, message: dict[str, Any]) -> None:
+        """Handle a catalyst pub/sub message from NewsProcessor.
+
+        Fires CATALYST-trigger events directly — no factor data needed.
+        Each catalyst message maps to one _on_trigger call per matching event.
+
+        Passes news metadata (title, classification, score) as extra context
+        so notification emails can include full news details.
+        """
+        try:
+            data = json.loads(message["data"])
+        except (json.JSONDecodeError, TypeError):
+            return
+
+        symbol = data.get("symbol", "").upper()
+        if not symbol:
+            return
+
+        timestamp_ms = data.get("timestamp_ms", int(time.time() * 1000))
+
+        if self._evaluator is None:
+            return
+
+        # Build extra context with news details for notification templates
+        extra: dict[str, Any] = {
+            "catalyst_title": data.get("title", ""),
+            "catalyst_classification": data.get("classification", ""),
+            "catalyst_score_raw": data.get("score", ""),
+            "catalyst_url": data.get("url", ""),
+            "catalyst_content": data.get("content_preview", ""),
+            "catalyst_source": data.get("source_from", ""),
+        }
+
+        # Find events with CATALYST trigger and fire _on_trigger
+        for event in self._evaluator.events:
+            if event.trigger != TriggerType.CATALYST:
+                continue
+
+            # Cooldown check
+            cooldown_key = (event.name, symbol)
+            last_ms = self._last_trigger.get(cooldown_key, 0)
+            if timestamp_ms - last_ms < self._trigger_cooldown_sec * 1000:
+                continue
+
+            self._last_trigger[cooldown_key] = timestamp_ms
+            self._trigger_count += 1
+
+            # Build minimal factors dict from catalyst payload
+            factors: dict[str, float] = {}
+            score = data.get("score", "")
+            if score:
+                try:
+                    # "7/10" → 7.0
+                    factors["catalyst_score"] = float(score.split("/")[0])
+                except (ValueError, IndexError):
+                    pass
+
+            self._on_trigger(
+                event=event,
+                symbol=symbol,
+                timeframe="catalyst",
+                factors=factors,
+                timestamp_ms=timestamp_ms,
+                price=None,
+                extra=extra,
+            )
 
     def _evaluate_events(
         self,
@@ -350,6 +474,7 @@ class SignalEngine:
         timestamp_ms: int,
         price: float | None = None,
         ml_result: MLEvaluationResult | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         """Handle a triggered event — log and persist to ClickHouse.
 
@@ -361,13 +486,25 @@ class SignalEngine:
             timestamp_ms: Trigger timestamp
             price: Trigger price
             ml_result: ML evaluation result (for ML-based events)
+            extra: Additional context (e.g., catalyst news details)
         """
-        factor_summary = ", ".join(f"{k}={v:.4f}" for k, v in factors.items())
+        # Build log message — include extra context for catalyst events
+        parts = [f"event={event.name}", f"symbol={symbol}", f"tf={timeframe}"]
+        if extra:
+            title = extra.get("catalyst_title", "")
+            classification = extra.get("catalyst_classification", "")
+            score = extra.get("catalyst_score_raw", "")
+            if title:
+                parts.append(f"title={title[:80]}")
+            if classification:
+                parts.append(f"classification={classification}")
+            if score:
+                parts.append(f"score={score}")
 
-        # Build log message
+        factor_summary = ", ".join(f"{k}={v:.4f}" for k, v in factors.items())
         log_msg = (
-            f"SIGNAL TRIGGERED: event={event.name} symbol={symbol} "
-            f"tf={timeframe} ts={timestamp_ms} stage={event.stage.value} "
+            f"SIGNAL TRIGGERED: {' '.join(parts)} "
+            f"ts={timestamp_ms} stage={event.stage.value} "
             f"factors=[{factor_summary}]"
         )
 
@@ -391,3 +528,20 @@ class SignalEngine:
                 factors=factors,
                 trigger_price=price,
             )
+
+        # Email notification (if event has notify config)
+        if self._notification_manager:
+            try:
+                self._notification_manager.evaluate(
+                    event=event,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    factors=factors,
+                    price=price,
+                    ml_result=ml_result,
+                    extra=extra,
+                )
+            except Exception as e:
+                logger.error(
+                    f"Notification error for event={event.name} symbol={symbol}: {e}"
+                )

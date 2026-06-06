@@ -178,6 +178,12 @@ def build_runtime_config(
                     yaml_cfg, "redis", heartbeat_redis_ref, role_name
                 )
 
+            # Resolve nested redis references in subscriptions
+            _resolve_subscription_redis(yaml_cfg, resolved_cfg, role_name)
+
+            # Resolve notifications.data_redis
+            _resolve_notification_data_redis(yaml_cfg, resolved_cfg, role_name)
+
             runtime["roles"][role_name] = resolved_cfg
 
     # Apply CLI overrides using dot notation
@@ -266,6 +272,44 @@ def _resolve_db_reference(
         resolved["url"] = os.getenv(database_url_env)
 
     return resolved
+
+
+def _resolve_subscription_redis(
+    yaml_cfg: dict, resolved_cfg: dict, role_name: str
+) -> None:
+    """Resolve ``redis`` refs inside ``subscriptions.*`` to full config dicts."""
+    subscriptions = resolved_cfg.get("subscriptions", {})
+    if not isinstance(subscriptions, dict):
+        return
+    for source_name, sub_cfg in subscriptions.items():
+        if not isinstance(sub_cfg, dict):
+            continue
+        db_ref = sub_cfg.get("redis")
+        if db_ref and isinstance(db_ref, str):
+            sub_cfg["redis"] = _resolve_db_reference(
+                yaml_cfg,
+                "redis",
+                db_ref,
+                f"{role_name}.subscriptions.{source_name}",
+            )
+
+
+def _resolve_notification_data_redis(
+    yaml_cfg: dict, resolved_cfg: dict, role_name: str
+) -> None:
+    """Resolve ``notifications.data_redis`` and ``market_data_redis`` refs."""
+    notifications = resolved_cfg.get("notifications", {})
+    if not isinstance(notifications, dict):
+        return
+    for field in ("data_redis", "market_data_redis"):
+        db_ref = notifications.get(field)
+        if db_ref and isinstance(db_ref, str):
+            notifications[field] = _resolve_db_reference(
+                yaml_cfg,
+                "redis",
+                db_ref,
+                f"{role_name}.notifications.{field}",
+            )
 
 
 def _normalize_date_fields(config: dict) -> None:

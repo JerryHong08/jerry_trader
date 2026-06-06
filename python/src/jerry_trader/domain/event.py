@@ -37,6 +37,7 @@ class TriggerType(Enum):
     PRICE_ACCEL = "price_accel"  # Sudden price acceleration
     TRADE_RATE_SPIKE = "trade_rate_spike"  # Sudden volume spike
     GAP_BREAKOUT = "gap_breakout"  # Breakout from consolidation
+    CATALYST = "catalyst"  # Ticker has positive catalyst news (non-factor trigger)
     CONTINUOUS = "continuous"  # Legacy: every timestamp (deprecated)
 
 
@@ -121,6 +122,30 @@ class Condition:
 
 
 @dataclass
+class NotifyConfig:
+    """Email notification config embedded in an Event.
+
+    When set on an Event, triggers an email whenever the event fires.
+    extra_conditions are AND'd with the event's own conditions.
+    """
+
+    enabled: bool = False
+    extra_conditions: list[Condition] = field(default_factory=list)
+    catalysts: bool = False
+    cooldown_sec: int = 300
+    subject_template: str = "JerryTrader: {event_name} on {symbol}"
+    body_template: str = (
+        "Symbol: {symbol}\n"
+        "Event: {event_name}\n"
+        "Price: {price}\n"
+        "Float: {float}\n"
+        "MarketCap: {marketCap}\n"
+        "Sector: {sector}\n"
+        "Timeframe: {timeframe}"
+    )
+
+
+@dataclass
 class Event:
     """Event definition - semantic signal category with trigger-based architecture.
 
@@ -177,6 +202,7 @@ class Event:
     min_win_rate: float = 0.0  # Historical win_rate from validation
     signal_count: int = 0  # Historical sample count
     action: EventAction = EventAction.ACCEPT
+    notify: NotifyConfig | None = None  # Email notification on trigger
 
     def matches(self, signal: dict) -> bool:
         """Check if signal matches all conditions (Boolean filter).

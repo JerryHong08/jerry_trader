@@ -53,7 +53,7 @@ databases:
 # =============================================================================
 machines:
   wsl2:
-    limit: "null"    # market_open | market_close | null (never stop)
+    limit: "market_open"    # market_open | market_close | null (never stop)
     roles:
       BarsBuilder:
         enabled: true
@@ -67,7 +67,7 @@ machines:
         bootstrap_late_arrival_ms: 0
         bootstrap_idle_close_ms: 1
         timeframes: ["10s", "1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"] # supported bar timeframes
-        manager_type: "synced-replayer" # choices=["polygon", "theta", "replayer", "synced-replayer"]
+        manager_type: "polygon" # choices=["polygon", "theta", "replayer", "synced-replayer"]
           # - "10s"
           # - "1m"
           # - "5m"
@@ -100,17 +100,43 @@ machines:
         enabled: true
         redis: "redis-a"
         clickhouse: "clickhouse-a"
-        rules_dir: "config/rules/"
         symbols: []  # empty = subscribe to all
         timeframes: ["trade", "10s", "1m", "5m"]
-      JerryTraderBFF:
-        enabled: true
-        host: "0.0.0.0"
-        port: 5001
-        debug: false
-        redis: "redis-a"
-        # influxdb: "influxdb-b"
-        clickhouse: "clickhouse-a"
+        event_names: ["catalyst_alert"]  # Whitelist: only evaluate these events
+
+        # ── Trigger-source subscriptions ──────────────────────────────────
+        # Each source subscribes to "{source}:*" pub/sub on its own Redis.
+        # Comment out a source to skip it entirely.
+        subscriptions:
+          # factors:
+          #   redis: "redis-a"
+          catalyst:
+            redis: "redis-a@MIBUNTU"  # cross-machine: NewsProcessor on mibuntu
+
+        # ── Email notifications ───────────────────────────────────────────
+        notifications:
+          enabled: true
+          smtp:
+            host: "smtp.gmail.com"
+            port: 587
+            username_env: "GMAIL_USERNAME"
+            password_env: "GMAIL_APP_PASSWORD"
+          # Redis for fundamentals + catalyst flag lookups.
+          # When NewsProcessor runs on another machine, point there.
+          # Defaults to SignalEngine.redis if not specified.
+          data_redis: "redis-a@MIBUNTU"
+          # Redis for market data (price, change%, volume from snapshots).
+          # XREVRANGE on market_snapshot_processed stream.
+          # Omit if market data is unavailable.
+          market_data_redis: "redis-b@MIBUNTU"
+      # JerryTraderBFF:
+      #   enabled: true
+      #   host: "0.0.0.0"
+      #   port: 5001
+      #   debug: false
+      #   redis: "redis-a"
+      #   # influxdb: "influxdb-b"
+      #   clickhouse: "clickhouse-a"
       # SnapshotProcessor:
       #   enabled: true
       #   redis: "redis-a"
@@ -137,8 +163,8 @@ machines:
     roles:
       NewsProcessor:
         enabled: true
-        redis: "redis-b@OLDMAN"
-        postgres: "postgres-b@OLDMAN"
+        redis: "redis-a"
+        postgres: "postgres-a"
       NewsWorker:
         enabled: true
         poll_interval: 1.0
@@ -149,8 +175,8 @@ machines:
           - momo
           - benzinga
           - fmp
-        redis: "redis-b@OLDMAN"
-        postgres: "postgres-b@OLDMAN"
+        redis: "redis-a"
+        postgres: "postgres-a"
       AgentBFF:
         enabled: true
         host: "0.0.0.0"

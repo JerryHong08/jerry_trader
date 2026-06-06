@@ -299,6 +299,30 @@ class EventEvaluator:
         # Parse pre_condition (default: None)
         pre_condition = yaml_event.get("pre_condition")
 
+        # Parse notify config (optional)
+        notify_config = None
+        notify_data = yaml_event.get("notify")
+        if notify_data and notify_data.get("enabled", False):
+            from jerry_trader.domain.event import NotifyConfig
+
+            extra_conditions = [
+                Condition(factor=c["factor"], op=c["op"], value=c["value"])
+                for c in notify_data.get("extra_conditions", [])
+            ]
+            notify_config = NotifyConfig(
+                enabled=True,
+                extra_conditions=extra_conditions,
+                catalysts=notify_data.get("catalysts", False),
+                cooldown_sec=notify_data.get("cooldown_sec", 300),
+                subject_template=notify_data.get(
+                    "subject_template", "JerryTrader: {event_name} on {symbol}"
+                ),
+                body_template=notify_data.get(
+                    "body_template",
+                    "Symbol: {symbol}\nEvent: {event_name}\nTimeframe: {timeframe}\nPrice: {price}\nFactors: {factors}",
+                ),
+            )
+
         return Event(
             name=yaml_event["name"],
             semantic=yaml_event.get("description", ""),
@@ -312,6 +336,7 @@ class EventEvaluator:
             min_win_rate=validation.get("min_win_rate", 0.0),
             signal_count=validation.get("signal_count", 0),
             action=action,
+            notify=notify_config,
         )
 
     def match_signal(self, signal: dict) -> Optional[Event]:

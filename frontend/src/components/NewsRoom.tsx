@@ -247,7 +247,7 @@ export default function NewsRoom({ moduleId }: ModuleProps) {
             <p className="text-sm">Results will appear here in real-time as news is processed</p>
           </div>
         ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
+          <div className="flex flex-col gap-3">
             {filteredResults.map((result) => (
               <div
                 key={result.id}

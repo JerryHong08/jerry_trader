@@ -36,9 +36,15 @@ class ReturnFiller:
     SIGNAL_TABLE = "signal_events"
     OHLCV_TABLE = "ohlcv_bars"
 
-    def __init__(self, ch_client: Any = None, clickhouse_config: Optional[dict] = None):
+    def __init__(
+        self,
+        ch_client: Any = None,
+        clickhouse_config: Optional[dict] = None,
+        session_id: str = "",
+    ):
         self._ch = ch_client
         self._ch_config = clickhouse_config
+        self._session_id = session_id
 
     def _get_client(self):
         """Get ClickHouse client — use shared client or create thread-local one."""
@@ -78,7 +84,7 @@ class ReturnFiller:
         # Fetch events needing return computation
         events = self._fetch_pending_events(limit)
         if not events:
-            logger.info("ReturnFiller: no pending events")
+            logger.debug("ReturnFiller: no pending events")
             return 0
 
         logger.info(f"ReturnFiller: processing {len(events)} events")
@@ -102,11 +108,14 @@ class ReturnFiller:
             FROM {self.SIGNAL_TABLE} FINAL
             WHERE return_1m IS NULL
               AND trigger_price IS NOT NULL
+              AND session = %(session)s
             ORDER BY trigger_time ASC
             LIMIT %(limit)u
         """
         try:
-            result = self._get_client().query(query, parameters={"limit": limit})
+            result = self._get_client().query(
+                query, parameters={"limit": limit, "session": self._session_id}
+            )
             return [
                 {
                     "id": row[0],

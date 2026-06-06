@@ -46,6 +46,19 @@ events:
       expected_return: 0.02
       min_win_rate: 0.45
       signal_count: 30
+    notify:
+      enabled: true  # Set true to receive email when this event fires
+      catalysts: true # Only send if ticker has catalyst news
+      cooldown_sec: 300
+      subject_template: "JerryTrader: {event_name} on {symbol}"
+      body_template: |
+        Symbol: {symbol}
+        Event: {event_name}
+        Price: {price}
+        Float: {float}
+        MarketCap: {marketCap}
+        Sector: {sector}
+        Timeframe: {timeframe}
 
   # Stronger WATCH — still minimal discrimination since all top20 tickers gap > 10%
   - name: gap_up_watch_strong
@@ -61,6 +74,32 @@ events:
       expected_return: 0.03
       min_win_rate: 0.50
       signal_count: 20
+
+  # ────────────────────────────────────────────────────────────────────────
+  # Catalyst-triggered event (non-factor)
+  # Trigger: CATALYST - NewsProcessor publishes to catalyst:* pub/sub
+  # No factor data needed — fires on every positive catalyst detection
+  # ────────────────────────────────────────────────────────────────────────
+
+  - name: catalyst_alert
+    description: "Positive catalyst news detected"
+    stage: watch
+    trigger: catalyst
+    conditions: []
+    notify:
+      enabled: true  # Set true to receive email on every catalyst detection
+      catalysts: false  # Already a catalyst — no need to double-check
+      cooldown_sec: 300
+      subject_template: "Catalyst: {symbol} - {catalyst_classification} {catalyst_score_raw}"
+      body_template: |
+        Symbol: {symbol}
+        Price: {price} | Change: {change_pct}% | Volume: {volume}
+        Classification: {catalyst_classification} ({catalyst_score_raw})
+        Title: {catalyst_title}
+        Content: {catalyst_content}
+        URL: {catalyst_url}
+        Source: {catalyst_source}
+        Float: {float} | MarketCap: {marketCap} | Sector: {sector}
 
   # ────────────────────────────────────────────────────────────────────────
   # Stage 2: ENTRY (入场)

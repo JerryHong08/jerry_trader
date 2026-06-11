@@ -4,6 +4,7 @@ import {
 } from 'lucide-react';
 import type { NewsProcessorResult } from '../../types';
 import { subscribeNewsProcessorResults, reconnectAgentWebSocket } from '../../hooks/useWebSocket';
+import { formatTimestampET } from '../../utils/format';
 
 // ---- Props -------------------------------------------------------------------
 
@@ -26,7 +27,7 @@ export function MobileNewsPage({ onSelectSymbol }: MobileNewsPageProps) {
   useEffect(() => {
     const unsub = subscribeNewsProcessorResults((data) => {
       const result: NewsProcessorResult = {
-        id: data.timestamp || Date.now().toString(),
+        id: `${data.symbol || '??'}-${data.timestamp || Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         model: data.model,
         symbol: data.symbol,
         is_catalyst: data.is_catalyst,
@@ -51,9 +52,9 @@ export function MobileNewsPage({ onSelectSymbol }: MobileNewsPageProps) {
     return unsub;
   }, []);
 
-  // Filter
+  // Filter and sort (newest first by published_time)
   const filtered = useMemo(() => {
-    return results.filter((r) => {
+    const filteredResults = results.filter((r) => {
       if (model !== 'all' && r.model !== model) return false;
       if (symbolFilter && !r.symbol.toLowerCase().includes(symbolFilter.toLowerCase())) return false;
       if (catalyst !== 'all') {
@@ -74,20 +75,21 @@ export function MobileNewsPage({ onSelectSymbol }: MobileNewsPageProps) {
       }
       return true;
     });
+
+    // Sort by published_time descending (newest first)
+    filteredResults.sort((a, b) => {
+      const aTime = new Date(a.published_time).getTime() || 0;
+      const bTime = new Date(b.published_time).getTime() || 0;
+      return bTime - aTime;
+    });
+
+    return filteredResults;
   }, [results, model, symbolFilter, catalyst, searchText]);
 
   const stats = useMemo(() => ({
     total: filtered.length,
     catalysts: filtered.filter((r) => r.is_catalyst).length,
   }), [filtered]);
-
-  const formatTime = (ts: string) => {
-    try {
-      const d = new Date(ts);
-      if (isNaN(d.getTime())) return ts;
-      return d.toLocaleString();
-    } catch { return ts; }
-  };
 
   const getExplanation = (exp: unknown): string => {
     if (typeof exp === 'string') return exp;
@@ -195,7 +197,7 @@ export function MobileNewsPage({ onSelectSymbol }: MobileNewsPageProps) {
                   {item.is_catalyst && (
                     <span className="text-emerald-400 font-semibold">✓ catalyst</span>
                   )}
-                  <span>{formatTime(item.published_time)}</span>
+                  <span>{formatTimestampET(item.published_time)}</span>
                 </div>
 
                 {/* Explanation preview */}

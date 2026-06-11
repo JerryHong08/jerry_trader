@@ -37,6 +37,7 @@ load_dotenv()
 import redis
 
 from jerry_trader.platform.config.session import make_session_id, parse_session_id
+from jerry_trader.services.market_data.static.borrow_fee_fetch import BorrowFeeProvider
 from jerry_trader.services.market_data.static.fundamentals_fetch import (
     FloatSharesProvider,
     FundamentalsFetcher,
@@ -111,6 +112,7 @@ class StaticDataWorker:
         # Initialize fetchers
         self.fundamentals_fetcher = FundamentalsFetcher()
         self.float_provider = FloatSharesProvider()
+        self.borrow_fee_provider = BorrowFeeProvider()
 
         self._running = False
         self._processed_count = 0
@@ -312,7 +314,28 @@ class StaticDataWorker:
         except Exception as e:
             logger.warning(f"Failed to fetch float shares for {symbol}: {e}")
 
-        # 3. Add timestamps
+        # 3. Fetch borrow fee (from chartexchange.com)
+        try:
+            borrow_data = await asyncio.to_thread(
+                self.borrow_fee_provider.extract_realtime_borrow_fee, symbol
+            )
+            if borrow_data:
+                summary_data["borrow_fee"] = borrow_data["borrow_fee"]
+                summary_data["available_shares"] = borrow_data["available_shares"]
+                fields_updated.append("borrow_fee")
+                fields_updated.append("available_shares")
+                logger.debug(
+                    f"Fetched borrow fee for {symbol}: "
+                    f"fee={borrow_data['borrow_fee']:.2%}, "
+                    f"available={borrow_data['available_shares']:,}"
+                )
+            else:
+                logger.debug(f"No borrow fee data available for {symbol}")
+
+        except Exception as e:
+            logger.warning(f"Failed to fetch borrow fee for {symbol}: {e}")
+
+        # 4. Add timestamps
         timestamp_str = current_timestamp.isoformat()
         summary_data["lastUpdated"] = timestamp_str
         profile_data["lastUpdated"] = timestamp_str

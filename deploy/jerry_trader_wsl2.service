@@ -1,0 +1,12 @@
+[Unit]
+Description=JerryTrader WSL2 Backend (BarsBuilder + ChartBFF + FactorEngine + SignalEngine)
+
+[Service]
+User=jerryhong
+WorkingDirectory=/home/jerryhong/code-projects/jerry_trader
+EnvironmentFile=/home/jerryhong/code-projects/jerry_trader/.env
+ExecStart=/home/jerryhong/.cache/pypoetry/virtualenvs/jerry-trader-2cf1-71p-py3.12/bin/python -u \
+    python/src/jerry_trader/runtime/backend_starter.py --machine wsl2
+Restart=no
+StandardOutput=journal
+StandardError=journal

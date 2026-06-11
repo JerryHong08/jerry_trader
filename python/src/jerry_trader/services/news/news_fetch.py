@@ -506,6 +506,10 @@ class MoomooStockResolver:
                 try:
                     article_url = item.get("url", "")
 
+                    # Use API abstract as initial text fallback (scraping may fail)
+                    if not item.get("text"):
+                        item["text"] = item.get("abstract", "")
+
                     # Fetch content with rate limiting if available
                     if article_url:
                         if content_limiter:
@@ -513,7 +517,9 @@ class MoomooStockResolver:
                                 content = await self._fetch_content_async(article_url)
                         else:
                             content = await self._fetch_content_async(article_url)
-                        item["text"] = content
+                        # Only overwrite if scraping returned useful content
+                        if content:
+                            item["text"] = content
 
                     article = NewsArticleAdapter.from_momo_web_response(
                         symbol.upper(), item
@@ -576,7 +582,11 @@ class MoomooStockResolver:
                 content_divs = tree.xpath(
                     "//div[contains(@class, 'feed-detail')]//div[contains(@class, 'rich-text-wrapper')]"
                 )
-                full_text = content_divs[0].text_content().strip()
+                if not content_divs:
+                    logger.warning(f"Could not find content div for URL: {url}")
+                    return None
+                best = max(content_divs, key=lambda d: len(d.text_content()))
+                full_text = best.text_content().strip()
 
                 # Clean up HTML entities
                 full_text = full_text.replace("&#39;", "'")
@@ -591,11 +601,29 @@ class MoomooStockResolver:
                 lines = [line for line in lines if len(line) > 20]
                 full_text = "\n\n".join(lines)
             else:
-                content_divs = tree.xpath(
-                    "//div[contains(@class, 'inner') and contains(@class, 'origin_content')]"  # | pup 'div.inner.origin_content * text{}'
-                )
+                # Primary: .newsDetail is the main article container (title + body + stock bar).
+                # Fallback: .inner.origin_content for older page layouts.
+                content_divs = tree.xpath("//div[contains(@class, 'newsDetailBox')]")
+                if not content_divs:
+                    content_divs = tree.xpath("//div[contains(@class, 'newsDetail')]")
+                if not content_divs:
+                    content_divs = tree.xpath(
+                        "//div[contains(@class, 'inner') and contains(@class, 'origin_content')]"
+                    )
 
-                full_text = content_divs[0].text_content().strip()
+                if not content_divs:
+                    logger.warning(f"Could not find content div for URL: {url}")
+                    return None
+
+                # Multiple matches possible: trending widget, sidebar, actual article.
+                # Pick the longest match — the article body dwarfs any cross-site widget.
+                if len(content_divs) > 1:
+                    logger.debug(
+                        f"XPath matched {len(content_divs)} elements for {url}, "
+                        f"picking longest"
+                    )
+                best = max(content_divs, key=lambda d: len(d.text_content()))
+                full_text = best.text_content().strip()
 
                 if full_text.endswith("Read more"):
                     full_text = full_text[:-9].strip()

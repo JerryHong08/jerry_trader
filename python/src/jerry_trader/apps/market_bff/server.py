@@ -225,6 +225,7 @@ class JerryTraderBFF:
         self._static_task = None
         self._article_task = None  # New - article stream listener
         self._news_processor_results_task = None  # News processor results listener
+        self._heartbeat_task = None  # Application-level ws heartbeat
 
         # Create FastAPI app with lifespan
         @asynccontextmanager
@@ -243,6 +244,7 @@ class JerryTraderBFF:
             self._news_processor_results_task = asyncio.create_task(
                 self._news_processor_results_listener()
             )
+            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
             yield
 
@@ -259,6 +261,8 @@ class JerryTraderBFF:
                 self._article_task.cancel()
             if self._news_processor_results_task:
                 self._news_processor_results_task.cancel()
+            if self._heartbeat_task:
+                self._heartbeat_task.cancel()
             self.cleanup()
 
         self.app = FastAPI(
@@ -708,7 +712,12 @@ class JerryTraderBFF:
             if summary_data:
                 summary_parsed = {}
                 for field, value in summary_data.items():
-                    if field in ["marketCap", "float"]:
+                    if field in ["marketCap", "float", "available_shares"]:
+                        try:
+                            summary_parsed[field] = float(value)
+                        except (ValueError, TypeError):
+                            summary_parsed[field] = value
+                    elif field == "borrow_fee":
                         try:
                             summary_parsed[field] = float(value)
                         except (ValueError, TypeError):
@@ -1120,7 +1129,16 @@ class JerryTraderBFF:
                                 summary_key = f"{self.STATIC_SUMMARY_PREFIX}:{symbol}"
                                 summary_data = self.r.hgetall(summary_key)
                                 for field, value in (summary_data or {}).items():
-                                    if field in ["marketCap", "float"]:
+                                    if field in [
+                                        "marketCap",
+                                        "float",
+                                        "available_shares",
+                                    ]:
+                                        try:
+                                            summary_parsed[field] = float(value)
+                                        except (ValueError, TypeError):
+                                            summary_parsed[field] = value
+                                    elif field == "borrow_fee":
                                         try:
                                             summary_parsed[field] = float(value)
                                         except (ValueError, TypeError):
@@ -1452,7 +1470,27 @@ class JerryTraderBFF:
             host=self.host,
             port=self.port,
             log_level="debug" if debug else "info",
+            ws_ping_interval=15.0,  # protocol-level ping every 15s
+            ws_ping_timeout=60.0,  # 60s grace for pong (was default 20s)
         )
+
+    async def _heartbeat_loop(self) -> None:
+        """Send application-level ping to all connected clients every 15s.
+
+        Keeps the WebSocket warm across cross-machine connections so
+        intermediate proxies and Tailscale tunnels don't drop idle links.
+        The frontend responds with ``{"type": "pong"}`` — no further
+        processing needed here.
+        """
+        while self._running:
+            await asyncio.sleep(15.0)
+            for client_id in list(self.manager.active_connections.keys()):
+                try:
+                    await self.manager.send_personal_message(
+                        {"type": "ping"}, client_id
+                    )
+                except Exception:
+                    pass  # Client may have disconnected; manager cleans up on next op
 
     def cleanup(self):
         """Clean up resources on shutdown."""

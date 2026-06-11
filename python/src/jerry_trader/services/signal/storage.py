@@ -6,6 +6,7 @@ import uuid
 from typing import Any, Optional
 
 from jerry_trader.shared.logging.logger import setup_logger
+from jerry_trader.shared.time.timezone import ms_to_et
 
 logger = setup_logger(__name__, log_to_file=True)
 
@@ -135,7 +136,7 @@ class SignalStorage:
             )
             logger.info(
                 f"SignalStorage: wrote event {rule_id}/{symbol} "
-                f"at ts={trigger_time_ns}"
+                f"at ts={ms_to_et(trigger_time_ns // 1_000_000)}"
             )
             return True
         except Exception as e:

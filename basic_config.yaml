@@ -20,8 +20,8 @@ data:
 # Multi-machine settings (only used when mode=server or mode=client)
 multi_machine:
   server:
-    ssh_alias: "oldman"  # SSH alias or hostname (must have key-based auth)
-    data_dir: "/home/oldman/quant_data/polygon_data"  # remote data directory
+    ssh_alias: "mibuntu"  # SSH alias or hostname (must have key-based auth)
+    data_dir: "/home/mibuntu/quant_data/polygon_data"  # remote data directory
 
 # Directories to sync from server to client (relative to data_dir)
 # Only used when mode=client

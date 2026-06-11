@@ -38,6 +38,8 @@ const STATIC_FIELDS = [
   'hasNews',
   'country',
   'sector',
+  'borrow_fee',
+  'available_shares',
 ] as const;
 
 // Entity type with optional state until state event arrives
@@ -52,6 +54,8 @@ export type RankEntity = Omit<RankItem, 'state'> & {
   hasNews?: boolean;
   country?: string;
   sector?: string;
+  borrow_fee?: number;
+  available_shares?: number;
   // Version tracking for static data (per domain)
   _staticVersions?: {
     summary?: number;
@@ -329,7 +333,7 @@ export const useMarketDataStore = create<MarketDataState>()(
               patched._staticVersions = {};
             }
             // Determine domain from data fields
-            if ('marketCap' in data || 'float' in data || 'country' in data || 'sector' in data) {
+            if ('marketCap' in data || 'float' in data || 'country' in data || 'sector' in data || 'borrow_fee' in data || 'available_shares' in data) {
               patched._staticVersions.summary = version;
             }
             if ('hasNews' in data) {
@@ -354,11 +358,13 @@ export const useMarketDataStore = create<MarketDataState>()(
             hasNews: data.hasNews,
             country: data.country,
             sector: data.sector,
+            borrow_fee: data.borrow_fee,
+            available_shares: data.available_shares,
           };
           // Track version if provided
           if (version !== undefined) {
             newEntity._staticVersions = {};
-            if ('marketCap' in data || 'float' in data || 'country' in data || 'sector' in data) {
+            if ('marketCap' in data || 'float' in data || 'country' in data || 'sector' in data || 'borrow_fee' in data || 'available_shares' in data) {
               newEntity._staticVersions.summary = version;
             }
             if ('hasNews' in data) {

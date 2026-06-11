@@ -71,7 +71,7 @@ export interface OverviewChartModuleSettings {
   topN?: number; // Number of top tickers to request from backend
 }
 
-export type RankListSortColumn = 'symbol' | 'state' | 'price' | 'changePercent' | 'volume' | 'marketCap' | 'float' | 'relativeVolumeDaily' | 'relativeVolume5min' | 'news' | 'vwap';
+export type RankListSortColumn = 'symbol' | 'state' | 'price' | 'changePercent' | 'volume' | 'marketCap' | 'float' | 'relativeVolumeDaily' | 'relativeVolume5min' | 'news' | 'vwap' | 'borrow_fee' | 'available_shares';
 export type RankListSortDirection = 'asc' | 'desc';
 
 export interface RankListModuleSettings {
@@ -199,6 +199,8 @@ export interface RankItem {
   hasNews?: boolean;      // Whether ticker has news articles
   country?: string;       // Country of company (e.g., "US")
   sector?: string;        // Sector classification (e.g., "Technology")
+  borrow_fee?: number;    // Annual borrow fee rate (e.g., 0.35 = 35%)
+  available_shares?: number; // Shares available to borrow
 }
 
 export interface CandlestickData {

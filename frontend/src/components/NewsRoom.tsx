@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { Newspaper, Filter, ExternalLink, TrendingUp, TrendingDown, Search, X, RefreshCw } from 'lucide-react';
 import type { ModuleProps, NewsProcessorResult } from '../types';
 import { subscribeNewsProcessorResults, reconnectAgentWebSocket } from '../hooks/useWebSocket';
+import { formatTimestampET } from '../utils/format';
 
 interface NewsRoomFilters {
   model: string;
@@ -25,7 +26,7 @@ export default function NewsRoom({ moduleId }: ModuleProps) {
   useEffect(() => {
     const unsubscribe = subscribeNewsProcessorResults((data) => {
       const result: NewsProcessorResult = {
-        id: data.timestamp || Date.now().toString(),
+        id: `${data.symbol || '??'}-${data.timestamp || Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         model: data.model,
         symbol: data.symbol,
         is_catalyst: data.is_catalyst,
@@ -54,9 +55,9 @@ export default function NewsRoom({ moduleId }: ModuleProps) {
     return unsubscribe;
   }, []);
 
-  // Filter results
+  // Filter and sort results (newest first by published_time)
   const filteredResults = useMemo(() => {
-    return results.filter((result) => {
+    const filtered = results.filter((result) => {
       // Model filter
       if (filters.model !== 'all' && result.model !== filters.model) {
         return false;
@@ -95,6 +96,15 @@ export default function NewsRoom({ moduleId }: ModuleProps) {
 
       return true;
     });
+
+    // Sort by published_time descending (newest first)
+    filtered.sort((a, b) => {
+      const aTime = new Date(a.published_time).getTime() || 0;
+      const bTime = new Date(b.published_time).getTime() || 0;
+      return bTime - aTime;
+    });
+
+    return filtered;
   }, [results, filters]);
 
   // Stats
@@ -105,16 +115,6 @@ export default function NewsRoom({ moduleId }: ModuleProps) {
       nonCatalysts: filteredResults.filter((r) => !r.is_catalyst).length,
     };
   }, [filteredResults]);
-
-  const formatTime = (timeStr: string) => {
-    try {
-      const date = new Date(timeStr);
-      if (isNaN(date.getTime())) return timeStr;
-      return date.toLocaleString();
-    } catch {
-      return timeStr;
-    }
-  };
 
   const getExplanationText = (explanation: unknown) => {
     if (typeof explanation === 'string') {
@@ -292,8 +292,8 @@ export default function NewsRoom({ moduleId }: ModuleProps) {
 
                 {/* Footer with time and link */}
                 <div className="flex items-center justify-between text-xs text-zinc-500 pt-2 border-t border-zinc-700">
-                  <span title={`Published: ${formatTime(result.published_time)}`}>
-                    {formatTime(result.published_time).split(',')[0]}
+                  <span title={`Published: ${formatTimestampET(result.published_time)}`}>
+                    {formatTimestampET(result.published_time)}
                   </span>
                   {result.url && (
                     <a

@@ -678,6 +678,7 @@ class JerryTraderBackendStarter:
                         host=redis_cfg.get("host", "127.0.0.1"),
                         port=redis_cfg.get("port", 6379),
                         db=redis_cfg.get("db", 0),
+                        decode_responses=True,
                     )
                     logger.info(
                         f"SignalEngine: {source_name} pub/sub → "

@@ -178,14 +178,16 @@ def news_ticker_zset(session_id: str, symbol: str) -> str:
     return f"news:ticker:{session_id}:{symbol}"
 
 
-def catalyst_publish_channel(session_id: str, symbol: str) -> str:
-    """Pub/sub channel for catalyst notifications.
+def catalyst_channel(session_id: str) -> str:
+    """Single pub/sub channel for all catalyst notifications.
 
-    NewsProcessor publishes to catalyst:{session}:{symbol} when a ticker
-    gets positive catalyst news. SignalEngine subscribes to catalyst:*
-    and fires CATALYST-trigger events without factor evaluation.
+    NewsProcessor publishes every positive-catalyst ticker to this channel.
+    SignalEngine subscribes to catalyst:* and fires CATALYST-trigger events
+    without factor evaluation.
+
+    Symbol is carried in the JSON payload — no need for per-symbol channels.
     """
-    return f"catalyst:{session_id}:{symbol}"
+    return f"catalyst:{session_id}"
 
 
 def news_catalyst_flag(session_id: str, symbol: str) -> str:

@@ -90,16 +90,18 @@ events:
       enabled: true  # Set true to receive email on every catalyst detection
       catalysts: false  # Already a catalyst — no need to double-check
       cooldown_sec: 300
-      subject_template: "Catalyst: {symbol} - {catalyst_classification} {catalyst_score_raw}"
+      subject_template: "Catalyst: {symbol} - {catalyst_title} ({catalyst_score_raw})"
       body_template: |
         Symbol: {symbol}
-        Price: {price} | Change: {change_pct}% | Volume: {volume}
-        Classification: {catalyst_classification} ({catalyst_score_raw})
         Title: {catalyst_title}
-        Content: {catalyst_content}
+        Classification: {catalyst_classification} ({catalyst_score_raw})
+        Price: {price} | Change: {change_pct}% | Volume: {volume}
+        Float: {float} | MarketCap: {marketCap} | Sector: {sector}
+        Published: {catalyst_published_time}
+        Processed: {catalyst_fetched_time}
         URL: {catalyst_url}
         Source: {catalyst_source}
-        Float: {float} | MarketCap: {marketCap} | Sector: {sector}
+        Content: {catalyst_content}
 
   # ────────────────────────────────────────────────────────────────────────
   # Stage 2: ENTRY (入场)

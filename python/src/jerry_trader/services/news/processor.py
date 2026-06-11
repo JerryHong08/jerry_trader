@@ -26,7 +26,7 @@ from jerry_trader.domain.news.article import NewsArticle
 from jerry_trader.platform.config.config import load_prompt
 from jerry_trader.platform.config.session import make_session_id
 from jerry_trader.shared.ids.redis_keys import (
-    catalyst_publish_channel,
+    catalyst_channel,
     news_article_stream,
     news_item_prefix,
     news_processor_results_stream,
@@ -333,7 +333,7 @@ class NewsProcessor:
                 "current_time": timestamp,
                 "explanation": json.dumps(explanation, ensure_ascii=False),
                 "url": article.url or "",
-                "content_preview": (article.text[:300] if article.text else ""),
+                "content_preview": (article.text[:2000] if article.text else ""),
                 "sources": json.dumps(article.sources) if article.sources else "[]",
                 "source_from": article.source_from or "",
             }
@@ -346,7 +346,7 @@ class NewsProcessor:
 
                 self.r.set(news_catalyst_flag(self.session_id, symbol), "1", ex=43200)
                 # Publish to pub/sub so SignalEngine can react in real-time
-                channel = catalyst_publish_channel(self.session_id, symbol)
+                channel = catalyst_channel(self.session_id)
                 self.r.publish(
                     channel,
                     json.dumps(

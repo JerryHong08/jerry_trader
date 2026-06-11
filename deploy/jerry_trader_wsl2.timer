@@ -1,0 +1,10 @@
+[Unit]
+Description=Start WSL2 backend at 4:00 ET daily
+
+[Timer]
+Unit=jerry_trader_wsl2.service
+OnCalendar=*-*-* 04:00 America/New_York
+Persistent=true
+
+[Install]
+WantedBy=timers.target

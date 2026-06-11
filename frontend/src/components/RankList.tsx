@@ -17,6 +17,8 @@ const DEFAULT_COLUMNS: RankListSortColumn[] = [
   'changePercent',
   'volume',
   'float',
+  'borrow_fee',
+  'available_shares',
   'relativeVolumeDaily',
   'relativeVolume5min',
   'marketCap',
@@ -33,6 +35,8 @@ const DEFAULT_COLUMN_WIDTHS: Record<string, number> = {
   'changePercent': 100,
   'volume': 90,
   'float': 90,
+  'borrow_fee': 90,
+  'available_shares': 110,
   'relativeVolumeDaily': 110,
   'relativeVolume5min': 110,
   'marketCap': 110,
@@ -48,6 +52,8 @@ const COLUMN_LABELS: Record<string, string> = {
   'changePercent': 'Change %',
   'volume': 'Volume',
   'float': 'Float',
+  'borrow_fee': 'Borrow %',
+  'available_shares': 'Avail Shares',
   'relativeVolumeDaily': 'Rel Vol (D)',
   'relativeVolume5min': 'Rel Vol (5m)',
   'marketCap': 'Market Cap',
@@ -495,6 +501,32 @@ export function RankList({ onRemove, selectedSymbol, onSymbolSelect, settings, o
           return <span className="text-zinc-600" title="No float data available">N/A</span>;
         }
         return <span className="text-zinc-400">{formatVolume(item.float)}</span>;
+
+      case 'borrow_fee':
+        if (item.borrow_fee === undefined) {
+          return <span className="text-zinc-500"><Loader2 className="w-3 h-3 animate-spin inline" /></span>;
+        }
+        if (item.borrow_fee === null) {
+          return <span className="text-zinc-600" title="No borrow fee data available">N/A</span>;
+        }
+        return (
+          <span className={item.borrow_fee > 0.5 ? 'text-red-400' : item.borrow_fee > 0.2 ? 'text-yellow-400' : 'text-zinc-400'}>
+            {(item.borrow_fee * 100).toFixed(1)}%
+          </span>
+        );
+
+      case 'available_shares':
+        if (item.available_shares === undefined) {
+          return <span className="text-zinc-500"><Loader2 className="w-3 h-3 animate-spin inline" /></span>;
+        }
+        if (item.available_shares === null) {
+          return <span className="text-zinc-600" title="No borrow data available">N/A</span>;
+        }
+        return (
+          <span className={item.available_shares === 0 ? 'text-red-400 font-bold' : 'text-zinc-400'}>
+            {item.available_shares === 0 ? '0 (SQUEEZE)' : formatVolume(item.available_shares)}
+          </span>
+        );
 
       case 'relativeVolumeDaily':
         return <span className="text-zinc-400">{item.relativeVolumeDaily?.toFixed(2) ?? '-'}x</span>;

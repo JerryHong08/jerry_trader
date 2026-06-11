@@ -84,7 +84,6 @@ class ReturnFiller:
         # Fetch events needing return computation
         events = self._fetch_pending_events(limit)
         if not events:
-            logger.debug("ReturnFiller: no pending events")
             return 0
 
         logger.info(f"ReturnFiller: processing {len(events)} events")

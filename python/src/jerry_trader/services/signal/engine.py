@@ -20,8 +20,10 @@ Usage:
 from __future__ import annotations
 
 import json
+import socket as _socket
 import threading
 import time
+import uuid as _uuid
 from typing import Any
 
 import redis
@@ -33,7 +35,9 @@ from jerry_trader.services.backtest.event_evaluator import (
     TickerState,
 )
 from jerry_trader.services.model_registry import get_model_registry
+from jerry_trader.shared.ids.redis_keys import news_processor_results_stream
 from jerry_trader.shared.logging.logger import setup_logger
+from jerry_trader.shared.time.timezone import ms_to_et, parse_to_et_datetime
 
 logger = setup_logger("signal_engine", log_to_file=True)
 
@@ -92,13 +96,18 @@ class SignalEngine:
         self._ticker_states: dict[str, TickerState] = {}
         self._states_lock = threading.Lock()
 
-        # Subscription state — one pubsub per unique Redis client
+        # Subscription state — worker threads from run_in_thread
         self._pubsubs: list[redis.client.PubSub] = []
+        self._pubsub_workers: list[redis.client.PubSubWorkerThread] = []
         self._thread: threading.Thread | None = None
         self._running = threading.Event()
+        self._reconnect_event = threading.Event()
 
         # Return fill background thread
         self._return_fill_thread: threading.Thread | None = None
+
+        # Catalyst stream consumer thread (replaces Pub/Sub for reliability)
+        self._catalyst_stream_thread: threading.Thread | None = None
 
         # Trigger dedup: prevent logging same trigger within cooldown period
         # Key: (event_name, symbol), Value: last_trigger_time_ms
@@ -182,6 +191,15 @@ class SignalEngine:
             daemon=True,
         )
         self._thread.start()
+
+        # Catalyst stream consumer (replaces Pub/Sub for reliability)
+        self._catalyst_stream_thread = threading.Thread(
+            target=self._catalyst_stream_loop,
+            name="signal-catalyst-stream",
+            daemon=True,
+        )
+        self._catalyst_stream_thread.start()
+
         logger.info("SignalEngine: started")
 
         # Start return fill background thread in live mode only.
@@ -204,15 +222,11 @@ class SignalEngine:
     def stop(self) -> None:
         """Stop the signal engine."""
         self._running.clear()
-        for ps in self._pubsubs:
-            try:
-                ps.punsubscribe()
-                ps.close()
-            except Exception:
-                pass
-        self._pubsubs.clear()
+        self._cleanup_pubsubs()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5.0)
+        if self._catalyst_stream_thread and self._catalyst_stream_thread.is_alive():
+            self._catalyst_stream_thread.join(timeout=3.0)
         if self._return_fill_thread and self._return_fill_thread.is_alive():
             self._return_fill_thread.join(timeout=5.0)
         logger.info(f"SignalEngine: stopped (triggers fired: {self._trigger_count})")
@@ -226,77 +240,270 @@ class SignalEngine:
 
         Each trigger source ("factors", "catalyst") subscribes to
         ``{source}:*`` on its own Redis client (from source_redis_clients,
-        falling back to self.redis_client). Pub/sub connections are
-        grouped by Redis client to minimise connections.
+        falling back to self.redis_client).
+
+        Uses redis-py 7.x callback pattern: registers a message handler
+        for each pattern and lets ``run_in_thread`` manage the read loop
+        with built-in health checks and reconnection.
         """
         # Resolve which sources to subscribe to.
-        # When subscriptions are explicitly configured, only subscribe to
-        # those sources. Otherwise subscribe to all on the main Redis.
+        # Catalyst is handled via Stream (persistent, auto-catchup), not Pub/Sub.
         if self._source_redis_clients:
-            source_types = list(self._source_redis_clients.keys())
+            source_types = [s for s in self._source_redis_clients if s != "catalyst"]
         else:
-            source_types = ["factors", "catalyst"]  # backward compat
+            source_types = ["factors"]
 
         # Group patterns by Redis client (dedup connections to the same Redis)
-        # redis_client → list of (source_type, pattern)
         groups: dict[int, list[tuple[str, str]]] = {}
         for src in source_types:
             rc = self._source_redis_clients.get(src, self.redis_client)
-            key = id(rc)
-            if key not in groups:
-                groups[key] = []
-            groups[key].append((src, f"{src}:*"))
+            groups.setdefault(id(rc), []).append((src, f"{src}:*"))
 
-        # Create one pubsub per unique Redis client
-        self._pubsubs = []
-        for rc_key, patterns in groups.items():
-            # Get the Redis client (any pattern's client works — same key = same rc)
-            rc = self._source_redis_clients.get(patterns[0][0], self.redis_client)
-            ps = rc.pubsub()
-            ps.psubscribe(*[p for _, p in patterns])
-            self._pubsubs.append(ps)
-            host = (
-                rc.get_connection_kwargs().get("host", "?")
-                if hasattr(rc, "get_connection_kwargs")
-                else "?"
+        if not groups:
+            logger.info(
+                "SignalEngine: no Pub/Sub sources configured (catalyst uses Stream)"
             )
-            src_names = [s for s, _ in patterns]
-            logger.info(f"SignalEngine: subscribed to {src_names} on Redis {host}")
-
-        if not self._pubsubs:
-            logger.warning("SignalEngine: no subscriptions configured")
             return
 
+        retry_delay = 1.0
         while self._running.is_set():
-            for ps in self._pubsubs:
-                try:
-                    message = ps.get_message(timeout=0.05)
-                    if message and message["type"] == "pmessage":
-                        self._route_message(message)
-                except redis.ConnectionError:
-                    logger.warning("SignalEngine: Redis connection lost")
-                    time.sleep(1.0)
-                except Exception as e:
-                    logger.error(f"SignalEngine: error in message loop - {e}")
+            # ── Create pubsub + worker threads ─────────────────────────
+            self._pubsubs = []
+            self._pubsub_workers = []
+            try:
+                for rc_key, patterns in groups.items():
+                    rc = self._source_redis_clients.get(
+                        patterns[0][0], self.redis_client
+                    )
+                    ps = rc.pubsub()
 
-        # Cleanup
+                    # Register pattern callbacks via psubscribe kwargs
+                    # redis-py 7.x dispatches pmessages to these callbacks
+                    # when run_in_thread() is active.
+                    pattern_map = {}
+                    for src_name, pattern in patterns:
+                        pattern_map[pattern] = self._make_handler(src_name)
+                    if pattern_map:
+                        ps.psubscribe(**pattern_map)
+
+                    # Start the worker thread (redis-py manages the read loop)
+                    worker = ps.run_in_thread(
+                        sleep_time=0.1,
+                        daemon=True,
+                        exception_handler=self._on_pubsub_error,
+                    )
+                    self._pubsubs.append(ps)
+                    self._pubsub_workers.append(worker)
+
+                    host = (
+                        rc.get_connection_kwargs().get("host", "?")
+                        if hasattr(rc, "get_connection_kwargs")
+                        else "?"
+                    )
+                    src_names = [s for s, _ in patterns]
+                    logger.info(
+                        f"SignalEngine: subscribed to {src_names} on Redis {host}"
+                    )
+                retry_delay = 1.0  # Reset on successful connection
+
+            except (redis.ConnectionError, redis.TimeoutError, OSError) as e:
+                logger.warning(
+                    f"SignalEngine: failed to connect (retry in {retry_delay:.1f}s): {e}"
+                )
+                self._cleanup_pubsubs()
+                self._running.wait(timeout=retry_delay)
+                retry_delay = min(retry_delay * 2, 60.0)
+                continue
+
+            # ── Wait while workers are alive ───────────────────────────
+            while self._running.is_set():
+                # Check if any worker thread died unexpectedly, or if a
+                # connection error forced a reconnect (subscriptions are
+                # lost on reconnect — redis-py doesn't re-issue PSUBSCRIBE).
+                all_alive = True
+                for w in self._pubsub_workers:
+                    if not w.is_alive():
+                        logger.warning(
+                            "SignalEngine: pubsub worker thread died, reconnecting..."
+                        )
+                        all_alive = False
+                        break
+                if not all_alive or self._reconnect_event.is_set():
+                    if self._reconnect_event.is_set():
+                        logger.warning(
+                            "SignalEngine: forced reconnect due to connection error"
+                        )
+                    self._reconnect_event.clear()
+                    self._cleanup_pubsubs()
+                    break
+                self._running.wait(timeout=1.0)
+
+        self._cleanup_pubsubs()
+
+    def _make_handler(self, source_name: str):
+        """Return a callback that routes pmessages to _route_message.
+
+        redis-py 7.x passes the message dict directly to the callback.
+        """
+
+        def handler(message: dict[str, Any]) -> None:
+            logger.debug(
+                f"SignalEngine: [{source_name}] received message "
+                f"channel={message.get('channel', '?')}"
+            )
+            self._route_message(message)
+
+        return handler
+
+    def _on_pubsub_error(
+        self,
+        error: Exception,
+        pubsub: redis.client.PubSub,
+        worker: redis.client.PubSubWorkerThread,
+    ) -> None:
+        """Exception handler for PubSubWorkerThread.
+
+        Only logs when the engine is still running — errors during shutdown
+        (e.g. closed socket) are expected and ignored.
+        """
+        if self._running.is_set():
+            logger.warning(f"SignalEngine: pubsub worker error (will retry): {error}")
+            # redis-py reconnects the socket on connection errors but does
+            # NOT re-issue PSUBSCRIBE — the subscription is lost server-side.
+            # Signal the monitoring loop to force a full reconnect cycle.
+            self._reconnect_event.set()
+
+    def _cleanup_pubsubs(self) -> None:
+        """Stop all worker threads and close pubsub connections."""
+        for w in self._pubsub_workers:
+            try:
+                w.stop()
+                w.join(timeout=2.0)
+            except Exception:
+                pass
+        self._pubsub_workers.clear()
         for ps in self._pubsubs:
             try:
-                ps.punsubscribe()
                 ps.close()
             except Exception:
                 pass
         self._pubsubs.clear()
 
+    @staticmethod
+    def _normalize_pubsub_message(message: dict) -> dict[str, Any]:
+        """Convert pubsub message keys from bytes to str.
+
+        When the Redis client has ``decode_responses=False`` (the default),
+        pubsub message dicts use bytes keys (``b"channel"``, ``b"data"``).
+        Normalize them to string keys so downstream handlers work uniformly.
+        """
+        if isinstance(next(iter(message.keys())), bytes):
+            return {
+                k.decode() if isinstance(k, bytes) else k: (
+                    v.decode() if isinstance(v, bytes) else v
+                )
+                for k, v in message.items()
+            }
+        return message
+
     def _route_message(self, message: dict[str, Any]) -> None:
         """Route a pmessage to the correct handler based on channel prefix."""
-        channel = message.get("channel", b"")
-        if isinstance(channel, bytes):
-            channel = channel.decode()
+        msg = self._normalize_pubsub_message(message)
+        channel = msg.get("channel", "")
+        logger.debug(f"SignalEngine: routing message channel={channel}")
         if channel.startswith("catalyst:"):
-            self._handle_catalyst_message(message)
+            logger.info(f"SignalEngine: routing to catalyst handler channel={channel}")
+            self._handle_catalyst_message(msg)
         else:
-            self._process_message(message)
+            self._process_message(msg)
+
+    def _catalyst_stream_loop(self) -> None:
+        """Background thread: consume catalyst results from Redis Stream.
+
+        Uses a consumer group on ``news_processor_results_stream`` so that
+        after any disconnection we resume from the last acknowledged position
+        — no messages are lost.  This replaces Pub/Sub for catalyst delivery.
+        """
+        rc = self._source_redis_clients.get("catalyst")
+        if rc is None:
+            logger.warning(
+                "SignalEngine: no catalyst Redis client, catalyst stream disabled"
+            )
+            return
+
+        stream_key = news_processor_results_stream(self._session_id)
+        consumer_group = f"signal_engine_{_socket.gethostname()}"
+        consumer_name = f"{consumer_group}_{_uuid.uuid4().hex[:8]}"
+
+        # Create consumer group (idempotent)
+        try:
+            rc.xgroup_create(stream_key, consumer_group, id="0", mkstream=True)
+        except redis.exceptions.ResponseError as e:
+            if "BUSYGROUP" not in str(e):
+                raise
+
+        logger.info(
+            f"SignalEngine: catalyst stream consumer started "
+            f"group={consumer_group} stream={stream_key}"
+        )
+
+        retry_delay = 1.0
+        while self._running.is_set():
+            try:
+                messages = rc.xreadgroup(
+                    consumer_group,
+                    consumer_name,
+                    {stream_key: ">"},
+                    count=20,
+                    block=1000,
+                )
+                retry_delay = 1.0  # Reset on success
+
+                if messages:
+                    for _, entries in messages:
+                        for msg_id, msg_data in entries:
+                            if msg_data.get("is_catalyst") != "true":
+                                rc.xack(stream_key, consumer_group, msg_id)
+                                continue
+
+                            # Build data dict matching pub/sub payload format
+                            data: dict[str, Any] = {
+                                "symbol": msg_data.get("symbol", ""),
+                                "classification": msg_data.get("classification", ""),
+                                "score": msg_data.get("score", ""),
+                                "title": msg_data.get("title", ""),
+                                "url": msg_data.get("url", ""),
+                                "content_preview": msg_data.get("content_preview", ""),
+                                "source_from": msg_data.get("source_from", ""),
+                                "published_time": msg_data.get("published_time", ""),
+                            }
+                            # current_time = NewsProcessor processing time
+                            current_time = msg_data.get("current_time", "")
+                            data["current_time"] = current_time
+                            if current_time:
+                                try:
+                                    from datetime import datetime
+
+                                    dt = datetime.fromisoformat(str(current_time))
+                                    data["timestamp_ms"] = int(dt.timestamp() * 1000)
+                                except (ValueError, TypeError):
+                                    data["timestamp_ms"] = int(time.time() * 1000)
+                            else:
+                                data["timestamp_ms"] = int(time.time() * 1000)
+
+                            self._handle_catalyst_data(data)
+                            rc.xack(stream_key, consumer_group, msg_id)
+
+            except (redis.ConnectionError, redis.TimeoutError, OSError) as e:
+                logger.warning(
+                    f"SignalEngine: catalyst stream connection error "
+                    f"(retry in {retry_delay:.1f}s): {e}"
+                )
+                self._running.wait(timeout=retry_delay)
+                retry_delay = min(retry_delay * 2, 60.0)
+            except Exception as e:
+                logger.error(f"SignalEngine: catalyst stream error: {e}")
+                self._running.wait(timeout=1.0)
 
     def _return_fill_loop(self) -> None:
         """Background thread: periodically run ReturnFiller to backfill returns."""
@@ -345,27 +552,54 @@ class SignalEngine:
         self._evaluate_events(symbol, timeframe, factors, timestamp_ms, price)
 
     def _handle_catalyst_message(self, message: dict[str, Any]) -> None:
-        """Handle a catalyst pub/sub message from NewsProcessor.
-
-        Fires CATALYST-trigger events directly — no factor data needed.
-        Each catalyst message maps to one _on_trigger call per matching event.
-
-        Passes news metadata (title, classification, score) as extra context
-        so notification emails can include full news details.
-        """
+        """Handle a catalyst pub/sub message (legacy path)."""
         try:
             data = json.loads(message["data"])
         except (json.JSONDecodeError, TypeError):
             return
+        self._handle_catalyst_data(data)
 
+    def _handle_catalyst_data(self, data: dict[str, Any]) -> None:
+        """Process catalyst data from any source (Pub/Sub or Stream).
+
+        Fires CATALYST-trigger events directly — no factor data needed.
+        Passes news metadata (title, classification, score) as extra context
+        so notification emails can include full news details.
+        """
         symbol = data.get("symbol", "").upper()
         if not symbol:
             return
+
+        ts_ms = data.get("timestamp_ms", 0)
+        ts_str = ms_to_et(ts_ms) if ts_ms else "N/A"
+        title = data.get("title", "")[:60]
+        score = data.get("score", "")
+        logger.info(f'SignalEngine: catalyst {symbol} {score} "{title}" ts={ts_str}')
 
         timestamp_ms = data.get("timestamp_ms", int(time.time() * 1000))
 
         if self._evaluator is None:
             return
+
+        # Format timestamps as ET for human-readable display
+        published_et = ""
+        fetched_et = ""
+        try:
+            published_raw = data.get("published_time", "")
+            if published_raw:
+                published_et = parse_to_et_datetime(published_raw).strftime(
+                    "%Y-%m-%d %H:%M ET"
+                )
+        except Exception:
+            pass
+        try:
+            current_raw = data.get("current_time", "")
+            if current_raw:
+                fetched_et = parse_to_et_datetime(current_raw).strftime(
+                    "%Y-%m-%d %H:%M ET"
+                )
+        except Exception:
+            pass
 
         # Build extra context with news details for notification templates
         extra: dict[str, Any] = {
@@ -375,12 +609,14 @@ class SignalEngine:
             "catalyst_url": data.get("url", ""),
             "catalyst_content": data.get("content_preview", ""),
             "catalyst_source": data.get("source_from", ""),
+            "catalyst_published_time": published_et,
+            "catalyst_fetched_time": fetched_et,
         }
 
-        # Find events with CATALYST trigger and fire _on_trigger
-        for event in self._evaluator.events:
-            if event.trigger != TriggerType.CATALYST:
-                continue
+        catalyst_events = [
+            e for e in self._evaluator.events if e.trigger == TriggerType.CATALYST
+        ]
+        for event in catalyst_events:
 
             # Cooldown check
             cooldown_key = (event.name, symbol)
@@ -488,34 +724,28 @@ class SignalEngine:
             ml_result: ML evaluation result (for ML-based events)
             extra: Additional context (e.g., catalyst news details)
         """
-        # Build log message — include extra context for catalyst events
-        parts = [f"event={event.name}", f"symbol={symbol}", f"tf={timeframe}"]
+        # Build concise trigger log — full details are in the notification log
+        fields = [f"event={event.name}", f"symbol={symbol}"]
         if extra:
-            title = extra.get("catalyst_title", "")
-            classification = extra.get("catalyst_classification", "")
             score = extra.get("catalyst_score_raw", "")
-            if title:
-                parts.append(f"title={title[:80]}")
-            if classification:
-                parts.append(f"classification={classification}")
             if score:
-                parts.append(f"score={score}")
-
-        factor_summary = ", ".join(f"{k}={v:.4f}" for k, v in factors.items())
-        log_msg = (
-            f"SIGNAL TRIGGERED: {' '.join(parts)} "
-            f"ts={timestamp_ms} stage={event.stage.value} "
-            f"factors=[{factor_summary}]"
-        )
-
-        # Add ML info if available
+                fields.append(f"score={score}")
+            classification = extra.get("catalyst_classification", "")
+            if classification:
+                fields.append(f"class={classification}")
+            title = extra.get("catalyst_title", "")
+            if title:
+                fields.append(f"title={title}")
+        fields.append(f"ts={ms_to_et(timestamp_ms)}")
+        if price is not None:
+            fields.append(f"price={price:.4f}")
         if ml_result is not None:
-            log_msg += (
-                f" expected_return={ml_result.expected_return:.2%} "
-                f"confidence={ml_result.confidence:.2f}"
+            fields.append(
+                f"exp_ret={ml_result.expected_return:.2%} "
+                f"conf={ml_result.confidence:.2f}"
             )
 
-        logger.info(log_msg)
+        logger.info("SIGNAL TRIGGERED: " + " | ".join(fields))
 
         # Persist to ClickHouse via SignalStorage
         if self._storage:

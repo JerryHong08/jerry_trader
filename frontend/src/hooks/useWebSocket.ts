@@ -465,7 +465,10 @@ let wsInstance: WebSocket | null = null;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 10;
 const RECONNECT_DELAY = 1000;
+const MAX_RECONNECT_DELAY = 30000;
+const STABLE_RESET_DELAY = 30000; // reset attempts after 30s of stable connection
 let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+let reconnectStableTimer: ReturnType<typeof setTimeout> | null = null;
 
 // Message queue for messages sent while connecting
 let messageQueue: WebSocketMessage[] = [];
@@ -861,7 +864,12 @@ function getWebSocket(): WebSocket | null {
     wsInstance.onopen = () => {
       console.log('[WebSocket] Connected to BFF');
       useMarketDataStore.getState().setConnectionStatus('connected');
-      reconnectAttempts = 0;
+      // Decay reconnect attempts after stable connection, not immediately.
+      // If the connection drops again within STABLE_RESET_DELAY, backoff continues.
+      if (reconnectStableTimer) clearTimeout(reconnectStableTimer);
+      reconnectStableTimer = setTimeout(() => {
+        reconnectAttempts = 0;
+      }, STABLE_RESET_DELAY);
 
       // Subscribe to market snapshot updates
       sendMessage({ type: 'subscribe_market_snapshot', payload: {} });
@@ -880,16 +888,21 @@ function getWebSocket(): WebSocket | null {
       console.log('[WebSocket] Disconnected:', event.code, event.reason);
       useMarketDataStore.getState().setConnectionStatus('disconnected');
       wsInstance = null;
+      if (reconnectStableTimer) {
+        clearTimeout(reconnectStableTimer);
+        reconnectStableTimer = null;
+      }
 
-      // Auto-reconnect
+      // Auto-reconnect with capped exponential backoff
       if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
         reconnectAttempts++;
+        const delay = Math.min(RECONNECT_DELAY * reconnectAttempts, MAX_RECONNECT_DELAY);
         console.log(
-          `[WebSocket] Reconnecting in ${RECONNECT_DELAY}ms (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`
+          `[WebSocket] Reconnecting in ${delay}ms (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`
         );
         reconnectTimeout = setTimeout(() => {
           getWebSocket();
-        }, RECONNECT_DELAY * reconnectAttempts);
+        }, delay);
       }
     };
 
@@ -1287,6 +1300,10 @@ export function disconnectSocket() {
   if (reconnectTimeout) {
     clearTimeout(reconnectTimeout);
     reconnectTimeout = null;
+  }
+  if (reconnectStableTimer) {
+    clearTimeout(reconnectStableTimer);
+    reconnectStableTimer = null;
   }
   if (wsInstance) {
     wsInstance.close();

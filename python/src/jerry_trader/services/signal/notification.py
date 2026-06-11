@@ -6,6 +6,7 @@ Checks extra conditions, catalyst flag, and per-event cooldown before sending.
 
 from __future__ import annotations
 
+import json
 import os
 import smtplib
 import time
@@ -111,8 +112,11 @@ class NotificationManager:
     def _fetch_market_data(self, symbol: str) -> dict[str, str]:
         """Fetch latest market data (price, change%, volume) from snapshot stream.
 
-        Uses XREVRANGE on market_snapshot_processed stream to find the most
-        recent entry for *symbol*. Falls back to empty dict on any error.
+        The stream stores entries as ``{timestamp, data: "[{symbol, price, ...}]"}``
+        where ``data`` is a JSON array of per-ticker snapshot objects.
+
+        Uses XREVRANGE to scan recent entries for the matching symbol.
+        Falls back to empty dict on any error.
         """
         if not self._market_redis:
             return {}
@@ -126,27 +130,52 @@ class NotificationManager:
                 return {}
 
             for _, entry in results:
-                # Handle both bytes and str keys (depends on decode_responses)
-                entry_symbol = entry.get("symbol", entry.get(b"symbol", b""))
-                if isinstance(entry_symbol, bytes):
-                    entry_symbol = entry_symbol.decode()
-                if entry_symbol.upper() != symbol.upper():
+                # The entry has "timestamp" and "data" fields.
+                # "data" is a JSON array of snapshot objects.
+                raw_data = entry.get("data", entry.get(b"data", b""))
+                if isinstance(raw_data, bytes):
+                    raw_data = raw_data.decode()
+                if not raw_data:
                     continue
 
-                def _val(key: str) -> str:
-                    v = entry.get(key, entry.get(key.encode(), b""))
-                    if isinstance(v, bytes):
-                        v = v.decode()
-                    return v
+                try:
+                    snapshots = json.loads(raw_data)
+                except (json.JSONDecodeError, TypeError):
+                    continue
 
-                return {
-                    "price": _val("price"),
-                    "change_pct": _val("changePercent"),
-                    "volume": _val("volume"),
-                }
+                for snap in snapshots:
+                    snap_symbol = str(snap.get("symbol", "")).upper()
+                    if snap_symbol != symbol.upper():
+                        continue
+
+                    def _val(key: str) -> str:
+                        v = snap.get(key, "")
+                        return str(v) if v is not None else ""
+
+                    return {
+                        "price": _val("price"),
+                        "change_pct": _val("changePercent"),
+                        "volume": _val("volume"),
+                    }
         except Exception:
             pass
         return {}
+
+    @staticmethod
+    def _fmt_human(value: str) -> str:
+        """Convert raw number string to human-readable (26257615 → 26.26M)."""
+        try:
+            n = float(value)
+        except (ValueError, TypeError):
+            return value
+        if abs(n) >= 1_000_000_000:
+            return f"{n/1_000_000_000:.2f}B"
+        elif abs(n) >= 1_000_000:
+            return f"{n/1_000_000:.2f}M"
+        elif abs(n) >= 1_000:
+            return f"{n/1_000:.2f}K"
+        else:
+            return f"{n:.2f}"
 
     def _check_cooldown(self, event_name: str, symbol: str, cooldown_sec: int) -> bool:
         last = self._last_sent.get((event_name, symbol), 0)
@@ -192,7 +221,15 @@ class NotificationManager:
                 smtp.login(from_addr, password)
                 smtp.send_message(msg)
 
-            logger.info(f"Notification sent: event={event_name} symbol={symbol}")
+            # Log the full email content as one block (like NewsProcessor)
+            sep = "=" * 50
+            logger.info(
+                f"\n{sep}\n"
+                f"Notification sent: {event_name} / {symbol}\n"
+                f"Subject: {subject}\n"
+                f"{body}"
+                f"{sep}"
+            )
             return True
 
         except Exception as e:
@@ -221,8 +258,14 @@ class NotificationManager:
             "timeframe": timeframe,
             "price": f"{price:.4f}" if price is not None else "N/A",
             "factors": ", ".join(f"{k}={v:.4f}" for k, v in factors.items()),
-            **static_data,
+            # Defaults for optional fields — overridden if available
+            "change_pct": "N/A",
+            "volume": "N/A",
+            "float": "N/A",
+            "marketCap": "N/A",
+            "sector": "N/A",
         }
+        vars.update(static_data)
         vars.update(factors)
 
         # Merge extra context (catalyst news details, etc.)
@@ -233,6 +276,27 @@ class NotificationManager:
         market_data = self._fetch_market_data(symbol)
         if market_data:
             vars.update(market_data)
+
+        # Format numeric fields as human-readable
+        for key in ("float", "marketCap", "volume"):
+            raw = vars.get(key, "N/A")
+            if raw and raw != "N/A":
+                vars[key] = self._fmt_human(str(raw))
+        # Round change_pct to 2 decimal places
+        change = vars.get("change_pct", "N/A")
+        if change and change != "N/A":
+            try:
+                vars["change_pct"] = f"{float(change):.2f}"
+            except (ValueError, TypeError):
+                pass
+
+        # Format borrow_fee from decimal (0.35) to percentage (35.00%)
+        borrow_fee = vars.get("borrow_fee", "N/A")
+        if borrow_fee and borrow_fee != "N/A":
+            try:
+                vars["borrow_fee"] = f"{float(borrow_fee) * 100:.2f}%"
+            except (ValueError, TypeError):
+                pass
 
         if ml_result is not None:
             vars["ml_expected_return"] = getattr(ml_result, "expected_return", "N/A")

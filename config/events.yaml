@@ -97,6 +97,8 @@ events:
         Classification: {catalyst_classification} ({catalyst_score_raw})
         Price: {price} | Change: {change_pct}% | Volume: {volume}
         Float: {float} | MarketCap: {marketCap} | Sector: {sector}
+        Borrow: {borrow_fee} fee | {available_shares} shares available
+        {squeeze_note}
         Published: {catalyst_published_time}
         Processed: {catalyst_fetched_time}
         URL: {catalyst_url}

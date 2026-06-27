@@ -80,6 +80,7 @@ class JerryTraderBackendStarter:
         self.suffix_id = config.get("suffix_id")
         self.load_history = config.get("load_history")
         self.limit = config.get("limit")  # market_open | market_close | None
+        self.check_trading_day = config.get("check_trading_day", True)
         # Global preload list (used only when manager_type == "synced-replayer")
         self.preload_tickers = config.get("preload_tickers", [])
 
@@ -704,6 +705,7 @@ class JerryTraderBackendStarter:
             notifications_cfg = role_cfg.get("notifications", {})
             if notifications_cfg.get("enabled", True):
                 from jerry_trader.services.signal.notification import (
+                    DiagnosisConfig,
                     NotificationManager,
                     SMTPConfig,
                 )
@@ -750,17 +752,49 @@ class JerryTraderBackendStarter:
                         f"{market_redis_cfg.get('host')}:{market_redis_cfg.get('port')}"
                     )
 
+                # ── Catalyst auto-diagnosis config ────────────────────────
+                diag_cfg = notifications_cfg.get("diagnosis", {})
+                diagnosis = DiagnosisConfig(
+                    enabled=diag_cfg.get("enabled", False),
+                    cli_path=diag_cfg.get("cli_path", "claude"),
+                    timeout_sec=diag_cfg.get("timeout_sec", 90),
+                    bare_mode=diag_cfg.get("bare_mode", True),
+                )
+                if diagnosis.enabled:
+                    logger.info(
+                        f"NotificationManager: diagnosis enabled "
+                        f"(cli={diagnosis.cli_path}, "
+                        f"timeout={diagnosis.timeout_sec}s, "
+                        f"bare={diagnosis.bare_mode})"
+                    )
+
                 notif_manager = NotificationManager(
                     redis_client=notif_redis,
                     session_id=self.session_id,
                     smtp_config=smtp,
                     market_redis=market_redis,
+                    diagnosis_config=diagnosis,
                 )
                 self.signal_engine._notification_manager = notif_manager
                 logger.info(f"NotificationManager wired: smtp={smtp.host}:{smtp.port}")
             self._services.append(("SignalEngine", self.signal_engine))
         else:
             self.signal_engine = None
+
+        if "AnalysisBFF" in self.roles:
+            from jerry_trader.apps.analysis_app.server import AnalysisBFF
+
+            role_cfg = self.roles["AnalysisBFF"]
+            self.analysis_bff = AnalysisBFF(
+                host=role_cfg.get("host", "0.0.0.0"),
+                port=role_cfg.get("port", 5006),
+                session_id=self.session_id,
+                redis_config=role_cfg.get("redis"),
+                clickhouse_config=role_cfg.get("clickhouse"),
+            )
+            self._services.append(("AnalysisBFF", self.analysis_bff))
+        else:
+            self.analysis_bff = None
 
         logger.info(f"Initialized {len(self._services)} services")
 
@@ -861,6 +895,8 @@ class JerryTraderBackendStarter:
 
         if self.agent_bff:
             self.agent_bff.cleanup()
+        if self.analysis_bff:
+            self.analysis_bff.cleanup()
 
         logger.info("All services cleaned up")
 
@@ -955,8 +991,8 @@ class JerryTraderBackendStarter:
         logger.info(f"Limit: {self.limit or 'None (never auto-stop)'}")
         logger.info("=" * 70)
 
-        # Check if it's a trading day (only in live mode)
-        if not self.replay_date:
+        # Check if it's a trading day (skip for offline / non-market machines)
+        if self.check_trading_day and not self.replay_date:
             if not self.is_trading_day_today():
                 logger.info("🚫 Not a trading day in live mode. Exiting.")
                 return
@@ -1241,6 +1277,19 @@ class JerryTraderBackendStarter:
             agent_bff_thread.start()
             self._threads.append(agent_bff_thread)
             logger.info("AgentBFF started")
+
+        # Start AnalysisBFF in separate thread if enabled
+        if self.analysis_bff:
+
+            def run_analysis_bff():
+                self.analysis_bff.run()
+
+            analysis_bff_thread = Thread(
+                target=run_analysis_bff, daemon=True, name="AnalysisBFF"
+            )
+            analysis_bff_thread.start()
+            self._threads.append(analysis_bff_thread)
+            logger.info("AnalysisBFF started")
 
         # Start SignalEngine if enabled (it creates its own background thread)
         if self.signal_engine:

@@ -144,8 +144,9 @@ def build_runtime_config(
     # Start with defaults (these become top-level in runtime config)
     runtime = copy.deepcopy(yaml_cfg.get("defaults", {}))
 
-    # Add machine-level limit (market_open | market_close | null)
+    # Add machine-level settings
     runtime["limit"] = machine_cfg.get("limit", None)
+    runtime["check_trading_day"] = machine_cfg.get("check_trading_day", True)
 
     # Add LLM config
     runtime["llm"] = copy.deepcopy(yaml_cfg.get("llm", {}))

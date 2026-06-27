@@ -129,6 +129,16 @@ machines:
           # XREVRANGE on market_snapshot_processed stream.
           # Omit if market data is unavailable.
           market_data_redis: "redis-b@MIBUNTU"
+
+          # ── Catalyst auto-diagnosis ──────────────────────────────────────
+          # After a catalyst email is sent, spawns ``claude -p`` headless to
+          # run /micro-cap-diagnosis with web search.  The structured verdict
+          # arrives as a threaded reply ~30-60 seconds later.
+          diagnosis:
+            enabled: true
+            cli_path: "claude"
+            timeout_sec: 300
+            bare_mode: true
       # JerryTraderBFF:
       #   enabled: true
       #   host: "0.0.0.0"
@@ -165,6 +175,7 @@ machines:
         enabled: true
         redis: "redis-a"
         postgres: "postgres-a"
+        clickhouse: "clickhouse-a"
       NewsWorker:
         enabled: true
         poll_interval: 1.0
@@ -213,6 +224,16 @@ machines:
       #   end_time: null      # HHMMSS
       #   redis: "redis-b"
       #   clickhouse: "clickhouse-a"
+
+  offline:
+    limit: null  # offline analysis runs on demand, no time limit
+    check_trading_day: false  # offline analysis runs any day
+    roles:
+      AnalysisBFF:
+        enabled: true
+        host: "0.0.0.0"
+        port: 5006
+        clickhouse: "clickhouse-a@MIBUNTU"  # news_classifications + market_snapshot on mibuntu
 
   collector:
     limit: "market_open"     # collector only runs premarket

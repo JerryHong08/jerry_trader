@@ -9,6 +9,7 @@ import { BacktestChartModule } from '../components/BacktestChartModule';
 import { BacktestConfigModule } from '../components/BacktestConfigModule';
 import { BacktestResultsModule } from '../components/BacktestResultsModule';
 import LabelingModule from '../components/LabelingModule';
+import AnalysisModule from '../components/AnalysisModule';
 import type { ModuleConfig, ModuleType } from '../types';
 
 export const moduleRegistry: Record<ModuleType, ModuleConfig> = {
@@ -100,6 +101,14 @@ export const moduleRegistry: Record<ModuleType, ModuleConfig> = {
     description: 'Label premarket momentum candidates with price chart, ignition markers, and keyboard shortcuts',
     component: LabelingModule,
     defaultSize: { width: 1200, height: 800 },
+    supportSync: false,
+  },
+  'analysis': {
+    type: 'analysis',
+    name: 'Classifier Trace',
+    description: 'LLM news classifier performance — max return distribution, false negatives, top movers',
+    component: AnalysisModule,
+    defaultSize: { width: 800, height: 500 },
     supportSync: false,
   },
 };

@@ -96,6 +96,7 @@ class NewsProcessor:
         llm_config: Optional[Dict[str, Any]] = None,
         redis_config: Optional[Dict[str, Any]] = None,
         postgres_config: Optional[Dict[str, Any]] = None,
+        clickhouse_config: Optional[Dict[str, Any]] = None,
     ):
         self.active_model = (
             llm_config.get("active_model", "deepseek") if llm_config else "deepseek"
@@ -204,6 +205,10 @@ class NewsProcessor:
         self._json_entries = []
         self._json_lock = asyncio.Lock()  # Protect JSON operations from race conditions
 
+        # ClickHouse (optional — writes classifications for offline analysis)
+        self._ch_config = clickhouse_config
+        self._ch_client = None  # lazy-init per thread
+
     def _get_symbol_lock(self, symbol: str) -> asyncio.Lock:
         if symbol not in self._symbol_locks:
             self._symbol_locks[symbol] = asyncio.Lock()
@@ -297,6 +302,95 @@ class NewsProcessor:
             # Re-add entries on failure
             async with self._json_lock:
                 self._json_entries.extend(entries_to_write)
+
+    async def _write_to_clickhouse(
+        self,
+        symbol: str,
+        result: NewsClassificationResult,
+        article: NewsArticle,
+        timestamp: str,
+    ) -> None:
+        """Write a classification result to ClickHouse (best-effort, non-blocking)."""
+        if not self._ch_config:
+            return
+
+        try:
+            if self._ch_client is None:
+                from jerry_trader.platform.storage.clickhouse import get_clickhouse_client
+
+                self._ch_client = get_clickhouse_client(self._ch_config)
+                if self._ch_client is None:
+                    logger.warning("NewsProcessor: ClickHouse unavailable, skipping write")
+                    self._ch_config = None  # don't retry
+                    return
+
+            import uuid as _uuid
+            from datetime import timezone as _tz
+
+            # Parse times
+            pub_ts = None
+            if article.published_time:
+                pub_ts = article.published_time
+                if pub_ts.tzinfo is None:
+                    pub_ts = pub_ts.replace(tzinfo=_tz.utc)
+
+            cur_ts = None
+            if timestamp:
+                try:
+                    from datetime import datetime as _dt
+                    ts_str = timestamp
+                    if ts_str.endswith("-04:00") or ts_str.endswith("-05:00"):
+                        cur_ts = _dt.fromisoformat(ts_str)
+                    else:
+                        cur_ts = _dt.fromisoformat(ts_str.replace("Z", "+00:00"))
+                except Exception:
+                    pass
+
+            score_str = result.score or "0/10"
+            try:
+                score_num = int(score_str.split("/")[0])
+            except (ValueError, IndexError):
+                score_num = 0
+
+            explanation_str = None
+            if result.explanation:
+                import json as _json
+                if isinstance(result.explanation, dict):
+                    explanation_str = _json.dumps(result.explanation)
+                else:
+                    explanation_str = str(result.explanation)
+
+            row = [
+                str(_uuid.uuid4()),
+                symbol.upper(),
+                self.session_id,
+                cur_ts,
+                pub_ts,
+                1 if result.is_catalyst else 0,
+                score_str,
+                score_num,
+                article.title or "",
+                article.url or "",
+                article.source_from or "",
+                (article.text or "")[:200],
+                self.active_model,
+                explanation_str,
+            ]
+
+            self._ch_client.insert(
+                "jerry_trader.news_classifications",
+                data=[row],
+                column_names=[
+                    "id", "symbol", "session_id", "current_time", "published_time",
+                    "is_catalyst", "score", "score_num",
+                    "title", "url", "source_from", "content_preview",
+                    "model", "explanation",
+                ],
+            )
+            logger.debug(f"ClickHouse: wrote classification for {symbol}")
+
+        except Exception as e:
+            logger.error(f"Failed to write classification to ClickHouse: {e}")
 
     async def _publish_result_to_stream(
         self,
@@ -674,6 +768,7 @@ class NewsProcessor:
                     f"Current Time: {task.timestamp}\n"
                     f"Explanation: {result.explanation}\n"
                     f"Url: {task.article.url}\n"
+                    f"Source From: {task.article.source_from or 'unknown'}\n"
                     f"Content: {task.article.text[:200]}\n"
                 )
                 if reasoning:
@@ -687,6 +782,11 @@ class NewsProcessor:
 
                 # Publish to stream for real-time consumption by BFF/Frontend
                 await self._publish_result_to_stream(
+                    task.symbol, result, task.article, task.timestamp
+                )
+
+                # Write to ClickHouse for offline analysis (best-effort)
+                await self._write_to_clickhouse(
                     task.symbol, result, task.article, task.timestamp
                 )
             else:

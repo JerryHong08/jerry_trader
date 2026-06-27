@@ -1,0 +1,7 @@
+# Network resilience for CI: retry transient crates.io failures
+[net]
+retry = 10
+
+# Use sparse protocol — faster and more reliable than git-based index
+[registries.crates-io]
+protocol = "sparse"
